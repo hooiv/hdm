@@ -69,8 +69,147 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     }
 });
 
-// Initialize
+// Create context menu
 chrome.runtime.onInstalled.addListener(() => {
     chrome.storage.local.set({ enabled: true });
+
+    // Context menu for downloading links
+    chrome.contextMenus.create({
+        id: 'download-link',
+        title: 'Download with HyperStream',
+        contexts: ['link']
+    });
+
+    // Context menu for downloading all links on page
+    chrome.contextMenus.create({
+        id: 'download-all-links',
+        title: 'Download all links with HyperStream',
+        contexts: ['page']
+    });
+
+    // Context menu for videos
+    chrome.contextMenus.create({
+        id: 'download-video',
+        title: 'Download video with HyperStream',
+        contexts: ['video']
+    });
+
+    // Context menu for images
+    chrome.contextMenus.create({
+        id: 'download-image',
+        title: 'Download image with HyperStream',
+        contexts: ['image']
+    });
+
     console.log('HyperStream extension installed');
+});
+
+// Handle context menu clicks
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+    const connected = await checkConnection();
+
+    if (!connected) {
+        console.log('HyperStream is not running');
+        return;
+    }
+
+    switch (info.menuItemId) {
+        case 'download-link':
+            if (info.linkUrl) {
+                const filename = info.linkUrl.split('/').pop()?.split('?')[0] || 'download';
+                await sendToHyperStream(info.linkUrl, filename);
+                showBadge('✓');
+            }
+            break;
+
+        case 'download-video':
+            if (info.srcUrl) {
+                const filename = info.srcUrl.split('/').pop()?.split('?')[0] || 'video.mp4';
+                await sendToHyperStream(info.srcUrl, filename);
+                showBadge('✓');
+            }
+            break;
+
+        case 'download-image':
+            if (info.srcUrl) {
+                const filename = info.srcUrl.split('/').pop()?.split('?')[0] || 'image.jpg';
+                await sendToHyperStream(info.srcUrl, filename);
+                showBadge('✓');
+            }
+            break;
+
+        case 'download-all-links':
+            // Inject script to gather all links
+            chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                function: gatherDownloadableLinks
+            }).then(async (results) => {
+                if (results && results[0] && results[0].result) {
+                    const links = results[0].result;
+                    console.log(`Found ${links.length} downloadable links`);
+
+                    // Send all links to HyperStream
+                    for (const link of links) {
+                        await sendToHyperStream(link.url, link.filename);
+                    }
+
+                    showBadge(links.length.toString());
+                }
+            });
+            break;
+    }
+});
+
+// Function to gather downloadable links (injected into page)
+function gatherDownloadableLinks() {
+    const downloadExtensions = [
+        'zip', 'rar', '7z', 'tar', 'gz',
+        'exe', 'msi', 'dmg', 'pkg',
+        'pdf', 'doc', 'docx', 'xls', 'xlsx',
+        'mp4', 'mkv', 'avi', 'mov', 'webm',
+        'mp3', 'flac', 'wav', 'aac',
+        'iso', 'img'
+    ];
+
+    const links = document.querySelectorAll('a[href]');
+    const downloadableLinks = [];
+
+    for (const link of links) {
+        const href = link.href;
+        if (!href || href.startsWith('javascript:') || href.startsWith('#')) continue;
+
+        const url = new URL(href, window.location.origin);
+        const filename = url.pathname.split('/').pop() || 'download';
+        const ext = filename.split('.').pop()?.toLowerCase();
+
+        if (ext && downloadExtensions.includes(ext)) {
+            downloadableLinks.push({
+                url: href,
+                filename: filename
+            });
+        }
+    }
+
+    return downloadableLinks;
+}
+
+// Show badge helper
+function showBadge(text) {
+    chrome.action.setBadgeText({ text });
+    chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
+    setTimeout(() => chrome.action.setBadgeText({ text: '' }), 2000);
+}
+
+// Listen for messages from content script
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'download') {
+        sendToHyperStream(message.url, message.filename)
+            .then(result => sendResponse(result));
+        return true; // Keep message channel open for async response
+    }
+
+    if (message.action === 'checkConnection') {
+        checkConnection().then(connected => sendResponse({ connected }));
+        return true;
+    }
 });

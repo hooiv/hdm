@@ -5,14 +5,32 @@
     "description": "Intercept downloads and send them to HyperStream for accelerated downloading",
     "permissions": [
         "downloads",
-        "storage"
+        "storage",
+        "activeTab",
+        "scripting",
+        "contextMenus"
     ],
     "host_permissions": [
-        "http://localhost:9876/*"
+        "http://localhost:9876/*",
+        "<all_urls>"
     ],
     "background": {
         "service_worker": "background.js"
     },
+    "content_scripts": [
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "css": [
+                "content.css"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
     "action": {
         "default_popup": "popup.html",
         "default_icon": {
@@ -25,5 +43,15 @@
         "16": "icons/icon16.png",
         "48": "icons/icon48.png",
         "128": "icons/icon128.png"
-    }
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "icons/*"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ]
 }

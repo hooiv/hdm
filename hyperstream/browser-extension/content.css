@@ -1,0 +1,61 @@
+/* HyperStream Video Overlay Styles */
+
+.hyperstream-video-overlay {
+    position: fixed;
+    pointer-events: auto;
+    z-index: 2147483647;
+}
+
+.hyperstream-download-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.hyperstream-download-btn:hover {
+    transform: scale(1.05);
+    box-shadow: 0 6px 20px rgba(59, 130, 246, 0.5);
+}
+
+.hyperstream-download-btn svg {
+    flex-shrink: 0;
+}
+
+.hyperstream-download-btn span {
+    white-space: nowrap;
+}
+
+/* Toast notification */
+.hyperstream-toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+    color: #f1f5f9;
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    z-index: 2147483647;
+    opacity: 0;
+    transition: transform 0.3s, opacity 0.3s;
+    border: 1px solid #3b82f6;
+}
+
+.hyperstream-toast.show {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+}
