@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
 
 interface DropTargetProps {
     onDrop: (url: string) => void;
@@ -8,7 +7,6 @@ interface DropTargetProps {
 
 export const DropTarget: React.FC<DropTargetProps> = ({ onDrop }) => {
     const [isDragging, setIsDragging] = useState(false);
-    const [isVisible, setIsVisible] = useState(false);
 
     useEffect(() => {
         // Listen for global drag events (if Tauri supports it, or use window events)
@@ -45,9 +43,6 @@ export const DropTarget: React.FC<DropTargetProps> = ({ onDrop }) => {
             // Handle local file drop if needed
         }
     };
-
-    // Toggle visibility with a keyboard shortcut or menu option
-    // For now, we'll make it a small floating icon that expands
 
     return (
         <div

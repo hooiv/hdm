@@ -2,10 +2,11 @@ use mlua::{Lua, Result, Table, Function, Value};
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use reqwest::Client;
+use rquest::Client;
 use regex::Regex;
+use tauri::{AppHandle, Emitter};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PluginMetadata {
     pub name: String,
     pub version: String,
@@ -23,14 +24,16 @@ pub struct ExtractionResult {
 pub struct LuaPluginHost {
     lua: Arc<Mutex<Lua>>,
     client: Client,
+    app: AppHandle,
 }
 
 impl LuaPluginHost {
-    pub fn new(client: Client) -> Self {
+    pub fn new(client: Client, app: AppHandle) -> Self {
         let lua = Lua::new();
         Self {
             lua: Arc::new(Mutex::new(lua)),
             client,
+            app,
         }
     }
 
@@ -63,6 +66,24 @@ impl LuaPluginHost {
                     Err(e) => Err(mlua::Error::RuntimeError(format!("Request failed: {}", e)))
                 }
             }
+        })?)?;
+
+        // host.log(msg)
+        host.set("log", lua.create_function(|_, msg: String| {
+            println!("LUA [Plugin]: {}", msg);
+            Ok(())
+        })?)?;
+
+        // host.toast(msg, type)
+        let app_handle = self.app.clone();
+        host.set("toast", lua.create_function(move |_, (msg, type_str): (String, Option<String>)| {
+            let type_s = type_str.unwrap_or_else(|| "info".to_string());
+            // Emit event to frontend for toast
+            let _ = app_handle.emit("plugin_toast", serde_json::json!({
+                "message": msg,
+                "type": type_s
+            }));
+            Ok(())
         })?)?;
 
         // host.regex_find(pattern, text)

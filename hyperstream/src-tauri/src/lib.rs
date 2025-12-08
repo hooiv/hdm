@@ -1,4 +1,4 @@
-use tauri::{Emitter, State};
+use tauri::{Emitter, State, Manager};
 use futures_util::StreamExt;
 use std::sync::{Arc, Mutex};
 use crate::downloader::manager::DownloadManager;
@@ -12,28 +12,36 @@ use tokio::sync::broadcast;
 mod downloader;
 mod persistence;
 mod http_server;
+use crate::http_server::StreamingSource;
 mod settings;
 mod speed_limiter;
 mod clipboard;
+mod network;
 mod scheduler;
 mod media;
 mod plugin_vm;
 mod spider;
+
 mod zip_preview;
 mod proxy;
 mod adaptive_threads;
-mod virus_scanner;
-mod import_export;
+
+// mod virus_scanner;
+// mod import_export;
 mod lan_api;
 
 use persistence::SavedDownload;
 use settings::Settings;
+
+// (id, start, end, cursor, state, speed)
+type SlimSegment = (u32, u64, u64, u64, u8, u64);
 
 #[derive(Clone, serde::Serialize)]
 struct Payload {
     id: String,
     downloaded: u64,
     total: u64,
+    segments: Vec<SlimSegment>,
 }
 
 struct DownloadSession {
@@ -50,6 +58,48 @@ struct DownloadSession {
 
 struct AppState {
     downloads: Mutex<HashMap<String, DownloadSession>>,
+    p2p_node: Arc<network::p2p::P2PNode>,
+    p2p_file_map: http_server::FileMap,
+    torrent_manager: Arc<network::bittorrent::manager::TorrentManager>,
+    connection_manager: network::connection_manager::ConnectionManager,
+}
+
+#[tauri::command]
+async fn add_magnet_link(
+    magnet: String,
+    state: State<'_, AppState>
+) -> Result<usize, String> {
+    println!("Adding magnet link: {}", magnet);
+    state.torrent_manager.add_magnet(&magnet).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn play_torrent(
+    id: usize,
+    state: State<'_, AppState>
+) -> Result<String, String> {
+    // 1. Get file ID (largest file)
+    let fid = state.torrent_manager.get_largest_file_id(id)
+        .ok_or_else(|| "Could not determine main file ID".to_string())?;
+    
+    // 2. Register in FileMap (ID -> Torrent Source)
+    {
+        let mut map = state.p2p_file_map.lock().unwrap();
+        map.insert(id.to_string(), StreamingSource::Torrent { torrent_id: id, file_id: fid });
+        // NOTE: If we want to support file system fallback (e.g. from get_main_file_path),
+        // we could check if file exists on disk.
+        // But for "Streaming Logic" task, we prefer the stream.
+    }
+    
+    // 3. Return URL
+    Ok(format!("http://localhost:14733/p2p/{}", id))
+}
+
+#[tauri::command]
+async fn get_torrents(
+    state: State<'_, AppState>
+) -> Result<Vec<network::bittorrent::manager::TorrentStatus>, String> {
+    Ok(state.torrent_manager.get_torrents())
 }
 
 #[tauri::command]
@@ -71,72 +121,37 @@ async fn start_download(
         println!("DEBUG: Resuming from byte {}", resume_from);
     }
     
-    // 2. Get Content Length
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let head_resp = client.head(&url).send().await.map_err(|e| e.to_string())?;
-    let mut total_size = head_resp.content_length().unwrap_or(0);
-
-    // Manual fallback
-    if total_size == 0 {
-        if let Some(len_header) = head_resp.headers().get("content-length") {
-            if let Ok(len_str) = len_header.to_str() {
-                if let Ok(len) = len_str.parse::<u64>() {
-                    total_size = len;
-                }
-            }
-        }
-    }
-
-    if total_size == 0 {
-        // Try Range 0-1
-        let range_resp = client.get(&url).header("Range", "bytes=0-1").send().await.map_err(|e| e.to_string())?;
-        if let Some(content_range) = range_resp.headers().get("content-range") {
-            let s = content_range.to_str().unwrap_or("");
-            if let Some(slash_pos) = s.find('/') {
-                if let Ok(size) = s[slash_pos + 1..].parse::<u64>() {
-                    total_size = size;
-                }
-            }
-        }
-    }
     
-    if total_size == 0 {
-        return Err("Could not determine file size".to_string());
+    // 2. Get Content Length
+    // Use masquerading to evade anti-bot blocking
+    let settings = settings::load_settings();
+    let client = if settings.dpi_evasion {
+        network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome)
+    } else {
+        network::masq::build_client()
+    }.map_err(|e| e.to_string())?;
+
+    let total_size = downloader::initialization::determine_total_size(&client, &url).await?;
+
+    // 3. Initialize File
+    let file = downloader::initialization::setup_file(&path, resume_from, total_size)?;
+    let file_mutex = file;
+
+    // Register P2P
+    {
+        let mut map = state.p2p_file_map.lock().unwrap();
+        map.insert(id.clone(), StreamingSource::FileSystem(std::path::PathBuf::from(&path)));
     }
+    let p2p_node = state.p2p_node.clone();
+    let id_clone = id.clone();
+    tauri::async_runtime::spawn(async move {
+        p2p_node.advertise_file(id_clone).await;
+    });
 
-    // 3. Initialize File - open for writing, don't truncate if resuming
-    let file = if resume_from > 0 {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .map_err(|e| e.to_string())?
-    } else {
-        let f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        f.set_len(total_size).map_err(|e| e.to_string())?;
-        f
-    };
-    let file_mutex = Arc::new(Mutex::new(file));
-
-    // 4. Initialize Manager - for resume, we use a single segment from resume_from to end
-    let manager = if resume_from > 0 {
-        // Simple resume: single segment from resume_from to end
-        let mgr = DownloadManager::new(total_size, 1);
-        {
-            let mut segs = mgr.segments.write().unwrap();
-            segs[0].start_byte = resume_from;
-            segs[0].downloaded_cursor = resume_from;
-        }
-        Arc::new(Mutex::new(mgr))
-    } else {
-        Arc::new(Mutex::new(DownloadManager::new(total_size, 8)))
-    };
+    // 4. Initialize Manager
+    let manager = downloader::initialization::setup_manager(total_size, saved, resume_from);
     let downloaded_total = Arc::new(Mutex::new(resume_from));
+    let last_progress_emit = Arc::new(Mutex::new(std::time::Instant::now()));
 
     // 5. Setup Stop Signal
     let (stop_tx, _) = broadcast::channel(1);
@@ -174,6 +189,8 @@ async fn start_download(
         let client_clone = client.clone();
         let window_clone = window.clone();
         let downloaded_clone = downloaded_total.clone();
+        let last_emit_clone = last_progress_emit.clone();
+        let cm_clone = state.connection_manager.clone();
         let mut stop_rx = stop_tx.subscribe();
         let download_id = id.clone();
 
@@ -213,6 +230,23 @@ async fn start_download(
 
                 let range_header = format!("bytes={}-{}", current_pos, end - 1);
                 
+                // Acquire permit via ConnectionManager
+                let _permit = cm_clone.acquire(&url_clone).await;
+
+                // Chaos Mode Check: Inject latency or failure here
+                if let Err(e) = crate::network::chaos::check_chaos().await {
+                     println!("DEBUG: Chaos Injection Error: {}", e);
+                     retry_count += 1;
+                     if retry_count <= MAX_RETRIES {
+                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                         continue;
+                     }
+                     // If max retries, we might want to break or continue to native error handling
+                     // For now, let's treat it as a network error handled below, but breaking the connection
+                     // logic here effectively.
+                     // Actually, if check_chaos fails, we should skip the request.
+                }
+
                 // Use tokio::select to allow cancellation during request
                 let res_future = client_clone.get(&url_clone).header("Range", &range_header).send();
                 
@@ -228,7 +262,7 @@ async fn start_download(
                     r = res_future => r
                 };
 
-                let res = match res {
+                let response = match res {
                     Ok(r) => r,
                     Err(e) => {
                         println!("DEBUG: Thread {} error: {}", i, e);
@@ -239,7 +273,24 @@ async fn start_download(
                     }
                 };
 
-                let mut stream = res.bytes_stream();
+                // Check for Rate Limiting (429/503)
+                if response.status() == rquest::StatusCode::TOO_MANY_REQUESTS || response.status() == rquest::StatusCode::SERVICE_UNAVAILABLE {
+                     let wait_time = if let Some(h) = response.headers().get("Retry-After") {
+                         if let Ok(s) = h.to_str() {
+                             crate::downloader::network::parse_retry_after(s).unwrap_or(std::time::Duration::from_secs(30))
+                         } else {
+                             std::time::Duration::from_secs(30)
+                         }
+                     } else {
+                         std::time::Duration::from_secs(30)
+                     };
+
+                     println!("DEBUG: Rate limit hit ({}). Sleeping for {:?}s", response.status(), wait_time);
+                     tokio::time::sleep(wait_time).await;
+                     continue;
+                }
+
+                let mut stream = response.bytes_stream();
                 
                 loop {
                     tokio::select! {
@@ -259,10 +310,40 @@ async fn start_download(
                                     current_pos += len;
                                     
                                     // Update global progress
-                                    {
                                         let mut d = downloaded_clone.lock().unwrap();
                                         *d += len;
-                                        window_clone.emit("download_progress", Payload { id: download_id.clone(), downloaded: *d, total: total_size }).unwrap();
+                                        
+                                        // Throttle emission
+                                        let should_emit = {
+                                            let mut last = last_emit_clone.lock().unwrap();
+                                            if last.elapsed().as_millis() >= 33 || *d >= total_size {
+                                                *last = std::time::Instant::now();
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        };
+
+                                        if should_emit {
+                                            // Get segment snapshot for visualization
+                                            let segments = manager_clone.lock().unwrap().get_segments_snapshot();
+                                            
+                                            // Compress to tuple format
+                                            let slim_segments: Vec<SlimSegment> = segments.iter().map(|s| (
+                                                s.id,
+                                                s.start_byte,
+                                                s.end_byte,
+                                                s.downloaded_cursor,
+                                                s.state as u8,
+                                                s.speed_bps
+                                            )).collect();
+
+                                            window_clone.emit("download_progress", Payload { 
+                                                id: download_id.clone(), 
+                                                downloaded: *d, 
+                                                total: total_size,
+                                                segments: slim_segments
+                                            }).unwrap();
                                     }
                                 }
                                 Some(Err(_)) => {
@@ -284,6 +365,42 @@ async fn start_download(
     // so the UI doesn't freeze. The threads run in background.
     // However, for this simple version, if we return, the command finishes.
     // But the threads are spawned on tokio runtime, so they keep running.
+
+    // 9. Periodic Save Loop (Crash Recovery)
+    let manager_save = manager.clone();
+    let id_save = id.clone();
+    let url_save = url.clone();
+    let path_save = path.clone();
+    // derived filename
+    let filename_save = std::path::Path::new(&path).file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".to_string());
+    let mut stop_rx_save = stop_tx.subscribe();
+    
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stop_rx_save.recv() => break,
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+                    let segments = manager_save.lock().unwrap().get_segments_snapshot();
+                    let total_downloaded = segments.iter().map(|s| s.downloaded_cursor - s.start_byte).sum();
+                    
+                    let saved = persistence::SavedDownload {
+                        id: id_save.clone(),
+                        url: url_save.clone(),
+                        path: path_save.clone(),
+                        filename: filename_save.clone(),
+                        total_size,
+                        downloaded_bytes: total_downloaded,
+                        status: "Downloading".to_string(),
+                        segments: Some(segments),
+                    };
+                    // Silent save, ignore errors
+                    let _ = persistence::upsert_download(saved);
+                }
+            }
+        }
+    });
     
     Ok(())
 }
@@ -295,6 +412,8 @@ fn pause_download(id: String, url: String, path: String, filename: String, downl
         let _ = session.stop_tx.send(());
         println!("DEBUG: Pause signal sent to ID: {}", id);
         
+        let segments_snapshot = session.manager.lock().unwrap().get_segments_snapshot();
+
         // Save to persistence
         let saved = SavedDownload {
             id: id.clone(),
@@ -304,6 +423,7 @@ fn pause_download(id: String, url: String, path: String, filename: String, downl
             total_size: total,
             downloaded_bytes: downloaded,
             status: "Paused".to_string(),
+            segments: Some(segments_snapshot),
         };
         persistence::upsert_download(saved)?;
     }
@@ -369,10 +489,7 @@ fn schedule_download(id: String, url: String, filename: String, scheduled_time: 
     Ok(())
 }
 
-#[tauri::command]
-fn get_scheduled_downloads() -> Vec<scheduler::ScheduledDownload> {
-    scheduler::get_scheduled_downloads()
-}
+
 
 #[tauri::command]
 fn cancel_scheduled_download(id: String) -> Result<(), String> {
@@ -403,8 +520,10 @@ async fn crawl_website(
     }).await
 }
 
+
 // ============ ZIP Preview Commands ============
 
+/*
 #[tauri::command]
 fn preview_zip_file(path: String) -> Result<zip_preview::ZipPreview, String> {
     zip_preview::preview_zip(std::path::Path::new(&path))
@@ -417,6 +536,7 @@ fn extract_zip_file(zip_path: String, dest_dir: String) -> Result<usize, String>
         std::path::Path::new(&dest_dir)
     )
 }
+*/
 
 // ============ HLS/DASH Stream Parser Commands ============
 
@@ -436,6 +556,51 @@ fn parse_dash_manifest(content: String, base_url: String) -> Result<media::dash_
     media::dash_parser::parse_mpd(&content, &base_url)
 }
 
+// ============ Muxer Commands ============
+
+#[tauri::command]
+async fn mux_video_audio(video_path: String, audio_path: String, output_path: String) -> Result<(), String> {
+    media::muxer::merge_streams(
+        std::path::Path::new(&video_path),
+        std::path::Path::new(&audio_path),
+        std::path::Path::new(&output_path)
+    )
+}
+
+#[tauri::command]
+fn check_ffmpeg_installed() -> bool {
+    media::muxer::is_ffmpeg_available()
+}
+
+#[tauri::command]
+fn decrypt_aes_128(input_path: String, output_path: String, key_hex: String, iv_hex: String) -> Result<(), String> {
+    let key = media::decrypt::decode_hex(&key_hex)?;
+    let iv = media::decrypt::decode_hex(&iv_hex)?;
+    
+    let encrypted_data = std::fs::read(&input_path).map_err(|e| e.to_string())?;
+    let decrypted = media::decrypt::decrypt_aes128(&encrypted_data, &key, &iv)?;
+    
+    std::fs::write(&output_path, decrypted).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+
+#[tauri::command]
+async fn test_browser_fingerprint() -> Result<String, String> {
+    // Enable DPI evasion for the test to verify headers
+    let client = network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome)
+        .map_err(|e| e.to_string())?;
+    
+    // Hit a trace URL (using httpbin for now to show headers)
+    let resp = client.get("https://httpbin.org/headers")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(text)
+}
+
 // ============ Proxy Configuration Commands ============
 
 #[tauri::command]
@@ -453,6 +618,8 @@ fn test_proxy(config: proxy::ProxyConfig) -> Result<bool, String> {
 
 // ============ Import/Export Commands ============
 
+// ============ Import/Export Commands (Disabled) ============
+/*
 #[tauri::command]
 fn export_downloads(path: String) -> Result<(), String> {
     let downloads = persistence::load_downloads().unwrap_or_default();
@@ -505,9 +672,11 @@ fn export_downloads_csv(path: String) -> Result<(), String> {
     
     export.to_csv_file(std::path::Path::new(&path))
 }
+*/
 
-// ============ Virus Scanning Commands ============
 
+// ============ Virus Scanning Commands (Disabled) ============
+/*
 #[tauri::command]
 async fn scan_file_for_virus(path: String) -> Result<String, String> {
     let scanner = virus_scanner::VirusScanner::new();
@@ -528,36 +697,24 @@ async fn scan_file_for_virus(path: String) -> Result<String, String> {
 fn is_antivirus_available() -> bool {
     virus_scanner::VirusScanner::new().is_available()
 }
-
-// ============ Server Probe Commands ============
-
-#[tauri::command]
-async fn probe_server(url: String) -> Result<downloader::http_client::ServerCapabilities, String> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .user_agent("Mozilla/5.0")
-        .build()
-        .map_err(|e| e.to_string())?;
-    
-    let scout = downloader::http_client::FirstByteScout::new(client);
-    scout.probe(&url).await
-}
+*/
 
 // ============ Speed Limiter Commands ============
 
 #[tauri::command]
-async fn acquire_bandwidth(bytes: u64) -> u64 {
-    speed_limiter::GLOBAL_LIMITER.acquire(bytes).await
+async fn acquire_bandwidth(amount: u32) -> Result<(), String> {
+    speed_limiter::GLOBAL_LIMITER.acquire(amount as u64).await;
+    Ok(())
 }
 
 #[tauri::command]
-fn set_speed_limit(bytes_per_sec: u64) {
-    speed_limiter::GLOBAL_LIMITER.set_limit(bytes_per_sec);
+fn set_speed_limit(limit_kbps: u64) {
+    speed_limiter::GLOBAL_LIMITER.set_limit(limit_kbps * 1024);
 }
 
 #[tauri::command]
 fn get_speed_limit() -> u64 {
-    speed_limiter::GLOBAL_LIMITER.get_limit()
+    speed_limiter::GLOBAL_LIMITER.get_limit() / 1024
 }
 
 // ============ LAN API Commands ============
@@ -566,6 +723,7 @@ fn get_speed_limit() -> u64 {
 fn generate_lan_pairing_code() -> String {
     lan_api::LanApiServer::generate_pairing_code()
 }
+
 
 #[tauri::command]
 fn get_lan_pairing_qr_data(port: u16, code: String) -> String {
@@ -592,6 +750,32 @@ fn get_time_info() -> scheduler::TimeInfo {
     scheduler::get_current_time_info()
 }
 
+#[tauri::command]
+fn get_scheduled_downloads() -> Vec<scheduler::ScheduledDownload> {
+    scheduler::get_scheduled_downloads()
+}
+
+#[tauri::command]
+fn remove_scheduled_download(id: String) {
+    scheduler::remove_scheduled_download(&id);
+}
+
+
+#[tauri::command]
+fn force_start_scheduled_download<R: tauri::Runtime>(app_handle: tauri::AppHandle<R>, id: String) -> Result<(), String> {
+    if let Some(download) = scheduler::force_start_download(&id) {
+        // Emit start event immediately
+        app_handle.emit("scheduled_download_start", serde_json::json!({
+            "id": download.id,
+            "url": download.url,
+            "filename": download.filename
+        })).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("Download not found or already started".to_string())
+    }
+}
+
 // ============ ZIP Partial Preview Commands ============
 
 #[tauri::command]
@@ -604,16 +788,21 @@ fn preview_zip_partial(data: Vec<u8>) -> Result<zip_preview::ZipPreview, String>
     zip_preview::preview_zip_partial(&data)
 }
 
+#[tauri::command]
+fn preview_zip_file(path: String) -> Result<zip_preview::ZipPreview, String> {
+    zip_preview::preview_zip(std::path::Path::new(&path))
+}
+
 // ============ Plugin System Commands ============
 
 #[tauri::command]
-async fn get_plugin_metadata(script: String) -> Result<Option<plugin_vm::lua_host::PluginMetadata>, String> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+async fn get_plugin_metadata(app_handle: tauri::AppHandle, script: String) -> Result<Option<plugin_vm::lua_host::PluginMetadata>, String> {
+    let client = rquest::Client::builder()
+        // .danger_accept_invalid_certs(true)
         .build()
         .map_err(|e| e.to_string())?;
     
-    let host = plugin_vm::lua_host::LuaPluginHost::new(client);
+    let host = plugin_vm::lua_host::LuaPluginHost::new(client, app_handle);
     host.init().await.map_err(|e| e.to_string())?;
     host.load_script(&script).await.map_err(|e| e.to_string())?;
     host.get_plugin_metadata().await.map_err(|e| e.to_string())
@@ -623,7 +812,7 @@ async fn get_plugin_metadata(script: String) -> Result<Option<plugin_vm::lua_hos
 
 #[tauri::command]
 fn analyze_http_status(status_code: u16) -> String {
-    use reqwest::StatusCode;
+    use rquest::StatusCode;
     let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK);
     let strategy = downloader::network::analyze_status(status);
     format!("{:?}", strategy)
@@ -691,12 +880,13 @@ fn get_next_download_time() -> String {
     scheduler::get_next_download_time().to_rfc3339()
 }
 
-// ============ FDM Import Command ============
-
+// ============ FDM Import Command (Disabled) ============
+/*
 #[tauri::command]
 fn import_from_fdm_file(path: String) -> Result<Vec<import_export::ExportedDownload>, String> {
     import_export::import_from_fdm(std::path::Path::new(&path))
 }
+*/
 
 // ============ ZIP Extraction Commands ============
 
@@ -723,7 +913,7 @@ fn validate_http_response(
     content_type: Option<String>,
     accept_ranges: Option<String>
 ) -> Result<(), String> {
-    use reqwest::StatusCode;
+    use rquest::StatusCode;
     let validator = downloader::network::ResponseValidator::new();
     let status = StatusCode::from_u16(status_code).map_err(|e| e.to_string())?;
     validator.validate(
@@ -849,13 +1039,13 @@ async fn validate_download_url(url: String) -> Result<serde_json::Value, String>
 // ============ Plugin Extraction Commands ============
 
 #[tauri::command]
-async fn extract_stream_url(script: String, page_url: String) -> Result<Option<serde_json::Value>, String> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+async fn extract_stream_url(app_handle: tauri::AppHandle, script: String, page_url: String) -> Result<Option<serde_json::Value>, String> {
+    let client = rquest::Client::builder()
+        // .danger_accept_invalid_certs(true)
         .build()
         .map_err(|e| e.to_string())?;
     
-    let host = plugin_vm::lua_host::LuaPluginHost::new(client);
+    let host = plugin_vm::lua_host::LuaPluginHost::new(client, app_handle);
     host.init().await.map_err(|e| e.to_string())?;
     host.load_script(&script).await.map_err(|e| e.to_string())?;
     
@@ -964,13 +1154,13 @@ fn open_file_for_resume(path: String) -> Result<u64, String> {
 // ============ Plugin Config Commands ============
 
 #[tauri::command]
-async fn set_plugin_config(script: String, config: std::collections::HashMap<String, String>) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+async fn set_plugin_config(app_handle: tauri::AppHandle, script: String, config: std::collections::HashMap<String, String>) -> Result<(), String> {
+    let client = rquest::Client::builder()
+        // .min_tls_version(rquest::Version::TLS_1_2)
         .build()
         .map_err(|e| e.to_string())?;
     
-    let host = plugin_vm::lua_host::LuaPluginHost::new(client);
+    let host = plugin_vm::lua_host::LuaPluginHost::new(client, app_handle);
     host.init().await.map_err(|e| e.to_string())?;
     host.load_script(&script).await.map_err(|e| e.to_string())?;
     host.set_config(config).await.map_err(|e| e.to_string())
@@ -988,6 +1178,70 @@ fn get_disk_writer_config() -> serde_json::Value {
     })
 }
 
+#[tauri::command]
+async fn refresh_download_url(state: State<'_, AppState>, app_handle: tauri::AppHandle, id: String, new_url: String) -> Result<(), String> {
+    println!("DEBUG: Refreshing URL for {}: {}", id, new_url);
+    
+    // 1. Update in persistence
+    let mut downloads = persistence::load_downloads().unwrap_or_default();
+    if let Some(download) = downloads.iter_mut().find(|d| d.id == id) {
+        download.url = new_url.clone();
+        download.status = "Paused".to_string(); // Reset error state to Paused so it can be resumed
+        persistence::save_downloads(&downloads).map_err(|e| e.to_string())?;
+    } else {
+        return Err("Download not found".to_string());
+    }
+
+    // 2. Stop active session if any
+    {
+        let mut active_downloads = state.downloads.lock().unwrap();
+        if let Some(session) = active_downloads.remove(&id) {
+            // Signal stop
+            let _ = session.stop_tx.send(());
+            println!("DEBUG: Stopped active session for refresh: {}", id);
+        }
+    }
+    
+    // 3. Emit event
+    app_handle.emit("download_refreshed", serde_json::json!({
+        "id": id,
+        "url": new_url
+    })).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+
+
+
+
+
+#[tauri::command]
+async fn install_plugin(app_handle: tauri::AppHandle, url: String, filename: Option<String>) -> Result<String, String> {
+
+    plugin_vm::updater::install_plugin_from_url(&app_handle, url, filename).await
+}
+
+#[tauri::command]
+async fn move_download_item(id: String, direction: String) -> Result<(), String> {
+    persistence::move_download(&id, &direction)
+}
+
+#[tauri::command]
+fn set_chaos_config(latency_ms: u64, error_rate: u64, enabled: bool) {
+    crate::network::chaos::GLOBAL_CHAOS.update(enabled, latency_ms, error_rate);
+}
+
+#[tauri::command]
+fn get_chaos_config() -> serde_json::Value {
+    // Return simple JSON
+    serde_json::json!({
+        "enabled": crate::network::chaos::GLOBAL_CHAOS.enabled.load(std::sync::atomic::Ordering::Relaxed),
+        "latency_ms": crate::network::chaos::GLOBAL_CHAOS.latency_ms.load(std::sync::atomic::Ordering::Relaxed),
+        "error_rate": crate::network::chaos::GLOBAL_CHAOS.error_rate_percent.load(std::sync::atomic::Ordering::Relaxed)
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load settings and apply
@@ -1000,7 +1254,6 @@ pub fn run() {
     
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { downloads: Mutex::new(HashMap::new()) })
         .invoke_handler(tauri::generate_handler![
             start_download, 
             pause_download, 
@@ -1013,106 +1266,88 @@ pub fn run() {
             schedule_download,
             get_scheduled_downloads,
             cancel_scheduled_download,
-            // Spider
             crawl_website,
-            // ZIP Preview
-            preview_zip_file,
-            extract_zip_file,
-            // HLS/DASH
-            parse_hls_stream,
-            parse_dash_manifest,
-            // Proxy
+            mux_video_audio,
+            check_ffmpeg_installed,
+            decrypt_aes_128,
+            test_browser_fingerprint,
             get_proxy_config,
             test_proxy,
-            // Import/Export
-            export_downloads,
-            import_downloads,
-            import_from_idm_file,
-            // Virus Scanning
-            scan_file_for_virus,
-            is_antivirus_available,
-            // Server Probe
-            probe_server,
-            // Speed Limiter
             acquire_bandwidth,
             set_speed_limit,
             get_speed_limit,
-            // LAN API
+            // Plugin Commands
+            get_all_plugins,
+            reload_plugins,
+            // Old commands
+            // get_plugin_metadata, 
+            // set_plugin_config,
+            // install_plugin,
             generate_lan_pairing_code,
             get_lan_pairing_qr_data,
             get_local_ip,
-            // Scheduler
             is_quiet_hours,
             get_time_info,
-            // ZIP Partial Preview
-            read_zip_last_bytes,
-            preview_zip_partial,
-            // Plugin System
+            remove_scheduled_download,
+            force_start_scheduled_download,
             get_plugin_metadata,
-            // Network Validation
-            analyze_http_status,
-            check_captive_portal,
-            // CSV Export
-            export_downloads_csv,
-            // Disk Operations
-            preallocate_download_file,
-            check_file_exists,
-            get_file_size,
-            // Adaptive Threads
             get_adaptive_thread_count,
             update_thread_count,
             add_bandwidth_sample,
             get_average_bandwidth,
-            // More Scheduler
-            get_next_download_time,
-            // FDM Import
-            import_from_fdm_file,
-            // ZIP Extraction
-            extract_single_file,
-            read_file_bytes_at_offset,
-            // HTTP Client Validation
-            validate_http_response,
-            parse_retry_after_header,
-            check_error_content_type,
-            // Stealth HTTP Client
-            get_chrome_user_agent,
-            get_default_http_config,
-            // Retry Strategy
-            calculate_retry_backoff,
-            get_retry_config,
-            analyze_error_strategy,
-            // Range Request
-            start_range_download,
-            validate_download_url,
-            // Plugin Extraction
+            set_plugin_config,
+            install_plugin,
+            move_download_item,
+            refresh_download_url,
             extract_stream_url,
-            // Proxy Bypass
             should_bypass_proxy,
             is_proxy_enabled,
-            // Download Stats
             get_download_stats,
             get_work_steal_config,
-            // Retry State
             get_retry_state,
             reset_retry_state,
             analyze_network_error,
-            // Resume File
             open_file_for_resume,
-            // Plugin Config
-            set_plugin_config,
-            // DiskWriter Stats
-            get_disk_writer_config
+            get_disk_writer_config,
+            add_magnet_link,
+            play_torrent,
+            get_torrents,
+            set_chaos_config,
+            get_chaos_config,
+            // HLS/Dash Commands
+            parse_hls_stream,
+            parse_dash_manifest,
+            // Network Validation Commands
+            analyze_http_status,
+            check_captive_portal,
+            validate_http_response,
+            parse_retry_after_header,
+            check_error_content_type,
+            get_chrome_user_agent,
+            get_default_http_config,
+            calculate_retry_backoff,
+            get_retry_config,
+            analyze_error_strategy,
+            start_range_download,
+            validate_download_url,
+            // Disk Commands
+            preallocate_download_file,
+            check_file_exists,
+            get_file_size,
+            read_file_bytes_at_offset,
+            get_next_download_time,
+            // ZIP Commands
+            read_zip_last_bytes,
+            preview_zip_partial,
+            preview_zip_file,
+            extract_single_file
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
             
-            // Start clipboard monitor
             clipboard::CLIPBOARD_MONITOR.start(app.handle().clone());
-            
-            // Start scheduler
             scheduler::start_scheduler(app.handle().clone());
             
-            // Start LAN API server for mobile app integration
             tauri::async_runtime::spawn(async move {
                 let lan_server = lan_api::LanApiServer::new(8765);
                 if let Err(e) = lan_server.start().await {
@@ -1120,17 +1355,59 @@ pub fn run() {
                 }
             });
             
+            // Init P2P node
+            let p2p_node = tauri::async_runtime::block_on(async {
+                network::p2p::P2PNode::new().await.unwrap_or_else(|e| {
+                    println!("Warning: P2P failed to start: {}", e);
+                    panic!("P2P Init Failed: {}", e);
+                })
+            });
+            let p2p_node = Arc::new(p2p_node);
+            
+            let p2p_file_map: crate::http_server::FileMap = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            
+            let torrent_manager = tauri::async_runtime::block_on(async {
+                 let path = std::path::PathBuf::from("C:\\Users\\aditya\\Desktop\\Torrents");
+                 std::fs::create_dir_all(&path).unwrap_or_default();
+                 network::bittorrent::manager::TorrentManager::new(path).await.unwrap_or_else(|e| {
+                     println!("Warning: Torrent Manager failed: {}", e);
+                     panic!("Torrent Init Failed: {}", e);
+                 })
+            });
+            let torrent_manager = Arc::new(torrent_manager);
+
             // Spawn HTTP server
             let tx_clone = tx.clone();
+            let map_clone = p2p_file_map.clone();
+            let tm_clone = torrent_manager.clone();
             tauri::async_runtime::spawn(async move {
-                http_server::start_server(tx_clone).await;
+                crate::http_server::start_server(tx_clone, map_clone, tm_clone).await;
             });
             
-            // Handle download requests from HTTP server
+            // Manage AppState (Matching struct definition)
+            app.handle().manage(AppState { 
+                 downloads: Mutex::new(HashMap::new()),
+                 p2p_node,
+                 p2p_file_map,
+                 torrent_manager,
+                 connection_manager: network::connection_manager::ConnectionManager::default(),
+            });
+
+            // Initialize Plugin Manager
+            let plugin_manager = crate::plugin_vm::manager::PluginManager::new(app.handle().clone());
+            // Start async load
+            let pm_clone = std::sync::Arc::new(plugin_manager);
+            app.handle().manage(pm_clone.clone());
+            
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = pm_clone.load_plugins().await {
+                   eprintln!("Failed to load plugins: {}", e);
+                }
+            });
+            
             tauri::async_runtime::spawn(async move {
                 while let Some(req) = rx.recv().await {
                     println!("DEBUG: Processing download from extension: {}", req.url);
-                    // Emit event to frontend to add download
                     let _ = handle.emit("extension_download", serde_json::json!({
                         "url": req.url,
                         "filename": req.filename
@@ -1143,3 +1420,21 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+// ============ Plugin Manager Commands ============
+
+#[tauri::command]
+async fn get_all_plugins(
+    pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>
+) -> Result<Vec<crate::plugin_vm::lua_host::PluginMetadata>, String> {
+    Ok(pm.get_plugins_list())
+}
+
+#[tauri::command]
+async fn reload_plugins(
+    pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>
+) -> Result<(), String> {
+    pm.load_plugins().await.map_err(|e| e.to_string())
+}
+
+// Old dummy commands removed

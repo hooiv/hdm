@@ -41,45 +41,56 @@ impl SpeedLimiter {
     /// Request to consume bytes. Returns how many bytes are allowed.
     /// Blocks if necessary to respect the rate limit.
     pub async fn acquire(&self, requested_bytes: u64) -> u64 {
-        if !self.enabled.load(Ordering::SeqCst) {
-            return requested_bytes; // No limit
+        if !self.enabled.load(Ordering::Relaxed) {
+             return requested_bytes;
         }
 
-        let limit = self.limit_bytes_per_sec.load(Ordering::SeqCst);
+        let limit = self.limit_bytes_per_sec.load(Ordering::Relaxed);
         if limit == 0 {
             return requested_bytes;
         }
-
+        
+        // Wait until we can acquire some tokens
         loop {
-            // Refill tokens based on elapsed time
-            {
-                let mut last = self.last_refill.lock().unwrap();
-                let now = Instant::now();
-                let elapsed = now.duration_since(*last);
-                
-                // Refill at 10 times per second for smooth limiting
-                if elapsed >= Duration::from_millis(100) {
-                    let refill_amount = (limit as f64 * elapsed.as_secs_f64()) as u64;
-                    let current = self.tokens.load(Ordering::SeqCst);
-                    let new_tokens = (current + refill_amount).min(limit * 2); // Cap at 2 seconds worth
-                    self.tokens.store(new_tokens, Ordering::SeqCst);
-                    *last = now;
-                }
-            }
+             // 1. Try to refill first (lazily)
+             {
+                 let mut last = self.last_refill.lock().unwrap();
+                 let now = Instant::now();
+                 let elapsed = now.duration_since(*last);
+                 
+                 if elapsed >= Duration::from_millis(50) {
+                     let refill_amount = (limit as f64 * elapsed.as_secs_f64()) as u64;
+                     if refill_amount > 0 {
+                         let current = self.tokens.load(Ordering::Acquire);
+                         // Cap at 1.0 seconds worth to prevent huge bursts after idle
+                         let new_tokens = (current + refill_amount).min(limit); 
+                         self.tokens.store(new_tokens, Ordering::Release);
+                         *last = now;
+                     }
+                 }
+             }
 
-            // Try to consume tokens
-            let available = self.tokens.load(Ordering::SeqCst);
-            
-            if available == 0 {
-                // Wait for refill (100ms)
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
+             // 2. Try to consume
+             let current = self.tokens.load(Ordering::Acquire);
+             if current > 0 {
+                 let to_consume = requested_bytes.min(current);
+                 // CAS loop to safely subtract
+                 match self.tokens.compare_exchange(
+                     current, 
+                     current - to_consume, 
+                     Ordering::SeqCst, 
+                     Ordering::Relaxed
+                 ) {
+                     Ok(_) => return to_consume,
+                     Err(_new_current) => {
+                         // Race condition lost, try again immediately with new value
+                         continue;
+                     }
+                 }
+             }
 
-            let to_consume = requested_bytes.min(available);
-            self.tokens.fetch_sub(to_consume, Ordering::SeqCst);
-            
-            return to_consume;
+             // 3. Not enough tokens, wait (20ms)
+             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 }

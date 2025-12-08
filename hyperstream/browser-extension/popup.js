@@ -1,4 +1,4 @@
-const HYPERSTREAM_URL = 'http://localhost:9876';
+const HYPERSTREAM_URL = 'http://localhost:14733';
 
 async function checkConnection() {
     try {

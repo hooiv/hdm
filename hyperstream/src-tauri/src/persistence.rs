@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::downloader::structures::Segment;
+
 /// Represents a saved download that can be resumed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedDownload {
@@ -12,6 +14,7 @@ pub struct SavedDownload {
     pub total_size: u64,
     pub downloaded_bytes: u64,
     pub status: String, // "Paused", "Error", "Done"
+    pub segments: Option<Vec<Segment>>, // Saved state of dynamic segments
 }
 
 /// Get the path to the downloads.json file
@@ -77,4 +80,21 @@ pub fn remove_download(id: &str) -> Result<(), String> {
     let mut downloads = load_downloads().unwrap_or_default();
     downloads.retain(|d| d.id != id);
     save_downloads(&downloads)
+}
+/// Move a download up or down in the list
+pub fn move_download(id: &str, direction: &str) -> Result<(), String> {
+    let mut downloads = load_downloads().unwrap_or_default();
+    
+    if let Some(index) = downloads.iter().position(|d| d.id == id) {
+        if direction == "up" && index > 0 {
+            downloads.swap(index, index - 1);
+        } else if direction == "down" && index < downloads.len() - 1 {
+            downloads.swap(index, index + 1);
+        } else {
+            return Ok(()); // No move possible/needed
+        }
+        save_downloads(&downloads)
+    } else {
+        Err("Download not found".to_string())
+    }
 }

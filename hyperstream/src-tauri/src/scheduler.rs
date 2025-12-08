@@ -27,6 +27,17 @@ pub fn remove_scheduled_download(id: &str) {
     scheduled.remove(id);
 }
 
+pub fn force_start_download(id: &str) -> Option<ScheduledDownload> {
+    let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap();
+    if let Some(download) = scheduled.get_mut(id) {
+        if download.status == "pending" {
+            download.status = "started".to_string();
+            return Some(download.clone());
+        }
+    }
+    None
+}
+
 pub fn get_scheduled_downloads() -> Vec<ScheduledDownload> {
     let scheduled = SCHEDULED_DOWNLOADS.lock().unwrap();
     scheduled.values().cloned().collect()

@@ -1,0 +1,88 @@
+import { useState, useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import "./App.css";
+import { Layout } from "./components/Layout";
+import { AddDownloadModal } from "./components/AddDownloadModal";
+import { DownloadList } from "./components/DownloadList";
+import { DownloadTask } from "./components/DownloadItem";
+import { SettingsPage } from "./components/SettingsPage";
+import { ClipboardToast } from "./components/ClipboardToast";
+import { BatchDownloadModal } from "./components/BatchDownloadModal";
+import { ScheduleModal } from "./components/ScheduleModal";
+import { DropTarget } from "./components/DropTarget";
+
+// Generate unique ID for downloads
+let nextId = 1;
+const generateId = () => {
+  return `dl_${Date.now()}_${nextId++}`;
+};
+
+interface ClipboardData {
+  url: string;
+  filename: string;
+}
+
+function App() {
+  const [tasks, setTasks] = useState<DownloadTask[]>([]);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isScheduleOpen, setIsScheduleOpen] = useState(false);
+  const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
+  const [batchLinks, setBatchLinks] = useState<Array<{ url: string; filename: string }>>([]);
+  const [isOverlayVisible, setIsOverlayVisible] = useState(false);
+
+  const toggleOverlay = async () => {
+      // Lazy import to avoid issues in non-tauri env or initial load
+      const { Window } = await import("@tauri-apps/api/window"); 
+      const overlay = Window.getByLabel("overlay");
+      if (overlay) {
+          if (isOverlayVisible) {
+              await overlay.hide();
+          } else {
+              await overlay.show();
+          }
+          setIsOverlayVisible(!isOverlayVisible);
+      }
+  };
+
+  // Use useRef for mutable state that doesn't trigger re-renders
+  const lastUpdate = useRef<Map<string, { time: number, bytes: number, speed: number }>>(new Map());
+
+  useEffect(() => {
+    const unlistenPromise = listen('download_progress', (event: any) => {
+      const { id, downloaded, total } = event.payload;
+
+      setTasks(prevTasks => {
+        return prevTasks.map(task => {
+          if (task.id === id) {
+            const now = Date.now();
+            const last = lastUpdate.current.get(id);
+            let speed = last?.speed || 0;
+
+            if (last) {
+              const timeDiff = (now - last.time) / 1000;
+              const bytesDiff = downloaded - last.bytes;
+
+              if (bytesDiff < 0) {
+                lastUpdate.current.set(id, { time: now, bytes: downloaded, speed: 0 });
+                speed = 0;
+              } else if (timeDiff >= 0.3 && bytesDiff > 0) {
+                speed = bytesDiff / timeDiff;
+                lastUpdate.current.set(id, { time: now, bytes: downloaded, speed });
+              }
+            } else {
+              lastUpdate.current.set(id, { time: now, bytes: downloaded, speed: 0 });
+            }
+
+            return { ...task, downloaded, total, speed };
+          }
+          return task;
+        });
+      });
+    });
+
+    return () => {
+      unlistenPromise.then(unlisten => unlisten());
+    };
+  }, []);

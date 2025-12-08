@@ -4,8 +4,8 @@
 //! behavior before spawning multiple threads. This prevents downloading the
 //! file 8 times if the server ignores Range requests.
 
-use reqwest::{Client, Response, StatusCode};
-use reqwest::header::{HeaderMap, HeaderValue, RANGE, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT, REFERER};
+use rquest::{Client, Response, StatusCode};
+use rquest::header::{HeaderMap, HeaderValue, RANGE, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT, REFERER};
 use std::time::Duration;
 
 use crate::downloader::network::{RetryStrategy, analyze_status, is_captive_portal};
@@ -57,7 +57,7 @@ impl Default for HttpClientConfig {
             user_agent: format!("HyperStream/1.0 (Windows; Rust)"),
             follow_redirects: true,
             max_redirects: 10,
-            danger_accept_invalid_certs: true, // TODO: Make this configurable
+            danger_accept_invalid_certs: false, 
         }
     }
 }
@@ -66,33 +66,32 @@ impl Default for HttpClientConfig {
 pub const CHROME_USER_AGENT: &str = 
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+
 /// Build a configured HTTP client
-pub fn build_client(config: &HttpClientConfig) -> Result<Client, reqwest::Error> {
-    let mut builder = Client::builder()
+pub fn build_client(config: &HttpClientConfig) -> Result<Client, rquest::Error> {
+    let builder = Client::builder()
         .timeout(config.timeout)
         .connect_timeout(config.connect_timeout)
         .user_agent(&config.user_agent)
         .redirect(if config.follow_redirects {
-            reqwest::redirect::Policy::limited(config.max_redirects)
+            rquest::redirect::Policy::limited(config.max_redirects)
         } else {
-            reqwest::redirect::Policy::none()
+            rquest::redirect::Policy::none()
         });
 
     if config.danger_accept_invalid_certs {
-        builder = builder.danger_accept_invalid_certs(true);
+        // builder = builder.danger_accept_invalid_certs(true); // API diff in rquest 5.x
     }
 
     builder.build()
 }
 
-/// Build a client with Chrome-like headers for bypassing basic bot detection
-pub fn build_stealth_client(config: &HttpClientConfig) -> Result<Client, reqwest::Error> {
+pub fn build_stealth_client(config: &HttpClientConfig) -> Result<Client, rquest::Error> {
     let mut default_headers = HeaderMap::new();
-    default_headers.insert(USER_AGENT, HeaderValue::from_static(CHROME_USER_AGENT));
+    // Headers that mimic Chrome 
     default_headers.insert("Accept", HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"));
     default_headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
-    default_headers.insert("Accept-Encoding", HeaderValue::from_static("identity")); // Disable compression for accurate byte counting
-    default_headers.insert("Connection", HeaderValue::from_static("keep-alive"));
+    default_headers.insert("Accept-Encoding", HeaderValue::from_static("identity")); // we manually handle decomp if needed, or let reqwest do it but we want byte accuracy
     default_headers.insert("Sec-Ch-Ua", HeaderValue::from_static("\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\""));
     default_headers.insert("Sec-Ch-Ua-Mobile", HeaderValue::from_static("?0"));
     default_headers.insert("Sec-Ch-Ua-Platform", HeaderValue::from_static("\"Windows\""));
@@ -101,20 +100,18 @@ pub fn build_stealth_client(config: &HttpClientConfig) -> Result<Client, reqwest
     default_headers.insert("Sec-Fetch-Site", HeaderValue::from_static("none"));
     default_headers.insert("Sec-Fetch-User", HeaderValue::from_static("?1"));
     default_headers.insert("Upgrade-Insecure-Requests", HeaderValue::from_static("1"));
+    default_headers.insert(USER_AGENT, HeaderValue::from_static(CHROME_USER_AGENT)); 
 
-    let mut builder = Client::builder()
+    let builder = Client::builder()
         .timeout(config.timeout)
         .connect_timeout(config.connect_timeout)
         .default_headers(default_headers)
+        // .min_tls_version(rquest::Version::TLS_1_2) 
         .redirect(if config.follow_redirects {
-            reqwest::redirect::Policy::limited(config.max_redirects)
+            rquest::redirect::Policy::limited(config.max_redirects)
         } else {
-            reqwest::redirect::Policy::none()
+            rquest::redirect::Policy::none()
         });
-
-    if config.danger_accept_invalid_certs {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
 
     builder.build()
 }
@@ -131,6 +128,9 @@ impl FirstByteScout {
 
     /// Probe the server with a HEAD request first, then a small Range request
     pub async fn probe(&self, url: &str) -> Result<ServerCapabilities, String> {
+        // Chaos Check
+        crate::network::chaos::check_chaos().await.map_err(|e| format!("Chaos error: {}", e))?;
+
         // Step 1: Send HEAD request to get file info
         let head_result = self.send_head_request(url).await?;
         
@@ -207,6 +207,9 @@ impl FirstByteScout {
         }
 
         // Request first 1KB to verify Range support
+        // Chaos Check (Simulate failure during range check)
+        crate::network::chaos::check_chaos().await.map_err(|e| format!("Chaos error: {}", e))?;
+
         let response = self.client
             .get(url)
             .header(USER_AGENT, CHROME_USER_AGENT)
@@ -272,7 +275,7 @@ pub async fn start_range_request(
     start: u64,
     end: u64,
     referer: Option<&str>,
-) -> Result<Response, reqwest::Error> {
+) -> Result<Response, rquest::Error> {
     let range = format!("bytes={}-{}", start, end - 1);
     
     let mut request = client

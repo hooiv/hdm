@@ -12,9 +12,21 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "hyperstream",
         "width": 800,
         "height": 600
+      },
+      {
+        "label": "overlay",
+        "title": "HyperStream Overlay",
+        "width": 300,
+        "height": 400,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "url": "index.html"
       }
     ],
     "security": {

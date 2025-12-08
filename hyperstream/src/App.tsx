@@ -11,6 +11,10 @@ import { ClipboardToast } from "./components/ClipboardToast";
 import { BatchDownloadModal } from "./components/BatchDownloadModal";
 import { ScheduleModal } from "./components/ScheduleModal";
 import { DropTarget } from "./components/DropTarget";
+import { SpiderModal } from "./components/SpiderModal";
+import { ToastManager, ToastRef } from "./components/ToastManager";
+import { AddTorrentModal } from "./components/AddTorrentModal";
+import { TorrentList } from "./components/TorrentList";
 
 // Generate unique ID for downloads
 let nextId = 1;
@@ -28,11 +32,33 @@ function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isScheduleOpen, setIsScheduleOpen] = useState(false);
+  const [isSpiderOpen, setIsSpiderOpen] = useState(false);
+  const [isTorrentModalOpen, setIsTorrentModalOpen] = useState(false);
   const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
   const [batchLinks, setBatchLinks] = useState<Array<{ url: string; filename: string }>>([]);
+  const [activeTab, setActiveTab] = useState<'downloads' | 'torrents'>('downloads');
+
+  const [isOverlayVisible, setIsOverlayVisible] = useState(false);
+
+  const toggleOverlay = async () => {
+    // Lazy import to avoid issues in non-tauri env or initial load
+    const { Window } = await import("@tauri-apps/api/window");
+    const overlay = await Window.getByLabel("overlay");
+    if (overlay) {
+      if (isOverlayVisible) {
+        await overlay.hide();
+      } else {
+        await overlay.show();
+      }
+      setIsOverlayVisible(!isOverlayVisible);
+    }
+  };
 
   // Use useRef for mutable state that doesn't trigger re-renders
   const lastUpdate = useRef<Map<string, { time: number, bytes: number, speed: number }>>(new Map());
+  const toastRef = useRef<ToastRef>(null);
+  // Track completed IDs to avoid duplicate toasts
+  const completedIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const unlistenPromise = listen('download_progress', (event: any) => {
@@ -60,14 +86,31 @@ function App() {
               lastUpdate.current.set(id, { time: now, bytes: downloaded, speed: 0 });
             }
 
+            // Unpack segments from tuple format
+            const segments = event.payload.segments ? event.payload.segments.map((s: any) => ({
+              id: s[0],
+              start_byte: s[1],
+              end_byte: s[2],
+              downloaded_cursor: s[3],
+              state: ['Idle', 'Downloading', 'Paused', 'Complete', 'Error'][s[4]] || 'Idle',
+              speed_bps: s[5]
+            })) : [];
+
             const newTask: DownloadTask = {
               ...task,
               progress: Math.min((downloaded / total) * 100, 100),
               downloaded,
               total,
               speed,
-              status: downloaded >= total ? 'Done' : 'Downloading'
+              status: downloaded >= total ? 'Done' : 'Downloading',
+              segments
             };
+
+            if (newTask.status === 'Done' && !completedIds.current.has(id)) {
+              completedIds.current.add(id);
+              toastRef.current?.addToast(`Download Complete: ${task.filename}`, 'success');
+            }
+
             return newTask;
           }
           return task;
@@ -241,10 +284,56 @@ function App() {
     }
   };
 
+  const handleSpeedLimitChange = async (limitKbps: number) => {
+    try {
+      console.log(`Setting speed limit to ${limitKbps} KB/s`);
+      // The Rust command expects u64, so ensure we pass a number
+      await invoke("set_speed_limit", { limitKbps: Math.floor(limitKbps) });
+    } catch (error) {
+      console.error("Failed to set speed limit:", error);
+    }
+  };
+
   const handleClipboardDownload = () => {
     if (clipboardData) {
       startDownload(clipboardData.url, clipboardData.filename);
       setClipboardData(null);
+    }
+  };
+
+  const moveTask = async (id: string, direction: 'up' | 'down') => {
+    // Optimistic update
+    setTasks(prev => {
+      const index = prev.findIndex(t => t.id === id);
+      if (index === -1) return prev;
+
+      const newTasks = [...prev];
+      if (direction === 'up' && index > 0) {
+        [newTasks[index], newTasks[index - 1]] = [newTasks[index - 1], newTasks[index]];
+      } else if (direction === 'down' && index < newTasks.length - 1) {
+        [newTasks[index], newTasks[index + 1]] = [newTasks[index + 1], newTasks[index]];
+      }
+      return newTasks;
+    });
+
+    try {
+      await invoke("move_download_item", { id, direction });
+    } catch (error) {
+      console.error("Failed to persist move:", error);
+      // Optional: Revert state if failed, but for simple reorder just logging is often enough MVP
+    }
+  };
+
+  const handleStream = async (id: number) => {
+    try {
+      const url = await invoke<string>('play_torrent', { id });
+      console.log("Streaming URL:", url);
+      // Open the URL in default player/browser
+      await invoke('open_file', { path: url });
+    } catch (e) {
+      console.error("Stream failed", e);
+      // toastRef might be null if not using conditional, but typically safe inside handler
+      toastRef.current?.addToast("Stream error: " + e, 'error');
     }
   };
 
@@ -260,24 +349,50 @@ function App() {
     <>
       <Layout
         onAddClick={() => setIsModalOpen(true)}
+        onAddTorrentClick={() => setIsTorrentModalOpen(true)}
         onScheduleClick={() => setIsScheduleOpen(true)}
+        onSpiderClick={() => setIsSpiderOpen(true)}
         onSettingsClick={() => setIsSettingsOpen(true)}
+        onOverlayClick={toggleOverlay}
         stats={stats}
+        onSpeedLimitChange={handleSpeedLimitChange}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
       >
-        {tasks.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">📥</div>
-            <h3>No Downloads Yet</h3>
-            <p>Click "+ Add Url" to start your first download, or copy a download link to your clipboard.</p>
-          </div>
+        {activeTab === 'downloads' ? (
+          tasks.length === 0 ? (
+            <div className="empty-state">
+              <div className="empty-state-icon">📥</div>
+              <h3>No Downloads Yet</h3>
+              <p>Click "+ Add Url" to start your first download, or copy a download link to your clipboard.</p>
+            </div>
+          ) : (
+            <DownloadList
+              tasks={tasks}
+              onPause={pauseDownload}
+              onResume={resumeDownload}
+              onDelete={deleteDownload}
+              onMoveUp={(id) => moveTask(id, 'up')}
+              onMoveDown={(id) => moveTask(id, 'down')}
+            />
+          )
         ) : (
-          <DownloadList tasks={tasks} onPause={pauseDownload} onResume={resumeDownload} onDelete={deleteDownload} />
+          <TorrentList onPlay={handleStream} />
         )}
       </Layout>
       <AddDownloadModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onStart={startDownload}
+      />
+      <AddTorrentModal
+        isOpen={isTorrentModalOpen}
+        onClose={() => setIsTorrentModalOpen(false)}
+        onAdd={(magnet) => {
+          // We will implement handleAddTorrent later involving Rust invoke
+          console.log("Adding magnet:", magnet);
+          invoke("add_magnet_link", { magnet }).catch(console.error);
+        }}
       />
       {isSettingsOpen && (
         <SettingsPage onClose={() => setIsSettingsOpen(false)} />
@@ -305,10 +420,19 @@ function App() {
         isOpen={isScheduleOpen}
         onClose={() => setIsScheduleOpen(false)}
       />
-      <DropTarget onDrop={(url) => {
+      <SpiderModal
+        isOpen={isSpiderOpen}
+        onClose={() => setIsSpiderOpen(false)}
+        onDownload={(files) => {
+          files.forEach(f => startDownload(f.url, f.filename));
+          setIsSpiderOpen(false);
+        }}
+      />
+      <DropTarget onDrop={(_url) => {
         setIsModalOpen(true);
         // Could auto-fill URL here if modal supports it
       }} />
+      <ToastManager ref={toastRef} />
     </>
   );
 }

@@ -1,5 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { LanPairing } from './LanPairing';
+import { motion } from 'framer-motion';
+import { Settings, X, Folder, Layers, Zap, Wifi, Clipboard, Activity } from 'lucide-react';
 
 interface SettingsData {
     download_dir: string;
@@ -8,6 +11,9 @@ interface SettingsData {
     clipboard_monitor: boolean;
     auto_start_extension: boolean;
     use_category_folders: boolean;
+    ja3_enabled: boolean;
+    min_threads: number;
+    max_threads: number;
 }
 
 interface SettingsPageProps {
@@ -22,13 +28,72 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
         clipboard_monitor: false,
         auto_start_extension: true,
         use_category_folders: true,
+        ja3_enabled: true,
+        min_threads: 2,
+        max_threads: 32,
     });
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
 
+    // Chaos Mode State
+    const [chaosEnabled, setChaosEnabled] = useState(false);
+    const [chaosLatency, setChaosLatency] = useState(0);
+    const [chaosErrorRate, setChaosErrorRate] = useState(0);
+
+    // Plugin State
+    interface PluginMetadata {
+        name: string;
+        version: string;
+        domains: string[];
+    }
+    const [plugins, setPlugins] = useState<PluginMetadata[]>([]);
+    const [loadingPlugins, setLoadingPlugins] = useState(false);
+
     useEffect(() => {
         loadSettings();
+        loadChaosConfig();
+        loadPlugins();
     }, []);
+
+    const loadChaosConfig = async () => {
+        try {
+            const config: any = await invoke('get_chaos_config');
+            setChaosEnabled(config.enabled);
+            setChaosLatency(config.latency_ms);
+            setChaosErrorRate(config.error_rate);
+        } catch (e) {
+            console.error("Failed to load chaos config", e);
+        }
+    };
+
+    const updateChaos = async (enabled: boolean, latency: number, errorRate: number) => {
+        setChaosEnabled(enabled);
+        setChaosLatency(latency);
+        setChaosErrorRate(errorRate);
+        invoke('set_chaos_config', { latencyMs: latency, errorRate: errorRate, enabled }).catch(console.error);
+    };
+
+    const loadPlugins = async () => {
+        setLoadingPlugins(true);
+        try {
+            const list = await invoke<PluginMetadata[]>('get_all_plugins');
+            setPlugins(list);
+        } catch (e) {
+            console.error("Failed to load plugins", e);
+        }
+        setLoadingPlugins(false);
+    };
+
+    const handleReloadPlugins = async () => {
+        setLoadingPlugins(true);
+        try {
+            await invoke('reload_plugins');
+            await loadPlugins();
+        } catch (e) {
+            console.error("Failed to reload plugins", e);
+        }
+        setLoadingPlugins(false);
+    };
 
     const loadSettings = async () => {
         try {
@@ -57,102 +122,211 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
     };
 
     return (
-        <div className="settings-overlay">
-            <div className="settings-page">
+        <motion.div
+            className="settings-overlay glass-modal-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onClose}
+        >
+            <motion.div
+                className="settings-page glass-panel"
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                transition={{ type: "spring", stiffness: 300, damping: 25 }}
+                onClick={(e) => e.stopPropagation()}
+            >
                 <div className="settings-header">
-                    <h2>⚙️ Settings</h2>
-                    <button className="close-btn" onClick={onClose}>✕</button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Settings size={28} className="text-accent" />
+                        <h2>Settings</h2>
+                    </div>
+                    <button className="close-btn action-icon-btn" onClick={onClose}>
+                        <X size={24} />
+                    </button>
                 </div>
 
-                <div className="settings-content">
-                    {/* Download Directory */}
-                    <div className="setting-group">
-                        <label>Download Directory</label>
-                        <input
-                            type="text"
-                            value={settings.download_dir}
-                            onChange={(e) => setSettings({ ...settings, download_dir: e.target.value })}
-                            placeholder="C:\Users\You\Downloads"
-                        />
-                    </div>
-
-                    {/* Number of Segments */}
-                    <div className="setting-group">
-                        <label>Concurrent Segments per Download</label>
-                        <div className="slider-container">
+                <div className="settings-content custom-scrollbar">
+                    {/* General Settings */}
+                    <div className="setting-section">
+                        <h3><Folder size={18} /> Storage & Network</h3>
+                        <div className="setting-group">
+                            <label>Download Directory</label>
                             <input
-                                type="range"
-                                min="1"
-                                max="32"
-                                value={settings.segments}
-                                onChange={(e) => setSettings({ ...settings, segments: parseInt(e.target.value) })}
+                                type="text"
+                                value={settings.download_dir}
+                                onChange={(e) => setSettings({ ...settings, download_dir: e.target.value })}
+                                placeholder="C:\Users\You\Downloads"
+                                className="glass-input"
                             />
-                            <span className="slider-value">{settings.segments}</span>
                         </div>
-                        <small>More segments = faster downloads (if server supports it)</small>
-                    </div>
 
-                    {/* Speed Limit */}
-                    <div className="setting-group">
-                        <label>Speed Limit (KB/s)</label>
-                        <div className="speed-limit-container">
-                            <input
-                                type="number"
-                                min="0"
-                                value={settings.speed_limit_kbps}
-                                onChange={(e) => handleSpeedChange(e.target.value)}
-                                placeholder="0"
-                            />
-                            <span className="speed-unit">KB/s</span>
-                        </div>
-                        <small>Set to 0 for unlimited speed</small>
-                    </div>
-
-                    {/* Category Folders */}
-                    <div className="setting-group toggles">
-                        <div className="toggle-row">
-                            <label>📁 Auto-sort by Category</label>
-                            <label className="toggle">
+                        <div className="setting-group">
+                            <label>Concurrent Segments: {settings.segments}</label>
+                            <div className="slider-container">
                                 <input
-                                    type="checkbox"
-                                    checked={settings.use_category_folders}
-                                    onChange={(e) => setSettings({ ...settings, use_category_folders: e.target.checked })}
+                                    type="range"
+                                    min="1"
+                                    max="32"
+                                    value={settings.segments}
+                                    onChange={(e) => setSettings({ ...settings, segments: parseInt(e.target.value) })}
+                                    className="accent-slider"
                                 />
-                                <span className="slider"></span>
-                            </label>
+                            </div>
                         </div>
-                        <small>Organize downloads into Video, Audio, Archives, etc. folders</small>
+
+                        <div className="setting-group">
+                            <label>Speed Limit (KB/s)</label>
+                            <div className="input-with-unit">
+                                <input
+                                    type="number"
+                                    min="0"
+                                    value={settings.speed_limit_kbps}
+                                    onChange={(e) => handleSpeedChange(e.target.value)}
+                                    placeholder="0 (Unlimited)"
+                                    className="glass-input"
+                                />
+                                <span>KB/s</span>
+                            </div>
+                        </div>
                     </div>
 
-                    {/* Clipboard Monitor */}
-                    <div className="setting-group toggles">
-                        <div className="toggle-row">
-                            <label>📋 Clipboard Monitoring</label>
-                            <label className="toggle">
-                                <input
-                                    type="checkbox"
-                                    checked={settings.clipboard_monitor}
-                                    onChange={(e) => setSettings({ ...settings, clipboard_monitor: e.target.checked })}
-                                />
-                                <span className="slider"></span>
-                            </label>
+                    {/* Automation */}
+                    <div className="setting-section">
+                        <h3><Zap size={18} /> Automation</h3>
+                        <div className="setting-group toggles">
+                            <div className="toggle-row">
+                                <span>Auto-sort by Category</span>
+                                <label className="toggle">
+                                    <input
+                                        type="checkbox"
+                                        checked={settings.use_category_folders}
+                                        onChange={(e) => setSettings({ ...settings, use_category_folders: e.target.checked })}
+                                    />
+                                    <span className="slider round"></span>
+                                </label>
+                            </div>
                         </div>
-                        <small>Auto-detect URLs copied to clipboard</small>
+
+                        <div className="setting-group toggles">
+                            <div className="toggle-row">
+                                <span><Clipboard size={14} style={{ display: 'inline', marginRight: 5 }} /> Clipboard Monitor</span>
+                                <label className="toggle">
+                                    <input
+                                        type="checkbox"
+                                        checked={settings.clipboard_monitor}
+                                        onChange={(e) => setSettings({ ...settings, clipboard_monitor: e.target.checked })}
+                                    />
+                                    <span className="slider round"></span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div className="setting-group toggles">
+                            <div className="toggle-row">
+                                <span>Auto-start Extension Downloads</span>
+                                <label className="toggle">
+                                    <input
+                                        type="checkbox"
+                                        checked={settings.auto_start_extension}
+                                        onChange={(e) => setSettings({ ...settings, auto_start_extension: e.target.checked })}
+                                    />
+                                    <span className="slider round"></span>
+                                </label>
+                            </div>
+                        </div>
                     </div>
 
-                    <div className="setting-group toggles">
-                        <div className="toggle-row">
-                            <label>🌐 Auto-start Extension Downloads</label>
-                            <label className="toggle">
-                                <input
-                                    type="checkbox"
-                                    checked={settings.auto_start_extension}
-                                    onChange={(e) => setSettings({ ...settings, auto_start_extension: e.target.checked })}
-                                />
-                                <span className="slider"></span>
-                            </label>
+                    <div className="setting-section">
+                        <h3><Wifi size={18} /> Connectivity</h3>
+                        <div className="setting-group">
+                            <LanPairing />
                         </div>
-                        <small>Automatically start downloads from browser extension</small>
+                    </div>
+
+                    {/* Plugins */}
+                    <div className="setting-section">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                            <h3><Layers size={18} /> Plugins</h3>
+                            <button className="small-action-btn" onClick={handleReloadPlugins} disabled={loadingPlugins}>
+                                {loadingPlugins ? 'Reloading...' : 'Reload Plugins'}
+                            </button>
+                        </div>
+                        {plugins.length === 0 ? (
+                            <div className="empty-plugins">No plugins found in <code>plugins/</code></div>
+                        ) : (
+                            <div className="plugin-list">
+                                {plugins.map((p, i) => (
+                                    <div key={i} className="plugin-item glass-card">
+                                        <div className="plugin-header">
+                                            <span className="plugin-name">{p.name}</span>
+                                            <span className="plugin-version">v{p.version}</span>
+                                        </div>
+                                        <div className="plugin-domains">
+                                            {p.domains.join(', ')}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Chaos Mode (Network Simulator) */}
+                    <div className="section-divider"></div>
+                    <div className="setting-section chaos-section" style={{ borderColor: chaosEnabled ? '#ef4444' : 'transparent', borderLeftWidth: chaosEnabled ? '4px' : '0' }}>
+                        <div className="setting-group">
+                            <div className="toggle-row">
+                                <span style={{ color: '#ef4444', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                    <Activity size={18} /> Chaos Network Simulator
+                                </span>
+                                <label className="toggle">
+                                    <input
+                                        type="checkbox"
+                                        checked={chaosEnabled}
+                                        onChange={(e) => updateChaos(e.target.checked, chaosLatency, chaosErrorRate)}
+                                    />
+                                    <span className="slider round" style={{ backgroundColor: chaosEnabled ? '#ef4444' : '#334155' }}></span>
+                                </label>
+                            </div>
+                            <small className="warning-text">Intentionally degrades network performance for testing.</small>
+                        </div>
+
+                        {chaosEnabled && (
+                            <motion.div
+                                className="chaos-controls"
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                            >
+                                <div className="setting-group">
+                                    <label>Latency Injection ({chaosLatency}ms)</label>
+                                    <div className="slider-container">
+                                        <input
+                                            type="range"
+                                            min="0"
+                                            max="5000"
+                                            step="100"
+                                            value={chaosLatency}
+                                            onChange={(e) => updateChaos(true, parseInt(e.target.value), chaosErrorRate)}
+                                            className="danger-slider"
+                                        />
+                                    </div>
+                                </div>
+                                <div className="setting-group">
+                                    <label>Error Rate ({chaosErrorRate}%)</label>
+                                    <div className="slider-container">
+                                        <input
+                                            type="range"
+                                            min="0"
+                                            max="100"
+                                            value={chaosErrorRate}
+                                            onChange={(e) => updateChaos(true, chaosLatency, parseInt(e.target.value))}
+                                            className="danger-slider"
+                                        />
+                                    </div>
+                                </div>
+                            </motion.div>
+                        )}
                     </div>
                 </div>
 
@@ -162,7 +336,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
                         {saving ? 'Saving...' : saved ? '✓ Saved!' : 'Save Settings'}
                     </button>
                 </div>
-            </div>
-        </div>
+            </motion.div>
+        </motion.div>
     );
 };

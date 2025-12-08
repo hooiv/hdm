@@ -16,7 +16,6 @@ pub struct Segment {
     pub end_byte: u64,
     pub downloaded_cursor: u64,
     pub state: SegmentState,
-    #[serde(skip)]
     pub speed_bps: u64,
     #[serde(skip)]
     #[allow(dead_code)]

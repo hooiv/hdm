@@ -4,7 +4,7 @@
 //! recovery from network failures.
 
 use std::time::Duration;
-use reqwest::StatusCode;
+use rquest::StatusCode;
 
 /// Retry strategy based on error type
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +77,7 @@ impl RetryState {
 
 /// Analyze an error and determine the appropriate retry strategy
 #[allow(dead_code)]
-pub fn analyze_error(error: &reqwest::Error) -> RetryStrategy {
+pub fn analyze_error(error: &rquest::Error) -> RetryStrategy {
     // Connection errors - retry immediately
     if error.is_connect() {
         return RetryStrategy::Immediate;

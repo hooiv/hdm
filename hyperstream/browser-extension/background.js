@@ -1,6 +1,6 @@
 // HyperStream Browser Extension - Background Script
 
-const HYPERSTREAM_URL = 'http://localhost:9876';
+const HYPERSTREAM_URL = 'http://localhost:14733';
 
 // Check if HyperStream is running
 async function checkConnection() {

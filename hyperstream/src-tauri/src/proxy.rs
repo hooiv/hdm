@@ -95,7 +95,7 @@ impl ProxyConfig {
     pub fn build_client(&self) -> Result<Client, String> {
         let mut builder = Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            .danger_accept_invalid_certs(true); // TODO: Make this configurable
+            .min_tls_version(reqwest::tls::Version::TLS_1_2);
 
         if let Some(proxy) = self.to_reqwest_proxy() {
             builder = builder.proxy(proxy);

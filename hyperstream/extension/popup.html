@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { width: 200px; padding: 10px; font-family: sans-serif; }
+    .status { padding: 10px; border-radius: 5px; text-align: center; }
+    .online { background-color: #d4edda; color: #155724; }
+    .offline { background-color: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <h3>HyperStream</h3>
+  <div id="status" class="status">Checking...</div>
+  <script>
+    fetch("http://localhost:14733/health")
+      .then(() => {
+        document.getElementById("status").className = "status online";
+        document.getElementById("status").innerText = "Connected";
+      })
+      .catch(() => {
+        document.getElementById("status").className = "status offline";
+        document.getElementById("status").innerText = "Disconnected";
+      });
+  </script>
+</body>
+</html>

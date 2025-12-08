@@ -1,0 +1,113 @@
+
+.spider-modal {
+    width: 800px;
+    max-width: 90vw;
+    height: 80vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.spider-controls {
+    background: #f8f9fa;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.extensions-group {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+
+.crawl-btn {
+    align-self: flex-start;
+    background: #6366f1;
+    color: white;
+    padding: 8px 20px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.crawl-btn:disabled {
+    background: #a5a6f6;
+    cursor: not-allowed;
+}
+
+.results-area {
+    flex: 1;
+    overflow-y: auto;
+    border: 1px solid #eee;
+    border-radius: 4px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+}
+
+.results-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.result-item {
+    border: 1px solid #eee;
+    padding: 10px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.result-item:hover {
+    background: #f0fdf4;
+}
+
+.result-item.selected {
+    background: #dcfce7;
+    border-color: #22c55e;
+}
+
+.file-info {
+    flex: 1;
+    overflow: hidden;
+}
+
+.file-name {
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-meta {
+    font-size: 0.8em;
+    color: #666;
+}
+
+.download-all-btn {
+    margin-top: 15px;
+    background: #22c55e;
+    color: white;
+    padding: 12px;
+    border: none;
+    border-radius: 6px;
+    font-size: 1.1em;
+    cursor: pointer;
+}

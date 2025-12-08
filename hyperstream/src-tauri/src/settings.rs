@@ -15,8 +15,21 @@ pub struct Settings {
     /// Auto-start downloads from browser extension
     pub auto_start_extension: bool,
     /// Auto-sort downloads into category folders
+    /// Auto-sort downloads into category folders
     #[serde(default)]
     pub use_category_folders: bool,
+    /// Enable DPI evasion (random padding)
+    #[serde(default)]
+    pub dpi_evasion: bool,
+    /// Enable JA3/TLS fingerprint simulation
+    #[serde(default)]
+    pub ja3_enabled: bool,
+    /// Minimum adaptive threads
+    #[serde(default)]
+    pub min_threads: u32,
+    /// Maximum adaptive threads
+    #[serde(default)]
+    pub max_threads: u32,
 }
 
 impl Default for Settings {
@@ -33,6 +46,10 @@ impl Default for Settings {
             clipboard_monitor: false,
             auto_start_extension: true,
             use_category_folders: true,
+            dpi_evasion: false,
+            ja3_enabled: true,
+            min_threads: 2,
+            max_threads: 32,
         }
     }
 }

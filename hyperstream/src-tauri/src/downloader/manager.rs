@@ -38,6 +38,18 @@ impl DownloadManager {
         }
     }
 
+    pub fn new_with_segments(file_size: u64, segments: Vec<Segment>) -> Self {
+        // Find max ID to initialize next_segment_id correctly
+        let max_id = segments.iter().map(|s| s.id).max().unwrap_or(0);
+        
+        Self {
+            file_size,
+            segments: Arc::new(RwLock::new(segments)),
+            config: WorkStealConfig::default(),
+            next_segment_id: Arc::new(RwLock::new(max_id + 1)),
+        }
+    }
+
     /// Get the next idle segment to download
     pub fn get_next_segment(&self) -> Option<Segment> {
         let segments = self.segments.read().ok()?;
