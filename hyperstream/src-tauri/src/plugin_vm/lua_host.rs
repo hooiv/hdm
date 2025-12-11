@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use rquest::Client;
 use regex::Regex;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+use crate::AppState;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PluginMetadata {
@@ -98,6 +99,78 @@ impl LuaPluginHost {
             Ok(None::<String>)
         })?)?;
 
+        // host.downloads namespace
+        let downloads = lua.create_table()?;
+        let app_dl = self.app.clone();
+        
+        // host.downloads.add(url, filename)
+        downloads.set("add", lua.create_async_function(move |_, (url, filename): (String, String)| {
+            let app = app_dl.clone();
+            async move {
+                let state: tauri::State<AppState> = app.state();
+                // Settings loaded inside start_download_impl
+                let id = uuid::Uuid::new_v4().to_string();
+                
+                // Trigger backend add via reusable impl
+                let _ = crate::start_download_impl(&app, state.inner(), id.clone(), url, filename, None).await;
+                
+                // Emit toast
+                let _ = app.emit("toast", "Plugin triggered download");
+                
+                Ok(id)
+            }
+        })?)?;
+        host.set("downloads", downloads)?;
+
+        // host.fs namespace (Sandboxed to 'plugins_data')
+        let fs = lua.create_table()?;
+        // Resolve data path: CWD/plugins_data (safe-ish)
+        let data_dir = std::env::current_dir().unwrap_or_default().join("plugins_data");
+        if !data_dir.exists() {
+            let _ = std::fs::create_dir_all(&data_dir);
+        }
+
+
+        // host.fs.write(subpath, content)
+        let dd_write = data_dir.clone();
+        fs.set("write", lua.create_function(move |_, (subpath, content): (String, String)| {
+             let target = dd_write.join(&subpath);
+             // Sandbox check
+             if !target.starts_with(&dd_write) {
+                 return Err(mlua::Error::RuntimeError("Path traversal detected".to_string()));
+             }
+             if let Some(p) = target.parent() {
+                 let _ = std::fs::create_dir_all(p);
+             }
+             std::fs::write(target, content).map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+             Ok(())
+        })?)?;
+
+        // host.fs.exists(subpath)
+        let dd_exists = data_dir.clone();
+        fs.set("exists", lua.create_function(move |_, subpath: String| {
+             let target = dd_exists.join(&subpath);
+             if !target.starts_with(&dd_exists) {
+                 return Ok(false);
+             }
+             Ok(target.exists())
+        })?)?;
+
+        // host.fs.read(subpath)
+        let dd_read = data_dir.clone();
+        fs.set("read", lua.create_function(move |_, subpath: String| {
+             let target = dd_read.join(&subpath);
+             if !target.starts_with(&dd_read) {
+                 return Err(mlua::Error::RuntimeError("Path traversal detected".to_string()));
+             }
+             match std::fs::read_to_string(target) {
+                 Ok(s) => Ok(Some(s)),
+                 Err(_) => Ok(None)
+             }
+        })?)?;
+        
+        host.set("fs", fs)?;
+
         globals.set("host", host)?;
 
         Ok(())
@@ -113,8 +186,8 @@ impl LuaPluginHost {
         let lua = self.lua.lock().await;
         let globals = lua.globals();
         
-        if let Ok(extract_fn) = globals.get::<Function>("extract_stream") {
-            let result: Value = extract_fn.call_async(page_url).await?;
+        if let Ok(extract_fn) = globals.get::<_, Function>("extract_stream") {
+            let result: Value = extract_fn.call(page_url)?;
             
             if let Value::Table(t) = result {
                 // Manually extract fields or use serde if configured
@@ -142,13 +215,13 @@ impl LuaPluginHost {
         let globals = lua.globals();
         
         // Try to get the 'plugin' table that should be defined in the plugin script
-        if let Ok(plugin_table) = globals.get::<Table>("plugin") {
+        if let Ok(plugin_table) = globals.get::<_, Table>("plugin") {
             let name: String = plugin_table.get("name").unwrap_or_else(|_| "Unknown".to_string());
             let version: String = plugin_table.get("version").unwrap_or_else(|_| "1.0".to_string());
             
             // Get domains as a Lua table and convert to Vec<String>
             let mut domains = Vec::new();
-            if let Ok(domains_table) = plugin_table.get::<Table>("domains") {
+            if let Ok(domains_table) = plugin_table.get::<_, Table>("domains") {
                 for pair in domains_table.pairs::<i32, String>() {
                     if let Ok((_, domain)) = pair {
                         domains.push(domain);

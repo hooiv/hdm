@@ -1,26 +1,51 @@
 <!DOCTYPE html>
 <html>
+
 <head>
-  <style>
-    body { width: 200px; padding: 10px; font-family: sans-serif; }
-    .status { padding: 10px; border-radius: 5px; text-align: center; }
-    .online { background-color: #d4edda; color: #155724; }
-    .offline { background-color: #f8d7da; color: #721c24; }
-  </style>
+  <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
-  <h3>HyperStream</h3>
-  <div id="status" class="status">Checking...</div>
-  <script>
-    fetch("http://localhost:14733/health")
-      .then(() => {
-        document.getElementById("status").className = "status online";
-        document.getElementById("status").innerText = "Connected";
-      })
-      .catch(() => {
-        document.getElementById("status").className = "status offline";
-        document.getElementById("status").innerText = "Disconnected";
-      });
-  </script>
+  <div class="container">
+    <header>
+      <div class="title">
+        <img src="icons/icon48.png" width="20" height="20" />
+        HyperStream
+      </div>
+      <div id="status" class="status-badge offline">...</div>
+    </header>
+
+    <div class="controls">
+      <input type="text" id="search-input" class="search-input" placeholder="Search files...">
+
+      <div class="filter-tabs">
+        <button class="tab-btn active" data-filter="all">All</button>
+        <button class="tab-btn" data-filter="media">Media</button>
+        <button class="tab-btn" data-filter="doc">Docs</button>
+        <button class="tab-btn" data-filter="other">Other</button>
+      </div>
+    </div>
+
+    <div id="results-list" class="list"></div>
+
+    <div id="empty-state" style="text-align: center; color: #64748b; font-size: 12px; padding: 20px;">
+      Scanning page...
+    </div>
+
+    <div class="action-bar">
+      <button id="download-selected-btn" class="btn-primary" disabled>Download (0)</button>
+      <button id="rescan-btn" class="btn-secondary">↺</button>
+    </div>
+
+    <div class="switch-container">
+      <span class="switch-label">Intercept Downloads</span>
+      <label class="switch">
+        <input type="checkbox" id="intercept-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+  <script src="popup.js"></script>
 </body>
+
 </html>

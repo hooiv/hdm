@@ -1,142 +1,241 @@
 import React from 'react';
-import { Download, Magnet, Settings, Activity, CheckCircle, Plus, Clock, Globe, Zap, Search, Minimize2 } from 'lucide-react';
+import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle } from 'lucide-react';
+import { TitleBar } from './TitleBar';
+import { motion } from 'framer-motion';
 
-interface DownloadStats {
-    total: number;
-    downloading: number;
-    completed: number;
-    totalBytes: number;
-}
+const formatBytes = (bytes: number, decimals = 2) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+};
 
 interface LayoutProps {
     children: React.ReactNode;
-    onAddClick: () => void;
-    onAddTorrentClick?: () => void;
-    onScheduleClick?: () => void;
-    onSettingsClick?: () => void;
-    onOverlayClick?: () => void;
-    onSpiderClick?: () => void;
-    stats?: DownloadStats;
-    onSpeedLimitChange?: (limit: number) => void;
-    activeTab?: 'downloads' | 'torrents';
-    onTabChange?: (tab: 'downloads' | 'torrents') => void;
+    onAddClick: (e: React.MouseEvent) => void;
+    onAddTorrentClick: () => void;
+    onScheduleClick: () => void;
+    onSpiderClick: () => void;
+    onSettingsClick: () => void;
+    onOverlayClick: () => void;
+    stats: {
+        total: number;
+        downloading: number;
+        completed: number;
+        totalBytes: number;
+    };
+    onSpeedLimitChange: (limit: number) => void;
+    activeTab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins';
+    onTabChange: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins') => void;
 }
 
-const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-};
+const NavItem: React.FC<{ icon: any; label: string; active: boolean; onClick: () => void; badge?: string | number }> = ({ icon: Icon, label, active, onClick, badge }) => (
+    <div
+        onClick={onClick}
+        className={`
+            relative px-4 py-3 cursor-pointer flex items-center gap-3 transition-all duration-300 group rounded-xl mx-2 overflow-hidden
+            ${active
+                ? 'bg-cyan-500/10 text-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.1)] border border-cyan-500/20'
+                : 'text-slate-400 hover:text-white hover:bg-white/5 hover:pl-5'
+            }
+        `}
+    >
+        {active && (
+            <motion.div
+                layoutId="activeTabGlow"
+                className="absolute inset-0 bg-cyan-400/5 rounded-xl z-0"
+                transition={{ duration: 0.2 }}
+            />
+        )}
+        <Icon size={18} className={`transition-all duration-300 z-10 ${active ? 'scale-110 drop-shadow-[0_0_5px_rgba(6,182,212,0.5)]' : 'group-hover:scale-105'}`} />
+        <span className="font-medium text-xs tracking-wide z-10">{label}</span>
 
-export const Layout: React.FC<LayoutProps> = ({ children, onAddClick, onAddTorrentClick, onScheduleClick, onSettingsClick, onOverlayClick, stats, onSpeedLimitChange, onSpiderClick, activeTab = 'downloads', onTabChange }) => {
+        {badge && (
+            <span className="ml-auto text-[10px] font-bold bg-cyan-500/20 text-cyan-300 px-2 py-0.5 rounded-full shadow-sm z-10 border border-cyan-500/20">
+                {badge}
+            </span>
+        )}
+
+        {active && <div className="absolute left-0 top-3 bottom-3 w-1 bg-cyan-400 rounded-r-full shadow-[0_0_10px_rgba(6,182,212,0.8)]" />}
+    </div>
+);
+
+export const Layout: React.FC<LayoutProps> = ({
+    children,
+    onAddClick,
+    onAddTorrentClick,
+    onScheduleClick,
+    onSpiderClick,
+    onSettingsClick,
+    onOverlayClick,
+    stats,
+    onSpeedLimitChange,
+    activeTab,
+    onTabChange
+}) => {
     return (
-        <div className="app-container">
-            <aside className="sidebar">
-                <div className="logo">⚡ HyperStream</div>
-                <nav>
-                    <div
-                        className={`nav-item ${activeTab === 'downloads' ? 'active' : ''}`}
-                        onClick={() => onTabChange && onTabChange('downloads')}
-                    >
-                        <Download size={20} />
-                        <span>All Downloads</span>
-                        {stats && <span className="nav-badge">{stats.total}</span>}
-                    </div>
+        <div className="flex flex-col h-screen bg-[#020617] text-slate-200 font-sans selection:bg-cyan-500/30 overflow-hidden rounded-xl border border-white/5 shadow-2xl aurora-bg">
+            <TitleBar />
 
-                    <div
-                        className={`nav-item ${activeTab === 'torrents' ? 'active' : ''}`}
-                        onClick={() => onTabChange && onTabChange('torrents')}
-                    >
-                        <Magnet size={20} />
-                        <span>BitTorrent</span>
-                    </div>
+            <div className="flex flex-1 pt-0 overflow-hidden relative">
+                {/* Sidebar */}
+                <div className="w-64 flex flex-col z-10 pt-4 bg-slate-900/20 backdrop-blur-md border-r border-white/5">
 
-                    <div className="nav-divider" style={{ height: '1px', background: 'rgba(255,255,255,0.1)', margin: '15px 20px' }}></div>
-
-                    <div className="nav-item">
-                        <Activity size={20} style={{ color: '#3b82f6' }} />
-                        <span>Downloading</span>
-                        {stats && stats.downloading > 0 && (
-                            <span className="nav-badge blue">{stats.downloading}</span>
-                        )}
-                    </div>
-                    <div className="nav-item">
-                        <CheckCircle size={20} style={{ color: '#22c55e' }} />
-                        <span>Finished</span>
-                        {stats && stats.completed > 0 && (
-                            <span className="nav-badge green">{stats.completed}</span>
-                        )}
-                    </div>
-                </nav>
-
-                {stats && (
-                    <div className="stats-panel" style={{ marginTop: 'auto', padding: '20px', fontSize: '0.85rem', color: '#64748b' }}>
-                        <div className="stats-row" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
-                            <span>Total Downloaded</span>
-                            <span className="stats-value" style={{ color: '#f8fafc', fontWeight: 600 }}>{formatBytes(stats.totalBytes)}</span>
+                    {/* Sidebar Header */}
+                    <div className="pt-2 pb-6 px-6">
+                        <div className="glass-card rounded-xl p-4 border border-white/5 shadow-inner">
+                            <h2 className="text-[10px] uppercase font-bold text-slate-500 mb-2 tracking-widest">Storage Used</h2>
+                            <div className="text-2xl font-bold text-white tracking-tight text-glow">
+                                {formatBytes(stats.totalBytes)}
+                            </div>
+                            <div className="w-full bg-black/40 h-1.5 rounded-full mt-3 overflow-hidden">
+                                <motion.div
+                                    className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 relative overflow-hidden shadow-[0_0_10px_rgba(6,182,212,0.5)]"
+                                    initial={{ width: 0 }}
+                                    animate={{ width: `${(stats.totalBytes > 0 ? 65 : 5)}%` }}
+                                    transition={{ duration: 1.5, ease: "easeOut" }}
+                                >
+                                    <div className="absolute inset-0 animate-shimmer" />
+                                </motion.div>
+                            </div>
                         </div>
                     </div>
-                )}
 
-                <div className="sidebar-footer">
-                    <div className="nav-item settings" onClick={onSettingsClick}>
-                        <Settings size={20} />
-                        <span>Settings</span>
+                    {/* Navigation */}
+                    <nav className="flex-1 space-y-1 overflow-y-auto custom-scrollbar px-2">
+                        <div className="px-4 mb-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest pl-4">Menu</div>
+
+                        <NavItem
+                            icon={DownloadCloud}
+                            label="Downloads"
+                            active={activeTab === 'downloads'}
+                            onClick={() => onTabChange('downloads')}
+                            badge={stats.downloading > 0 ? stats.downloading : undefined}
+                        />
+                        <NavItem
+                            icon={Magnet}
+                            label="Torrents"
+                            active={activeTab === 'torrents'}
+                            onClick={() => onTabChange('torrents')}
+                        />
+                        <NavItem
+                            icon={Rss}
+                            label="Feeds"
+                            active={activeTab === 'feeds'}
+                            onClick={() => onTabChange('feeds')}
+                        />
+                        <NavItem
+                            icon={Search}
+                            label="Discover"
+                            active={activeTab === 'search'}
+                            onClick={() => onTabChange('search')}
+                        />
+                        <NavItem
+                            icon={Puzzle}
+                            label="Plugins"
+                            active={activeTab === 'plugins'}
+                            onClick={() => onTabChange('plugins')}
+                        />
+
+                        <div className="px-4 mt-8 mb-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest pl-4">Tools</div>
+
+                        <NavItem
+                            icon={Calendar}
+                            label="Scheduler"
+                            active={false}
+                            onClick={onScheduleClick}
+                        />
+                        <NavItem
+                            icon={Globe}
+                            label="Site Grabber"
+                            active={false}
+                            onClick={onSpiderClick}
+                        />
+                    </nav>
+
+                    {/* Footer Actions */}
+                    <div className="p-4 border-t border-white/5 space-y-2 bg-black/20">
+                        <button
+                            onClick={onOverlayClick}
+                            className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all flex items-center gap-2 group"
+                        >
+                            <LayoutGrid size={16} className="group-hover:text-cyan-400 transition-colors" />
+                            <span>Compact Overlay</span>
+                        </button>
+                        <button
+                            onClick={onSettingsClick}
+                            className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all flex items-center gap-2 group"
+                        >
+                            <Settings size={16} className="group-hover:text-cyan-400 transition-colors" />
+                            <span>Preferences</span>
+                        </button>
                     </div>
                 </div>
-            </aside>
-            <main className="main-content">
-                <header className="top-bar">
-                    <div className="header-actions" style={{ display: 'flex', gap: '10px' }}>
-                        {onOverlayClick && (
-                            <button className="icon-btn" onClick={onOverlayClick} title="Toggle Mini Overlay">
-                                <Minimize2 size={18} />
-                            </button>
-                        )}
-                        <button className="add-btn" onClick={onAddClick}>
-                            <Plus size={16} /> Add Url
-                        </button>
-                        {onAddTorrentClick && (
-                            <button className="add-btn" onClick={onAddTorrentClick} style={{ background: '#14b8a6' }}>
-                                <Magnet size={16} /> Add Torrent
-                            </button>
-                        )}
-                        <div style={{ width: '1px', background: 'rgba(255,255,255,0.1)', margin: '0 5px' }}></div>
 
-                        <button className="schedule-btn" onClick={onSpiderClick} style={{ background: '#6366f1' }}>
-                            <Globe size={16} /> Spider
-                        </button>
-                        <button className="schedule-btn" onClick={onScheduleClick}>
-                            <Clock size={16} /> Schedule
-                        </button>
+                {/* Main Content Area */}
+                <div className="flex-1 flex flex-col min-w-0 bg-transparent relative">
+                    {/* Top Bar */}
+                    <header className="h-16 border-b border-white/5 flex items-center justify-between px-6 bg-slate-900/10 backdrop-blur-sm z-20">
+                        <div className="flex items-center gap-4">
+                            <h1 className="text-lg font-bold text-white tracking-tight drop-shadow-sm">
+                                {activeTab === 'downloads' && 'My Downloads'}
+                                {activeTab === 'torrents' && 'Torrent Manager'}
+                                {activeTab === 'feeds' && 'RSS Feeds'}
+                                {activeTab === 'search' && 'Search & Discover'}
+                                {activeTab === 'plugins' && 'Plugin Editor'}
+                            </h1>
+                            {activeTab === 'downloads' && (
+                                <span className="bg-white/5 text-slate-300 text-[10px] px-2.5 py-1 rounded-full font-bold border border-white/10 shadow-sm backdrop-blur-md">
+                                    {stats.total} Active
+                                </span>
+                            )}
+                        </div>
 
-                        <div className="speed-limit-control glass-panel" style={{ display: 'flex', alignItems: 'center', marginLeft: '10px', padding: '4px 8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.1)' }}>
-                            <Zap size={14} style={{ color: '#f59e0b', marginRight: '5px' }} />
-                            <select
-                                onChange={(e) => onSpeedLimitChange && onSpeedLimitChange(Number(e.target.value))}
-                                style={{ background: 'transparent', border: 'none', color: '#cbd5e1', outline: 'none', fontSize: '0.85rem' }}
-                                defaultValue={0}
+                        <div className="flex items-center gap-3">
+                            <div className="flex items-center bg-black/20 rounded-lg p-1 border border-white/5 hover:border-white/10 transition-colors">
+                                <Zap size={14} className="ml-2 text-amber-400" />
+                                <select
+                                    className="bg-transparent border-none text-xs text-slate-300 focus:ring-0 cursor-pointer py-1 pl-2 pr-6 font-medium outline-none"
+                                    onChange={(e) => onSpeedLimitChange(parseInt(e.target.value))}
+                                >
+                                    <option value="0">Unlimited Speed</option>
+                                    <option value="512">Limit: 500 KB/s</option>
+                                    <option value="1024">Limit: 1 MB/s</option>
+                                    <option value="5120">Limit: 5 MB/s</option>
+                                    <option value="10240">Limit: 10 MB/s</option>
+                                </select>
+                            </div>
+
+                            <motion.button
+                                whileHover={{ scale: 1.02, backgroundColor: "rgba(255,255,255,0.1)" }}
+                                whileTap={{ scale: 0.98 }}
+                                onClick={onAddTorrentClick}
+                                className="bg-white/5 text-slate-200 px-4 py-2 rounded-lg text-xs font-bold transition-all border border-white/10 flex items-center gap-2 hover:shadow-[0_0_15px_rgba(255,255,255,0.05)]"
                             >
-                                <option value={0}>Unlimited</option>
-                                <option value={512}>512 KB/s</option>
-                                <option value={1024}>1 MB/s</option>
-                                <option value={2048}>2 MB/s</option>
-                                <option value={5120}>5 MB/s</option>
-                                <option value={10240}>10 MB/s</option>
-                            </select>
+                                <Magnet size={16} className="text-violet-400" />
+                                Add Magnet
+                            </motion.button>
+
+                            <motion.button
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                                onClick={onAddClick}
+                                className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 shadow-[0_0_20px_rgba(6,182,212,0.3)] border border-cyan-400/20"
+                            >
+                                <Plus size={16} strokeWidth={3} />
+                                New Task
+                            </motion.button>
                         </div>
-                    </div>
-                    <div className="search-bar glass-input-container" style={{ marginLeft: 'auto', position: 'relative' }}>
-                        <Search size={16} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: '#64748b' }} />
-                        <input type="text" placeholder="Search..." style={{ paddingLeft: '32px' }} className="glass-input" />
-                    </div>
-                </header>
-                <div className="content-area">
-                    {children}
+                    </header>
+
+                    {/* Content Viewport */}
+                    <main className="flex-1 overflow-hidden relative p-0">
+                        {children}
+                    </main>
                 </div>
-            </main>
+            </div>
         </div>
     );
 };

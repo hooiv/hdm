@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { GrabbedFile } from '../types';
-import './SpiderModal.css';
+import { motion } from 'framer-motion';
+import { Bug, X, Globe, CheckSquare, Square, Download, FileText, Image as ImageIcon } from 'lucide-react';
 
 interface SpiderModalProps {
     isOpen: boolean;
@@ -70,89 +71,153 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
     if (!isOpen) return null;
 
     return (
-        <div className="modal-overlay">
-            <div className="modal-content spider-modal">
-                <div className="modal-header">
-                    <h2>🕷 Site Grabber</h2>
-                    <button className="close-btn" onClick={onClose}>&times;</button>
-                </div>
-                <div className="spider-controls">
-                    <div className="input-group">
-                        <label>Start URL:</label>
-                        <input
-                            type="text"
-                            value={url}
-                            onChange={e => setUrl(e.target.value)}
-                            placeholder="https://example.com/gallery"
-                        />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <motion.div
+                className="w-full max-w-4xl h-[85vh] bg-slate-900 border border-slate-700/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+            >
+                {/* Header */}
+                <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50 bg-slate-900/50 backdrop-blur-md">
+                    <div className="flex items-center gap-3">
+                        <div className="p-2 bg-red-500/10 rounded-lg text-red-500">
+                            <Bug size={24} />
+                        </div>
+                        <h2 className="text-xl font-bold text-slate-200">Site Grabber</h2>
                     </div>
-                    <div className="input-group row">
-                        <label>Depth:
-                            <input
-                                type="number"
-                                min="0"
-                                max="3"
-                                value={maxDepth}
-                                onChange={e => setMaxDepth(Number(e.target.value))}
-                                style={{ width: '60px', marginLeft: '10px' }}
-                            />
-                        </label>
-                    </div>
-                    <div className="extensions-group">
-                        <label>Extensions:</label>
-                        {Object.keys(extensions).map(ext => (
-                            <label key={ext} className="checkbox-label">
-                                <input
-                                    type="checkbox"
-                                    checked={(extensions as any)[ext]}
-                                    onChange={e => setExtensions(prev => ({ ...prev, [ext]: e.target.checked }))}
-                                />
-                                {ext.toUpperCase()}
-                            </label>
-                        ))}
-                    </div>
-                    <button
-                        className="crawl-btn"
-                        onClick={handleCrawl}
-                        disabled={isCrawling || !url}
-                    >
-                        {isCrawling ? 'Crawling...' : 'Start Crawling'}
+                    <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-lg transition-colors text-slate-400 hover:text-white">
+                        <X size={24} />
                     </button>
                 </div>
 
-                {error && <div className="error-message">{error}</div>}
+                {/* Body */}
+                <div className="flex-1 flex flex-col p-6 overflow-hidden">
 
-                <div className="results-area">
-                    {results.length > 0 && (
-                        <>
-                            <div className="results-header">
-                                <span>Found {results.length} files</span>
-                                <button onClick={() => setSelectedUrls(new Set(results.map(f => f.url)))}>Select All</button>
-                                <button onClick={() => setSelectedUrls(new Set())}>Deselect All</button>
+                    {/* Controls */}
+                    <div className="grid gap-4 bg-slate-800/30 p-5 rounded-xl border border-slate-700/50 mb-6">
+                        <div className="flex gap-4">
+                            <div className="flex-1 relative">
+                                <Globe className="absolute left-3 top-3 text-slate-500" size={18} />
+                                <input
+                                    type="text"
+                                    value={url}
+                                    onChange={e => setUrl(e.target.value)}
+                                    placeholder="https://example.com/gallery"
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-10 pr-4 py-2.5 text-slate-200 focus:outline-none focus:border-red-500/50 transition-colors"
+                                />
                             </div>
-                            <div className="results-grid">
-                                {results.map((file, idx) => (
-                                    <div key={idx} className={`result-item ${selectedUrls.has(file.url) ? 'selected' : ''}`} onClick={() => toggleSelection(file.url)}>
-                                        <div className="file-icon">{file.file_type === 'image' ? '🖼️' : '📄'}</div>
-                                        <div className="file-info">
-                                            <div className="file-name" title={file.url}>{file.filename}</div>
-                                            <div className="file-meta">{file.size ? `${(file.size / 1024).toFixed(1)} KB` : 'Unknown size'}</div>
-                                        </div>
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedUrls.has(file.url)}
-                                            readOnly
-                                        />
-                                    </div>
-                                ))}
+                            <div className="w-24">
+                                <input
+                                    type="number"
+                                    min="0" max="3"
+                                    value={maxDepth}
+                                    onChange={e => setMaxDepth(Number(e.target.value))}
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-red-500/50 text-center"
+                                    title="Crawl Depth"
+                                />
                             </div>
-                            <button className="download-all-btn" onClick={handleDownloadSelected}>
-                                Download {selectedUrls.size} Selected Files
+                        </div>
+
+                        <div className="flex flex-wrap gap-3 items-center">
+                            <span className="text-sm font-medium text-slate-500 mr-2">Extensions:</span>
+                            {Object.keys(extensions).map(ext => (
+                                <label key={ext} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 cursor-pointer hover:border-slate-600 transition-colors">
+                                    <input
+                                        type="checkbox"
+                                        checked={(extensions as any)[ext]}
+                                        onChange={e => setExtensions(prev => ({ ...prev, [ext]: e.target.checked }))}
+                                        className="rounded border-slate-600 text-red-500 focus:ring-offset-0 focus:ring-0 bg-slate-800"
+                                    />
+                                    <span className="text-xs font-bold text-slate-300 uppercase">{ext}</span>
+                                </label>
+                            ))}
+
+                            <button
+                                onClick={handleCrawl}
+                                disabled={isCrawling || !url}
+                                className={`ml-auto px-6 py-2 rounded-lg font-bold text-white transition-all shadow-lg ${isCrawling ? 'bg-slate-700 cursor-not-allowed' : 'bg-red-600 hover:bg-red-500 shadow-red-900/20'
+                                    }`}
+                            >
+                                {isCrawling ? 'Crawling...' : 'Start Crawling'}
                             </button>
-                        </>
+                        </div>
+                    </div>
+
+                    {/* Error */}
+                    {error && (
+                        <div className="p-4 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl mb-6 text-sm">
+                            {error}
+                        </div>
+                    )}
+
+                    {/* Results */}
+                    {results.length > 0 && (
+                        <div className="flex-1 flex flex-col min-h-0 bg-slate-800/20 rounded-xl border border-slate-700/50 overflow-hidden">
+                            <div className="p-3 border-b border-slate-700/50 flex items-center justify-between bg-slate-900/30">
+                                <span className="text-sm font-medium text-slate-300">Found {results.length} files</span>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => setSelectedUrls(new Set(results.map(f => f.url)))}
+                                        className="px-3 py-1 text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+                                    >
+                                        Select All
+                                    </button>
+                                    <button
+                                        onClick={() => setSelectedUrls(new Set())}
+                                        className="px-3 py-1 text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+                                    >
+                                        Deselect All
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="flex-1 overflow-y-auto p-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 align-content-start custom-scrollbar">
+                                {results.map((file, idx) => {
+                                    const isSelected = selectedUrls.has(file.url);
+                                    return (
+                                        <div
+                                            key={idx}
+                                            onClick={() => toggleSelection(file.url)}
+                                            className={`p-3 rounded-lg border cursor-pointer transition-all flex items-start gap-3 group ${isSelected
+                                                ? 'bg-blue-500/10 border-blue-500/30'
+                                                : 'bg-slate-900/40 border-slate-800 hover:border-slate-600'
+                                                }`}
+                                        >
+                                            <div className={`p-2 rounded-lg ${isSelected ? 'bg-blue-500/20 text-blue-400' : 'bg-slate-800 text-slate-500'}`}>
+                                                {file.file_type === 'image' ? <ImageIcon size={18} /> : <FileText size={18} />}
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <div className={`text-sm font-medium truncate mb-0.5 ${isSelected ? 'text-blue-300' : 'text-slate-300'}`}>
+                                                    {file.filename}
+                                                </div>
+                                                <div className="text-xs text-slate-500 font-mono truncate opacity-70">{file.size ? `${(file.size / 1024).toFixed(1)} KB` : 'Unknown size'}</div>
+                                            </div>
+                                            <div className={`text-blue-500 transition-opacity ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-30'}`}>
+                                                {isSelected ? <CheckSquare size={18} /> : <Square size={18} />}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            <div className="p-4 border-t border-slate-700/50 bg-slate-900/50 backdrop-blur-md flex justify-end">
+                                <button
+                                    onClick={handleDownloadSelected}
+                                    disabled={selectedUrls.size === 0}
+                                    className={`px-6 py-2.5 rounded-lg font-bold text-white flex items-center gap-2 transition-all shadow-lg ${selectedUrls.size === 0
+                                        ? 'bg-slate-700 opacity-50 cursor-not-allowed'
+                                        : 'bg-blue-600 hover:bg-blue-500 shadow-blue-900/20'
+                                        }`}
+                                >
+                                    <Download size={18} />
+                                    Download {selectedUrls.size} Files
+                                </button>
+                            </div>
+                        </div>
                     )}
                 </div>
-            </div>
+            </motion.div>
         </div>
     );
 };

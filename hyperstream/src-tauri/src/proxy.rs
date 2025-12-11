@@ -1,4 +1,5 @@
 use reqwest::{Client, Proxy as ReqwestProxy};
+use rquest::{Proxy as RquestProxy};
 use serde::{Serialize, Deserialize};
 
 /// Proxy type configuration
@@ -30,6 +31,38 @@ pub struct ProxyConfig {
 }
 
 impl ProxyConfig {
+    pub fn from_settings(s: &crate::settings::Settings) -> Self {
+        // Tor Override
+        if s.use_tor {
+            // Check if Tor is ready (port assigned)
+            if let Some(port) = crate::network::tor::get_socks_port() {
+                return Self {
+                    enabled: true,
+                    proxy_type: ProxyType::Socks5,
+                    host: "127.0.0.1".to_string(),
+                    port,
+                    username: None,
+                    password: None,
+                    bypass_list: String::new(),
+                };
+            }
+        }
+
+        Self {
+            enabled: s.proxy_enabled,
+            proxy_type: match s.proxy_type.as_str() {
+                "socks5" => ProxyType::Socks5,
+                "https" => ProxyType::Https,
+                _ => ProxyType::Http,
+            },
+            host: s.proxy_host.clone(),
+            port: s.proxy_port,
+            username: s.proxy_username.clone(),
+            password: s.proxy_password.clone(),
+            bypass_list: String::new(), 
+        }
+    }
+    
     /// Build a reqwest Proxy from this config
     pub fn to_reqwest_proxy(&self) -> Option<ReqwestProxy> {
         if !self.enabled || self.host.is_empty() {
@@ -44,6 +77,36 @@ impl ProxyConfig {
         };
 
         let proxy = match ReqwestProxy::all(&url) {
+            Ok(mut p) => {
+                // Add authentication if provided
+                if let (Some(user), Some(pass)) = (&self.username, &self.password) {
+                    p = p.basic_auth(user, pass);
+                }
+                Some(p)
+            }
+            Err(e) => {
+                eprintln!("Failed to create proxy: {}", e);
+                None
+            }
+        };
+
+        proxy
+    }
+
+    /// Build a rquest Proxy from this config
+    pub fn to_rquest_proxy(&self) -> Option<RquestProxy> {
+        if !self.enabled || self.host.is_empty() {
+            return None;
+        }
+
+        let url = match self.proxy_type {
+            ProxyType::None => return None,
+            ProxyType::Http => format!("http://{}:{}", self.host, self.port),
+            ProxyType::Https => format!("https://{}:{}", self.host, self.port),
+            ProxyType::Socks5 => format!("socks5://{}:{}", self.host, self.port),
+        };
+
+        let proxy = match RquestProxy::all(&url) {
             Ok(mut p) => {
                 // Add authentication if provided
                 if let (Some(user), Some(pass)) = (&self.username, &self.password) {

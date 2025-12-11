@@ -1,6 +1,9 @@
 use tauri::{Emitter, State, Manager};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::menu::{Menu, MenuItem};
 use futures_util::StreamExt;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use crate::downloader::manager::DownloadManager;
 use crate::downloader::disk::{DiskWriter, WriteRequest};
 use std::sync::mpsc;
@@ -27,8 +30,16 @@ mod proxy;
 mod adaptive_threads;
 
 // mod virus_scanner;
-// mod import_export;
+mod import_export;
 mod lan_api;
+mod system_monitor;
+mod feeds;
+mod search;
+
+// mod virtual_drive;
+mod cloud_bridge;
+mod media_processor;
+mod ai;
 
 use persistence::SavedDownload;
 use settings::Settings;
@@ -56,12 +67,12 @@ struct DownloadSession {
     file_writer: Arc<Mutex<std::fs::File>>,
 }
 
-struct AppState {
-    downloads: Mutex<HashMap<String, DownloadSession>>,
-    p2p_node: Arc<network::p2p::P2PNode>,
-    p2p_file_map: http_server::FileMap,
-    torrent_manager: Arc<network::bittorrent::manager::TorrentManager>,
-    connection_manager: network::connection_manager::ConnectionManager,
+pub(crate) struct AppState {
+    pub(crate) downloads: Mutex<HashMap<String, DownloadSession>>,
+    pub(crate) p2p_node: Arc<network::p2p::P2PNode>,
+    pub(crate) p2p_file_map: http_server::FileMap,
+    pub(crate) torrent_manager: Arc<network::bittorrent::manager::TorrentManager>,
+    pub(crate) connection_manager: network::connection_manager::ConnectionManager,
 }
 
 #[tauri::command]
@@ -103,12 +114,64 @@ async fn get_torrents(
 }
 
 #[tauri::command]
+async fn export_data(path: String) -> Result<(), String> {
+    let settings = settings::load_settings();
+    let downloads = persistence::load_downloads().unwrap_or_default();
+    
+    let data = crate::import_export::ExportData {
+        version: "1.0".to_string(),
+        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        settings,
+        downloads,
+    };
+    
+    crate::import_export::save_export_to_file(&data, &path)
+}
+
+#[tauri::command]
+async fn import_data(path: String) -> Result<(), String> {
+    let data = crate::import_export::load_export_from_file(&path)?;
+    
+    // 1. Restore Settings
+    settings::save_settings(&data.settings)?;
+    
+    // 2. Restore Downloads (Merge/Append)
+    let mut current_downloads = persistence::load_downloads().unwrap_or_default();
+    let mut count = 0;
+    
+    for d in data.downloads {
+        if !current_downloads.iter().any(|existing| existing.id == d.id) {
+            current_downloads.push(d);
+            count += 1;
+        }
+    }
+    
+    persistence::save_downloads(&current_downloads).map_err(|e| e.to_string())?;
+    
+    println!("Imported settings and {} new downloads.", count);
+    Ok(())
+}
+
+
+#[tauri::command]
 async fn start_download(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    url: String,
+    path: String,
+    _force: Option<bool>,
+) -> Result<(), String> {
+    start_download_impl(&app, &state, id, url, path, None).await
+}
+
+pub async fn start_download_impl(
+    app: &tauri::AppHandle,
+    state: &AppState,
     id: String, 
     url: String, 
-    path: String, 
-    window: tauri::Window, 
-    state: State<'_, AppState>
+    path: String,
+    _resume_override: Option<u64>
 ) -> Result<(), String> {
     println!("DEBUG: Starting download ID: {}", id);
 
@@ -121,14 +184,69 @@ async fn start_download(
         println!("DEBUG: Resuming from byte {}", resume_from);
     }
     
-    
-    // 2. Get Content Length
-    // Use masquerading to evade anti-bot blocking
     let settings = settings::load_settings();
-    let client = if settings.dpi_evasion {
-        network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome)
+
+    // AUTO-SORT / CATEGORY LOGIC
+    // We only change path if it's a new download (not resuming) OR if we force checks (safer to only do new)
+    // But `resume_from > 0` implies file exists at `path`. If we change `path` on resume, it breaks.
+    // So ONLY apply category rules if strict resume_from == 0 OR we check if file exists at old path.
+    // Simplest: only apply on start (resume_from == 0).
+    
+    let final_path = if resume_from == 0 && settings.use_category_folders {
+        // Parse filename
+        let path_obj = std::path::Path::new(&path);
+        let filename = path_obj.file_name().unwrap_or_default().to_string_lossy().to_string();
+        
+        // Find matching rule
+        let mut new_path_buf = path_obj.to_path_buf();
+        
+        for rule in &settings.category_rules {
+            if let Ok(re) = regex::Regex::new(&rule.pattern) {
+                if re.is_match(&filename) {
+                    println!("DEBUG: Matched Category Rule '{}' for '{}'", rule.name, filename);
+                    
+                    // Determine parent (Category Folder)
+                    // If rule.path is absolute, use it. If relative, join with settings.download_dir
+                    let category_path = if std::path::Path::new(&rule.path).is_absolute() {
+                        std::path::PathBuf::from(&rule.path)
+                    } else {
+                        std::path::PathBuf::from(&settings.download_dir).join(&rule.path)
+                    };
+                    
+                    // Create dir if needed
+                    std::fs::create_dir_all(&category_path).ok();
+                    
+                    new_path_buf = category_path.join(&filename);
+                    break; 
+                }
+            }
+        }
+        new_path_buf.to_string_lossy().to_string()
     } else {
-        network::masq::build_client()
+        path.clone()
+    };
+    
+    // Use final_path for the rest
+    let path = final_path;
+
+    // 2. Get Content Length
+    let settings = settings::load_settings(); // reload settings fresh
+    
+    // Ensure Tor is ready if enabled (Idempotent call)
+    if settings.use_tor {
+        if crate::network::tor::get_socks_port().is_none() {
+             // Try to init on demand
+             let _ = crate::network::tor::init_tor().await.map_err(|e| format!("Tor Init Failed: {}", e))?;
+        }
+    }
+
+    let proxy_config = crate::proxy::ProxyConfig::from_settings(&settings);
+
+    // Use masquerading to evade anti-bot blocking
+    let client = if settings.dpi_evasion {
+        network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome, Some(&proxy_config))
+    } else {
+        network::masq::build_client(Some(&proxy_config))
     }.map_err(|e| e.to_string())?;
 
     let total_size = downloader::initialization::determine_total_size(&client, &url).await?;
@@ -150,8 +268,8 @@ async fn start_download(
 
     // 4. Initialize Manager
     let manager = downloader::initialization::setup_manager(total_size, saved, resume_from);
-    let downloaded_total = Arc::new(Mutex::new(resume_from));
-    let last_progress_emit = Arc::new(Mutex::new(std::time::Instant::now()));
+    let downloaded_total = Arc::new(AtomicU64::new(resume_from));
+    // let last_progress_emit = Arc::new(Mutex::new(std::time::Instant::now())); // Removed
 
     // 5. Setup Stop Signal
     let (stop_tx, _) = broadcast::channel(1);
@@ -176,10 +294,56 @@ async fn start_download(
         writer.run();
     });
 
-    // 8. Spawn Threads
+    // 8. Spawn Monitor Task (Decoupled Emission)
+    let manager_monitor = manager.clone();
+    let downloaded_monitor = downloaded_total.clone();
+    let window_monitor = app.clone();
+    let id_monitor = id.clone();
+    let mut stop_rx_monitor = stop_tx.subscribe();
+    
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(33)); // ~30fps
+        loop {
+            tokio::select! {
+                _ = stop_rx_monitor.recv() => break,
+                _ = interval.tick() => {
+                    let d = downloaded_monitor.load(Ordering::Relaxed);
+                    
+                    // Get segment snapshot for visualization
+                    // We only lock here, once per 33ms, instead of per-chunk
+                    // Note: get_segments_snapshot internally locks.
+                    let segments = manager_monitor.lock().unwrap().get_segments_snapshot();
+                    
+                    // Compress to tuple format
+                    let slim_segments: Vec<SlimSegment> = segments.iter().map(|s| (
+                        s.id,
+                        s.start_byte,
+                        s.end_byte,
+                        s.downloaded_cursor,
+                        s.state as u8,
+                        s.speed_bps
+                    )).collect();
+
+                    let _ = window_monitor.emit("download_progress", Payload { 
+                        id: id_monitor.clone(), 
+                        downloaded: d, 
+                        total: total_size,
+                        segments: slim_segments
+                    });
+
+                    if d >= total_size {
+                        crate::media::sounds::play_complete();
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // 9. Spawn Worker Threads
     let mut handles = Vec::new();
     
-    // We need to clone manager segments to iterate, but we need the Arc for the threads
+    // We need to clone manager segments to iterate
     let segments_count = manager.lock().unwrap().segments.read().unwrap().len();
 
     for i in 0..segments_count {
@@ -187,12 +351,16 @@ async fn start_download(
         let url_clone = url.clone();
         let tx_clone = tx.clone();
         let client_clone = client.clone();
-        let window_clone = window.clone();
+        // let window_clone = window.clone(); // Not needed in worker
         let downloaded_clone = downloaded_total.clone();
-        let last_emit_clone = last_progress_emit.clone();
+        // let last_emit_clone = last_progress_emit.clone(); // Not needed
         let cm_clone = state.connection_manager.clone();
         let mut stop_rx = stop_tx.subscribe();
-        let download_id = id.clone();
+        let stop_tx_clone = stop_tx.clone();
+        let id_worker = id.clone();
+        let path_worker = path.clone();
+        let url_worker = url.clone(); // Alias for error handler
+        let app_handle_clone = app.clone(); // Capture app handle for emitting events
 
         let handle = tokio::spawn(async move {
             let (start, end) = {
@@ -212,8 +380,6 @@ async fn start_download(
             loop {
                 // Check for stop signal
                 if stop_rx.try_recv().is_ok() {
-                    println!("DEBUG: Thread {} received stop signal", i);
-                    // Update state before exit
                     let m = manager_clone.lock().unwrap();
                     let mut segs = m.segments.write().unwrap();
                     segs[i].downloaded_cursor = current_pos;
@@ -234,17 +400,12 @@ async fn start_download(
                 let _permit = cm_clone.acquire(&url_clone).await;
 
                 // Chaos Mode Check: Inject latency or failure here
-                if let Err(e) = crate::network::chaos::check_chaos().await {
-                     println!("DEBUG: Chaos Injection Error: {}", e);
+                if let Err(_e) = crate::network::chaos::check_chaos().await {
                      retry_count += 1;
                      if retry_count <= MAX_RETRIES {
                          tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                          continue;
                      }
-                     // If max retries, we might want to break or continue to native error handling
-                     // For now, let's treat it as a network error handled below, but breaking the connection
-                     // logic here effectively.
-                     // Actually, if check_chaos fails, we should skip the request.
                 }
 
                 // Use tokio::select to allow cancellation during request
@@ -252,7 +413,6 @@ async fn start_download(
                 
                 let res = tokio::select! {
                     _ = stop_rx.recv() => {
-                        println!("DEBUG: Thread {} stopped during request", i);
                         let m = manager_clone.lock().unwrap();
                         let mut segs = m.segments.write().unwrap();
                         segs[i].downloaded_cursor = current_pos;
@@ -267,11 +427,57 @@ async fn start_download(
                     Err(e) => {
                         println!("DEBUG: Thread {} error: {}", i, e);
                         retry_count += 1;
-                        if retry_count > MAX_RETRIES { break; }
+                        if retry_count > MAX_RETRIES { 
+                            crate::media::sounds::play_error();
+                            break; 
+                        }
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         continue;
                     }
                 };
+
+                // Check for 403 Forbidden / 410 Gone (Link Expired)
+                if response.status() == rquest::StatusCode::FORBIDDEN || response.status() == rquest::StatusCode::GONE {
+                     println!("Thread {} error: Link Expired (403/410). Requesting Hot-Swap.", i);
+                     
+                     // 1. Stop all threads
+                     let _ = stop_tx_clone.send(());
+
+                     // 2. Persist status as "WaitingForRefresh"
+                     let segments = manager_clone.lock().unwrap().get_segments_snapshot();
+                     let total_downloaded = segments.iter().map(|s| s.downloaded_cursor - s.start_byte).sum();
+                     
+                     let filename_s = std::path::Path::new(&path_worker).file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "download".to_string());
+                        
+                     let saved = persistence::SavedDownload {
+                         id: id_worker.clone(),
+                         url: url_worker.clone(),
+                         path: path_worker.clone(),
+                         filename: filename_s,
+                         total_size: 0, // Should be passed but not captured? total_size is u64 Copy.
+                         downloaded_bytes: total_downloaded,
+                         status: "WaitingForRefresh".to_string(),
+                         segments: Some(segments),
+                     };
+                     // We need total_size in worker? It's captured if Copy.
+                     // But we need to make sure `saved.total_size` is correct.
+                     // `total_size` is available in `start_download` scope.
+                     
+                     let _ = persistence::upsert_download(saved);
+                     
+                     // 3. Notify UI
+                     let _ = app_handle_clone.emit("download_progress", Payload {
+                         id: id_worker.clone(),
+                         downloaded: total_downloaded,
+                         total: 0, 
+                         segments: vec![],
+                     });
+                     
+                     crate::media::sounds::play_error();
+                     return;
+                }
 
                 // Check for Rate Limiting (429/503)
                 if response.status() == rquest::StatusCode::TOO_MANY_REQUESTS || response.status() == rquest::StatusCode::SERVICE_UNAVAILABLE {
@@ -285,7 +491,6 @@ async fn start_download(
                          std::time::Duration::from_secs(30)
                      };
 
-                     println!("DEBUG: Rate limit hit ({}). Sleeping for {:?}s", response.status(), wait_time);
                      tokio::time::sleep(wait_time).await;
                      continue;
                 }
@@ -295,7 +500,6 @@ async fn start_download(
                 loop {
                     tokio::select! {
                         _ = stop_rx.recv() => {
-                            println!("DEBUG: Thread {} stopped during stream", i);
                             let m = manager_clone.lock().unwrap();
                             let mut segs = m.segments.write().unwrap();
                             segs[i].downloaded_cursor = current_pos;
@@ -309,42 +513,11 @@ async fn start_download(
                                     tx_clone.send(WriteRequest { offset: current_pos, data: chunk.to_vec(), segment_id: i as u32 }).unwrap();
                                     current_pos += len;
                                     
-                                    // Update global progress
-                                        let mut d = downloaded_clone.lock().unwrap();
-                                        *d += len;
-                                        
-                                        // Throttle emission
-                                        let should_emit = {
-                                            let mut last = last_emit_clone.lock().unwrap();
-                                            if last.elapsed().as_millis() >= 33 || *d >= total_size {
-                                                *last = std::time::Instant::now();
-                                                true
-                                            } else {
-                                                false
-                                            }
-                                        };
-
-                                        if should_emit {
-                                            // Get segment snapshot for visualization
-                                            let segments = manager_clone.lock().unwrap().get_segments_snapshot();
-                                            
-                                            // Compress to tuple format
-                                            let slim_segments: Vec<SlimSegment> = segments.iter().map(|s| (
-                                                s.id,
-                                                s.start_byte,
-                                                s.end_byte,
-                                                s.downloaded_cursor,
-                                                s.state as u8,
-                                                s.speed_bps
-                                            )).collect();
-
-                                            window_clone.emit("download_progress", Payload { 
-                                                id: download_id.clone(), 
-                                                downloaded: *d, 
-                                                total: total_size,
-                                                segments: slim_segments
-                                            }).unwrap();
-                                    }
+                                    // Update global progress ATOMICALLY (Lock-Free)
+                                    downloaded_clone.fetch_add(len, Ordering::Relaxed);
+                                    
+                                    // NO EMISSION HERE!
+                                    // Emission is handled by monitor_task
                                 }
                                 Some(Err(_)) => {
                                     break; // Stream error, retry loop
@@ -405,27 +578,23 @@ async fn start_download(
     Ok(())
 }
 
-#[tauri::command]
-fn pause_download(id: String, url: String, path: String, filename: String, downloaded: u64, total: u64, state: State<'_, AppState>) -> Result<(), String> {
-    let downloads = state.downloads.lock().unwrap();
-    if let Some(session) = downloads.get(&id) {
-        let _ = session.stop_tx.send(());
-        println!("DEBUG: Pause signal sent to ID: {}", id);
-        
-        let segments_snapshot = session.manager.lock().unwrap().get_segments_snapshot();
 
-        // Save to persistence
-        let saved = SavedDownload {
-            id: id.clone(),
-            url,
-            path,
-            filename,
-            total_size: total,
-            downloaded_bytes: downloaded,
-            status: "Paused".to_string(),
-            segments: Some(segments_snapshot),
-        };
-        persistence::upsert_download(saved)?;
+
+#[tauri::command]
+async fn pause_download(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut downloads = state.downloads.lock().unwrap();
+    if let Some(session) = downloads.remove(&id) {
+        let _ = session.stop_tx.send(());
+    }
+    
+    // Update persistence
+    let mut saved_downloads = persistence::load_downloads().unwrap_or_default();
+    if let Some(d) = saved_downloads.iter_mut().find(|d| d.id == id) {
+        d.status = "Paused".to_string();
+        persistence::save_downloads(&saved_downloads).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -441,12 +610,14 @@ fn remove_download_entry(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_settings() -> Settings {
-    settings::load_settings()
+fn get_settings() -> serde_json::Value {
+    let s = settings::load_settings();
+    serde_json::to_value(s).unwrap_or(serde_json::json!({}))
 }
 
 #[tauri::command]
-fn save_settings(new_settings: Settings) -> Result<(), String> {
+fn save_settings(json: serde_json::Value) -> Result<(), String> {
+    let new_settings: settings::Settings = serde_json::from_value(json).map_err(|e| e.to_string())?;
     // Update speed limiter when settings change
     speed_limiter::GLOBAL_LIMITER.set_limit(new_settings.speed_limit_kbps * 1024);
     // Update clipboard monitor
@@ -523,22 +694,87 @@ async fn crawl_website(
 
 // ============ ZIP Preview Commands ============
 
-/*
+#[tauri::command]
+fn preview_zip_partial(data: Vec<u8>) -> Result<zip_preview::ZipPreview, String> {
+    zip_preview::preview_zip_partial(&data)
+}
+
 #[tauri::command]
 fn preview_zip_file(path: String) -> Result<zip_preview::ZipPreview, String> {
     zip_preview::preview_zip(std::path::Path::new(&path))
 }
 
 #[tauri::command]
-fn extract_zip_file(zip_path: String, dest_dir: String) -> Result<usize, String> {
-    zip_preview::extract_all(
+fn extract_single_file(zip_path: String, entry_name: String, dest_path: String) -> Result<(), String> {
+    zip_preview::extract_file(
         std::path::Path::new(&zip_path),
-        std::path::Path::new(&dest_dir)
+        &entry_name,
+        std::path::Path::new(&dest_path)
     )
 }
-*/
+
+#[tauri::command]
+async fn preview_zip_remote(url: String) -> Result<zip_preview::ZipPreview, String> {
+    let client = rquest::Client::builder()
+        .build()
+        .map_err(|e| e.to_string())?;
+    zip_preview::preview_zip_remote(url, client).await
+}
+
+#[tauri::command]
+async fn download_zip_entry(url: String, entry_name: String, dest_path: String) -> Result<(), String> {
+    let client = rquest::Client::builder()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let bytes = zip_preview::download_entry_remote(url, entry_name, client).await?;
+    std::fs::write(dest_path, bytes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_zip_last_bytes(path: String, length: usize) -> Result<Vec<u8>, String> {
+    zip_preview::read_last_bytes(std::path::Path::new(&path), length)
+}
+
 
 // ============ HLS/DASH Stream Parser Commands ============
+
+#[tauri::command]
+async fn init_tor_network() -> Result<u16, String> {
+    network::tor::init_tor().await
+}
+
+#[tauri::command]
+fn get_tor_status() -> Option<u16> {
+    network::tor::get_socks_port()
+}
+
+#[tauri::command]
+async fn perform_semantic_search(query: String) -> Result<Vec<ai::SearchResult>, String> {
+    ai::semantic_search(&query)
+}
+
+#[tauri::command]
+async fn index_all_downloads() -> Result<usize, String> {
+    let downloads = persistence::load_downloads().unwrap_or_default();
+    let mut count = 0;
+    
+    // Spawn task to avoid blocking main thread too long, though we await it here for result
+    // Ideally should be background.
+    for d in downloads {
+        if d.status == "Complete" {
+             if let Ok(_) = ai::index_file(&d.path) {
+                 count += 1;
+             }
+        }
+    }
+    Ok(count)
+}
+
+#[tauri::command]
+async fn join_workspace(host_ip: String) -> Result<(), String> {
+    network::sync_client::connect_to_workspace(host_ip).await
+}
+
 
 #[tauri::command]
 async fn parse_hls_stream(url: String) -> Result<media::HlsStream, String> {
@@ -587,8 +823,11 @@ fn decrypt_aes_128(input_path: String, output_path: String, key_hex: String, iv_
 
 #[tauri::command]
 async fn test_browser_fingerprint() -> Result<String, String> {
+    let settings = settings::load_settings();
+    let proxy_config = crate::proxy::ProxyConfig::from_settings(&settings);
+
     // Enable DPI evasion for the test to verify headers
-    let client = network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome)
+    let client = network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome, Some(&proxy_config))
         .map_err(|e| e.to_string())?;
     
     // Hit a trace URL (using httpbin for now to show headers)
@@ -604,19 +843,126 @@ async fn test_browser_fingerprint() -> Result<String, String> {
 // ============ Proxy Configuration Commands ============
 
 #[tauri::command]
-fn get_proxy_config() -> proxy::ProxyConfig {
-    // Load from settings or return default
-    proxy::ProxyConfig::default()
+fn get_proxy_config() -> serde_json::Value {
+    let settings = settings::load_settings();
+    let config = proxy::ProxyConfig::from_settings(&settings);
+    serde_json::to_value(config).unwrap_or(serde_json::json!({}))
 }
 
 #[tauri::command]
-fn test_proxy(config: proxy::ProxyConfig) -> Result<bool, String> {
-    let _client = config.build_client()?;
-    // Test connection (sync for simplicity)
+async fn test_proxy(config: proxy::ProxyConfig) -> Result<bool, String> {
+    // Use rquest because it's our main driver
+    let client = rquest::Client::builder()
+        .proxy(config.to_rquest_proxy().ok_or("Invalid Proxy Config")?)
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Verify connectivity
+    let _ = client.head("https://www.google.com")
+        .send()
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+        
     Ok(true)
 }
 
-// ============ Import/Export Commands ============
+// ============ Virtual Drive Commands ============
+// #[tauri::command]
+// async fn mount_drive(id: String, path: String) -> Result<u16, String> {
+//    virtual_drive::DRIVE_MANAGER.mount(id, path).await
+// }
+
+// #[tauri::command]
+// async fn unmount_drive(id: String) -> Result<(), String> {
+//    virtual_drive::DRIVE_MANAGER.unmount(id)
+// }
+
+// ============ Cloud Commands ============
+#[tauri::command]
+async fn upload_to_cloud(app_handle: tauri::AppHandle, path: String, target_name: Option<String>) -> Result<String, String> {
+    let settings_state = app_handle.state::<std::sync::Arc<tokio::sync::Mutex<Settings>>>();
+    let settings = settings_state.lock().await;
+
+    let filename = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Invalid path")?;
+        
+    let key = target_name.unwrap_or(filename.to_string());
+    
+    // Construct full path if simple filename given?
+    // Usually 'path' from frontend 'task.filename' might be just name.
+    // Need to resolve.
+    let full_path = if std::path::Path::new(&path).is_absolute() {
+        std::path::PathBuf::from(&path)
+    } else {
+         let download_dir = &settings.download_dir;
+         // Resolve relative to download dir.
+         // Need to handle user directory expansion if needed, but assuming absolute or simple join.
+         std::path::PathBuf::from(download_dir).join(&path)
+    };
+    
+    // Check if file exists there, if not check Desktop (legacy default)
+    let final_path = if full_path.exists() {
+        full_path
+    } else {
+         // Fallback to Desktop construction as seen in other parts
+         // This is hacky but matches 'open_folder' logic seen previously
+         let mut p = dirs::desktop_dir().ok_or("No desktop")?;
+         p.push(&path);
+         p
+    };
+
+    cloud_bridge::CloudBridge::upload_file(&settings, final_path.to_str().unwrap(), &key).await
+}
+
+// ============ Media Commands ============
+#[tauri::command]
+async fn process_media(app_handle: tauri::AppHandle, path: String, action: String) -> Result<String, String> {
+    // action: "check", "preview", "audio"
+    if action == "check" {
+        return if media_processor::MediaProcessor::check_ffmpeg() {
+            Ok("Available".to_string())
+        } else {
+            Err("FFmpeg not found".to_string())
+        };
+    }
+
+    let settings_state = app_handle.state::<std::sync::Arc<tokio::sync::Mutex<Settings>>>();
+    let settings = settings_state.lock().await;
+
+    // Resolve path (reusing logic from upload because it's robust-ish)
+    // TODO: move path resolution to helper
+    let full_path = if std::path::Path::new(&path).is_absolute() {
+        std::path::PathBuf::from(&path)
+    } else {
+         std::path::PathBuf::from(&settings.download_dir).join(&path)
+    };
+    
+    let final_path = if full_path.exists() {
+        full_path
+    } else {
+         let mut p = dirs::desktop_dir().ok_or("No desktop")?;
+         p.push(&path);
+         p
+    };
+    
+    let input_str = final_path.to_str().unwrap();
+
+    match action.as_str() {
+        "preview" => {
+            let output_path = final_path.with_extension("webp");
+            media_processor::MediaProcessor::generate_preview(input_str, output_path.to_str().unwrap())
+        },
+        "audio" => {
+            let output_path = final_path.with_extension("mp3");
+            media_processor::MediaProcessor::extract_audio(input_str, output_path.to_str().unwrap())
+        },
+        _ => Err("Unknown action".to_string())
+    }
+}
+
 
 // ============ Import/Export Commands (Disabled) ============
 /*
@@ -776,22 +1122,7 @@ fn force_start_scheduled_download<R: tauri::Runtime>(app_handle: tauri::AppHandl
     }
 }
 
-// ============ ZIP Partial Preview Commands ============
 
-#[tauri::command]
-fn read_zip_last_bytes(path: String, length: usize) -> Result<Vec<u8>, String> {
-    zip_preview::read_last_bytes(std::path::Path::new(&path), length)
-}
-
-#[tauri::command]
-fn preview_zip_partial(data: Vec<u8>) -> Result<zip_preview::ZipPreview, String> {
-    zip_preview::preview_zip_partial(&data)
-}
-
-#[tauri::command]
-fn preview_zip_file(path: String) -> Result<zip_preview::ZipPreview, String> {
-    zip_preview::preview_zip(std::path::Path::new(&path))
-}
 
 // ============ Plugin System Commands ============
 
@@ -888,16 +1219,38 @@ fn import_from_fdm_file(path: String) -> Result<Vec<import_export::ExportedDownl
 }
 */
 
-// ============ ZIP Extraction Commands ============
+// ============ Feeds Commands ============
+#[tauri::command]
+async fn fetch_feed(url: String) -> Result<Vec<feeds::FeedItem>, String> {
+    feeds::fetch_feed(&url).await
+}
 
 #[tauri::command]
-fn extract_single_file(zip_path: String, entry_name: String, dest_path: String) -> Result<(), String> {
-    zip_preview::extract_file(
-        std::path::Path::new(&zip_path),
-        &entry_name,
-        std::path::Path::new(&dest_path)
-    )
+async fn perform_search(query: String) -> Result<Vec<search::SearchResult>, String> {
+    let engine = search::SEARCH_ENGINE.lock().await;
+    engine.search(query)
 }
+
+#[tauri::command]
+fn get_feeds() -> Vec<feeds::FeedConfig> {
+    feeds::FEED_MANAGER.get_feeds()
+}
+
+#[tauri::command]
+fn add_feed(config: feeds::FeedConfig) {
+    feeds::FEED_MANAGER.add_feed(config);
+}
+
+#[tauri::command]
+fn remove_feed(id: String) {
+    feeds::FEED_MANAGER.remove_feed(&id);
+}
+
+// ============ Tray & Setup ============
+
+
+
+// ============ ZIP Extraction Commands ============
 
 #[tauri::command]
 fn read_file_bytes_at_offset(path: String, offset: u64, length: usize) -> Result<Vec<u8>, String> {
@@ -1000,7 +1353,10 @@ fn analyze_error_strategy(error_type: String) -> String {
 
 #[tauri::command]
 async fn start_range_download(url: String, start: u64, end: u64) -> Result<Vec<u8>, String> {
-    let config = downloader::http_client::HttpClientConfig::default();
+    let settings = settings::load_settings();
+    let mut config = downloader::http_client::HttpClientConfig::default();
+    config.proxy = Some(crate::proxy::ProxyConfig::from_settings(&settings));
+    
     let client = downloader::http_client::build_stealth_client(&config)
         .map_err(|e| e.to_string())?;
     
@@ -1017,7 +1373,10 @@ async fn start_range_download(url: String, start: u64, end: u64) -> Result<Vec<u
 
 #[tauri::command]
 async fn validate_download_url(url: String) -> Result<serde_json::Value, String> {
-    let config = downloader::http_client::HttpClientConfig::default();
+    let settings = settings::load_settings();
+    let mut config = downloader::http_client::HttpClientConfig::default();
+    config.proxy = Some(crate::proxy::ProxyConfig::from_settings(&settings));
+
     let client = downloader::http_client::build_client(&config)
         .map_err(|e| e.to_string())?;
     
@@ -1248,12 +1607,71 @@ pub fn run() {
     let initial_settings = settings::load_settings();
     speed_limiter::GLOBAL_LIMITER.set_limit(initial_settings.speed_limit_kbps * 1024);
     clipboard::CLIPBOARD_MONITOR.set_enabled(initial_settings.clipboard_monitor);
+    
+    // Auto-start Tor if enabled
+    if initial_settings.use_tor {
+        tauri::async_runtime::spawn(async {
+            println!("Tor enabled in settings, initializing...");
+            if let Err(e) = crate::network::tor::init_tor().await {
+                eprintln!("Failed to auto-init Tor: {}", e);
+            }
+        });
+    }
 
     // Create channel for HTTP server to send download requests
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<http_server::DownloadRequest>();
     
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            // System Tray Setup
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let show_i = MenuItem::with_id(app, "show", "Show HyperStream", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| match event {
+                    TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        ..
+                    } => {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+
+            Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                // Minimize to tray instead of closing for the main window
+                if window.label() == "main" {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+            }
+            _ => {}
+        })
         .invoke_handler(tauri::generate_handler![
             start_download, 
             pause_download, 
@@ -1340,8 +1758,38 @@ pub fn run() {
             read_zip_last_bytes,
             preview_zip_partial,
             preview_zip_file,
-            extract_single_file
+            // Feeds
+            fetch_feed,          // Q5
+            get_feeds,
+            add_feed,
+            remove_feed,
+            extract_single_file,
+            preview_zip_remote,  // Remote Q3
+            download_zip_entry,  // Remote Q3
+            export_data,         // Q4
+            import_data,         // Q4
+            // Feeds
+            fetch_feed,           // Q5
+            perform_search,
+            // mount_drive,
+            // unmount_drive,
+            upload_to_cloud,
+            process_media,
+            init_tor_network,
+            get_tor_status,
+            perform_semantic_search,
+            index_all_downloads,
+            join_workspace,
+            get_plugin_source,
+            save_plugin_source,
+            delete_plugin
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                window.hide().unwrap();
+                api.prevent_close();
+            }
+        })
         .setup(move |app| {
             let handle = app.handle().clone();
             
@@ -1383,6 +1831,51 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 crate::http_server::start_server(tx_clone, map_clone, tm_clone).await;
             });
+
+            // Spawn Game Mode Monitor
+            tauri::async_runtime::spawn(async move {
+                crate::system_monitor::run_game_mode_monitor().await;
+            });
+            
+            // ============ SYSTEM TRAY ============
+            let quit_i = MenuItem::with_id(app.handle(), "quit", "Quit", true, None::<&str>).unwrap();
+            let show_i = MenuItem::with_id(app.handle(), "show", "Show HyperStream", true, None::<&str>).unwrap();
+            let menu = Menu::with_items(app.handle(), &[&show_i, &quit_i]).unwrap();
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    match event {
+                        TrayIconEvent::Click {
+                            button: tauri::tray::MouseButton::Left,
+                            ..
+                        } => {
+                             let app = tray.app_handle();
+                             if let Some(window) = app.get_webview_window("main") {
+                                 let _ = window.show();
+                                 let _ = window.set_focus();
+                             }
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app.handle());
+            // =====================================
             
             // Manage AppState (Matching struct definition)
             app.handle().manage(AppState { 
@@ -1435,6 +1928,37 @@ async fn reload_plugins(
     pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>
 ) -> Result<(), String> {
     pm.load_plugins().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_plugin_source(filename: String) -> Result<String, String> {
+    let mut path = std::env::current_dir().unwrap_or_default().join("plugins");
+    path.push(format!("{}.lua", filename)); // Append extension if missing? Assuming filename is without ext?
+    // Start with safe check
+    if !path.exists() {
+        return Err("Plugin file not found".to_string());
+    }
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_plugin_source(filename: String, content: String) -> Result<(), String> {
+    let mut path = std::env::current_dir().unwrap_or_default().join("plugins");
+    if !path.exists() {
+        std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    }
+    path.push(format!("{}.lua", filename));
+    std::fs::write(path, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_plugin(filename: String) -> Result<(), String> {
+    let mut path = std::env::current_dir().unwrap_or_default().join("plugins");
+    path.push(format!("{}.lua", filename));
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // Old dummy commands removed

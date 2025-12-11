@@ -63,8 +63,16 @@ impl LanApiServer {
     /// Start the API server
     pub async fn start(&self) -> Result<(), String> {
         let devices = self.paired_devices.clone();
+
+        // Broadcast Channel for Sync
+        let (tx, _rx) = tokio::sync::broadcast::channel::<String>(100);
+        let tx = Arc::new(tx);
+
+        // Store tx in a global/static or pass it to state so lib.rs can access it?
+        // Ideally, we'd store it in AppState. For now, we'll put it in a global for easy access by `add_download`.
+        *crate::lan_api::BROADCAST_TX.write().await = Some(tx.clone());
         
-        // Health check endpoint
+        // Health check
         let health = warp::path!("api" / "health")
             .map(|| warp::reply::json(&ApiResponse::<()> {
                 success: true,
@@ -72,11 +80,19 @@ impl LanApiServer {
                 error: None,
             }));
 
+        // Sync WebSocket
+        // /api/sync
+        let sync_route = warp::path!("api" / "sync")
+            .and(warp::ws())
+            .and(warp::any().map(move || tx.clone()))
+            .map(|ws: warp::ws::Ws, tx: Arc<tokio::sync::broadcast::Sender<String>>| {
+                ws.on_upgrade(move |socket| handle_sync_socket(socket, tx))
+            });
+
         // Get downloads list
         let downloads = warp::path!("api" / "downloads")
             .and(warp::get())
             .map(|| {
-                // TODO: Get actual downloads from state
                 warp::reply::json(&ApiResponse {
                     success: true,
                     data: Some(Vec::<String>::new()),
@@ -89,7 +105,6 @@ impl LanApiServer {
             .and(warp::post())
             .and(warp::body::json())
             .map(|req: DownloadRequest| {
-                // TODO: Add download to queue
                 println!("API: New download request: {}", req.url);
                 warp::reply::json(&ApiResponse {
                     success: true,
@@ -106,6 +121,7 @@ impl LanApiServer {
             .and_then(handle_pair);
 
         let routes = health
+            .or(sync_route)
             .or(downloads)
             .or(add_download)
             .or(pair)
@@ -116,6 +132,42 @@ impl LanApiServer {
 
         warp::serve(routes).run(addr).await;
         Ok(())
+    }
+}
+
+// Global Broadcast Sender
+use lazy_static::lazy_static;
+lazy_static! {
+    pub static ref BROADCAST_TX: tokio::sync::RwLock<Option<std::sync::Arc<tokio::sync::broadcast::Sender<String>>>> = tokio::sync::RwLock::new(None);
+}
+
+pub fn broadcast_download(url: String) {
+    tokio::spawn(async move {
+        if let Some(tx) = BROADCAST_TX.read().await.as_ref() {
+            let msg = serde_json::json!({
+                "event_type": "ADD_DOWNLOAD",
+                "payload": url
+            }).to_string();
+            let _ = tx.send(msg);
+        }
+    });
+}
+
+async fn handle_sync_socket(ws: warp::ws::WebSocket, tx: Arc<tokio::sync::broadcast::Sender<String>>) {
+    use futures_util::{StreamExt, SinkExt};
+    let (mut user_ws_tx, mut user_ws_rx) = ws.split();
+    let mut rx = tx.subscribe();
+
+    tokio::spawn(async move {
+        while let Ok(msg) = rx.recv().await {
+            if let Err(_) = user_ws_tx.send(warp::ws::Message::text(msg)).await {
+                break;
+            }
+        }
+    });
+
+    while let Some(_result) = user_ws_rx.next().await {
+        // Just keep connection open
     }
 }
 

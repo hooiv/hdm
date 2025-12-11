@@ -4,7 +4,7 @@ import { ZipPreviewModal } from './ZipPreviewModal';
 import { Segment } from '../types';
 import { ThreadVisualizer } from './ThreadVisualizer';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Folder, Play, Pause, Trash2, FileText, ChevronDown, Archive, ArrowUp, ArrowDown } from 'lucide-react';
+import { Folder, Play, Pause, Trash2, FileText, ChevronDown, Archive, ArrowUp, ArrowDown, HardDrive, Cloud, Film, Music } from 'lucide-react';
 
 export interface DownloadTask {
     id: string;
@@ -54,45 +54,49 @@ const formatETA = (remainingBytes: number, speed: number) => {
 };
 
 // File type categories
-const getFileCategory = (filename: string): { icon: string; label: string; color: string } => {
+const getFileCategory = (filename: string): { icon: string; label: string; color: string; bgColor: string } => {
     const ext = filename.split('.').pop()?.toLowerCase() || '';
 
-    const categories: Record<string, { icon: string; label: string; color: string }> = {
+    // Map colors to Tailwind classes would be ideal, but for dynamic colors we might keep hex or map to tailwind palette
+    // For now, let's stick to hex for specific category colors but use Tailwind for structure.
+
+    // We can map these to Tailwind color families
+    const categories: Record<string, { icon: string; label: string; color: string; bgColor: string }> = {
         // Video
-        mp4: { icon: '🎬', label: 'Video', color: '#ef4444' },
-        mkv: { icon: '🎬', label: 'Video', color: '#ef4444' },
-        avi: { icon: '🎬', label: 'Video', color: '#ef4444' },
-        mov: { icon: '🎬', label: 'Video', color: '#ef4444' },
-        webm: { icon: '🎬', label: 'Video', color: '#ef4444' },
+        mp4: { icon: '🎬', label: 'Video', color: 'text-red-500', bgColor: 'bg-red-500/10' },
+        mkv: { icon: '🎬', label: 'Video', color: 'text-red-500', bgColor: 'bg-red-500/10' },
+        avi: { icon: '🎬', label: 'Video', color: 'text-red-500', bgColor: 'bg-red-500/10' },
+        mov: { icon: '🎬', label: 'Video', color: 'text-red-500', bgColor: 'bg-red-500/10' },
+        webm: { icon: '🎬', label: 'Video', color: 'text-red-500', bgColor: 'bg-red-500/10' },
         // Audio
-        mp3: { icon: '🎵', label: 'Audio', color: '#8b5cf6' },
-        flac: { icon: '🎵', label: 'Audio', color: '#8b5cf6' },
-        wav: { icon: '🎵', label: 'Audio', color: '#8b5cf6' },
-        aac: { icon: '🎵', label: 'Audio', color: '#8b5cf6' },
+        mp3: { icon: '🎵', label: 'Audio', color: 'text-violet-500', bgColor: 'bg-violet-500/10' },
+        flac: { icon: '🎵', label: 'Audio', color: 'text-violet-500', bgColor: 'bg-violet-500/10' },
+        wav: { icon: '🎵', label: 'Audio', color: 'text-violet-500', bgColor: 'bg-violet-500/10' },
+        aac: { icon: '🎵', label: 'Audio', color: 'text-violet-500', bgColor: 'bg-violet-500/10' },
         // Archives
-        zip: { icon: '📦', label: 'Archive', color: '#f59e0b' },
-        rar: { icon: '📦', label: 'Archive', color: '#f59e0b' },
-        '7z': { icon: '📦', label: 'Archive', color: '#f59e0b' },
-        tar: { icon: '📦', label: 'Archive', color: '#f59e0b' },
-        gz: { icon: '📦', label: 'Archive', color: '#f59e0b' },
+        zip: { icon: '📦', label: 'Archive', color: 'text-amber-500', bgColor: 'bg-amber-500/10' },
+        rar: { icon: '📦', label: 'Archive', color: 'text-amber-500', bgColor: 'bg-amber-500/10' },
+        '7z': { icon: '📦', label: 'Archive', color: 'text-amber-500', bgColor: 'bg-amber-500/10' },
+        tar: { icon: '📦', label: 'Archive', color: 'text-amber-500', bgColor: 'bg-amber-500/10' },
+        gz: { icon: '📦', label: 'Archive', color: 'text-amber-500', bgColor: 'bg-amber-500/10' },
         // Programs
-        exe: { icon: '⚙️', label: 'Program', color: '#22c55e' },
-        msi: { icon: '⚙️', label: 'Program', color: '#22c55e' },
-        dmg: { icon: '⚙️', label: 'Program', color: '#22c55e' },
+        exe: { icon: '⚙️', label: 'Program', color: 'text-green-500', bgColor: 'bg-green-500/10' },
+        msi: { icon: '⚙️', label: 'Program', color: 'text-green-500', bgColor: 'bg-green-500/10' },
+        dmg: { icon: '⚙️', label: 'Program', color: 'text-green-500', bgColor: 'bg-green-500/10' },
         // Documents
-        pdf: { icon: '📄', label: 'Document', color: '#3b82f6' },
-        doc: { icon: '📄', label: 'Document', color: '#3b82f6' },
-        docx: { icon: '📄', label: 'Document', color: '#3b82f6' },
+        pdf: { icon: '📄', label: 'Document', color: 'text-blue-500', bgColor: 'bg-blue-500/10' },
+        doc: { icon: '📄', label: 'Document', color: 'text-blue-500', bgColor: 'bg-blue-500/10' },
+        docx: { icon: '📄', label: 'Document', color: 'text-blue-500', bgColor: 'bg-blue-500/10' },
         // Images
-        jpg: { icon: '🖼️', label: 'Image', color: '#ec4899' },
-        jpeg: { icon: '🖼️', label: 'Image', color: '#ec4899' },
-        png: { icon: '🖼️', label: 'Image', color: '#ec4899' },
-        gif: { icon: '🖼️', label: 'Image', color: '#ec4899' },
+        jpg: { icon: '🖼️', label: 'Image', color: 'text-pink-500', bgColor: 'bg-pink-500/10' },
+        jpeg: { icon: '🖼️', label: 'Image', color: 'text-pink-500', bgColor: 'bg-pink-500/10' },
+        png: { icon: '🖼️', label: 'Image', color: 'text-pink-500', bgColor: 'bg-pink-500/10' },
+        gif: { icon: '🖼️', label: 'Image', color: 'text-pink-500', bgColor: 'bg-pink-500/10' },
         // ISO
-        iso: { icon: '💿', label: 'Disk Image', color: '#14b8a6' },
+        iso: { icon: '💿', label: 'Disk Image', color: 'text-teal-500', bgColor: 'bg-teal-500/10' },
     };
 
-    return categories[ext] || { icon: '📄', label: 'File', color: '#64748b' };
+    return categories[ext] || { icon: '📄', label: 'File', color: 'text-slate-400', bgColor: 'bg-slate-800' };
 };
 
 // Memoize Item to prevent re-renders of non-updating downloads
@@ -103,12 +107,16 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
     // Derived values
     const remainingBytes = task.total - task.downloaded;
     const eta = task.status === 'Downloading' ? formatETA(remainingBytes, task.speed) : '--:--';
-    const category = getFileCategory(task.filename);
-    const progressColor = category.color;
 
-    const handleOpenFolder = async () => {
+    // Memoize category calculation
+    const category = React.useMemo(() => getFileCategory(task.filename), [task.filename]);
+
+    // Helper to check if mountable
+    const isMountable = ['zip', 'iso'].includes(task.filename.split('.').pop()?.toLowerCase() || '');
+
+    const handleOpenFolder = React.useCallback(async () => {
         await invoke('open_folder', { path: `C:\\Users\\aditya\\Desktop\\${task.filename}` });
-    };
+    }, [task.filename]);
 
     return (
         <motion.div
@@ -117,113 +125,107 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.2 }}
-            className={`download-item ${task.status === 'Downloading' ? 'active-glow' : ''}`}
+            className={`relative overflow-hidden mb-3 rounded-xl border transition-all duration-300 ${task.status === 'Downloading'
+                ? 'bg-slate-900/60 backdrop-blur-md border-cyan-500/20 shadow-[0_0_20px_rgba(6,182,212,0.05)]'
+                : 'glass-card'
+                }`}
             onClick={() => setIsExpanded(!isExpanded)}
-            style={{ position: 'relative', overflow: 'hidden' }}
         >
-            <div className="download-item-main" style={{ display: 'flex', alignItems: 'center', padding: '15px' }}>
-                <div className="file-icon" style={{
-                    color: category.color,
-                    marginRight: '15px',
-                    fontSize: '1.5rem',
-                    background: `${category.color}10`,
-                    padding: '10px',
-                    borderRadius: '10px'
-                }}>
-                    <FileText size={24} />
+            <div className="flex items-center p-4 cursor-pointer">
+                {/* Icon */}
+                <div className={`mr-4 p-3 rounded-xl text-2xl ${category.bgColor} ${category.color} border border-white/5 shadow-inner backdrop-blur-sm`}>
+                    <motion.div
+                        whileHover={{ rotate: [0, -10, 10, 0], scale: 1.1 }}
+                        transition={{ duration: 0.5 }}
+                    >
+                        <FileText size={22} className={category.color} strokeWidth={1.5} />
+                    </motion.div>
                 </div>
 
-                <div className="file-info" style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', marginBottom: '5px' }}>
-                        <div className="file-name" title={task.filename} style={{ fontWeight: 600, color: '#f8fafc' }}>
+                {/* Info */}
+                <div className="flex-1 min-w-0">
+                    <div className="flex items-center mb-1.5 gap-3">
+                        <div className="font-semibold text-slate-100 truncate flex-1 tracking-tight text-sm text-glow" title={task.filename}>
                             {task.filename}
                         </div>
-                        <span className="file-category" style={{
-                            marginLeft: '10px',
-                            fontSize: '0.7em',
-                            background: `${category.color}20`,
-                            color: category.color,
-                            padding: '2px 8px',
-                            borderRadius: '12px'
-                        }}>
+                        <span className={`text-[9px] uppercase font-bold px-2 py-0.5 rounded-full border border-white/5 ${category.bgColor} ${category.color}`}>
                             {category.label}
                         </span>
                         {task.speed > 0 && (
-                            <span className="speed-badge" style={{
-                                marginLeft: 'auto',
-                                color: '#3b82f6',
-                                fontSize: '0.85em',
-                                background: 'rgba(59, 130, 246, 0.1)',
-                                padding: '2px 8px',
-                                borderRadius: '4px'
-                            }}>
+                            <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded shadow-[0_0_10px_rgba(6,182,212,0.1)]">
                                 {formatSpeed(task.speed)}
                             </span>
                         )}
                     </div>
 
-                    <div className="file-url" style={{ fontSize: '0.8em', color: '#64748b', marginBottom: '8px' }}>
+                    <div className="text-[11px] text-slate-500 truncate mb-3 font-mono opacity-60">
                         {task.url}
                     </div>
 
-                    <div className="progress-section" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <div className="progress-bar-bg" style={{ flex: 1, height: '6px', background: '#334155', borderRadius: '3px', overflow: 'hidden' }}>
+                    <div className="flex items-center gap-3">
+                        <div className="flex-1 h-1.5 bg-black/40 rounded-full overflow-hidden border border-white/5">
                             <motion.div
-                                className="progress-bar-fill"
+                                className={`h-full rounded-full relative overflow-hidden ${task.status === 'Error' ? 'bg-red-500' : 'bg-gradient-to-r from-cyan-500 to-blue-600'}`}
                                 initial={{ width: 0 }}
                                 animate={{ width: `${task.progress}%` }}
                                 transition={{ type: "spring", stiffness: 100, damping: 20 }}
-                                style={{ height: '100%', background: `linear-gradient(90deg, ${progressColor}, #a855f7)` }}
-                            />
+                            >
+                                {task.status === 'Downloading' && <div className="absolute inset-0 animate-shimmer" />}
+                            </motion.div>
                         </div>
-                        <div className="progress-text" style={{ fontSize: '0.8em', color: '#94a3b8', width: '40px', textAlign: 'right' }}>
+                        <div className="text-[10px] font-bold text-slate-400 w-10 text-right">
                             {task.progress.toFixed(1)}%
                         </div>
                     </div>
 
-                    <div className="stats" style={{ display: 'flex', justifyContent: 'space-between', marginTop: '5px', fontSize: '0.75em', color: '#64748b' }}>
-                        <span>{formatBytes(task.downloaded)} / {formatBytes(task.total)}</span>
-                        <span>ETA: {eta}</span>
+                    <div className="flex justify-between mt-1 text-[10px] text-slate-500 font-medium tracking-wide">
+                        <span>{formatBytes(task.downloaded)} <span className="text-slate-600">/</span> {formatBytes(task.total)}</span>
+                        <span className="text-cyan-600/70">ETA: {eta}</span>
                     </div>
                 </div>
 
-                <div className="actions" style={{ marginLeft: '15px', display: 'flex', gap: '8px' }} onClick={(e) => e.stopPropagation()}>
+                {/* Quick Actions */}
+                <div className="ml-4 flex items-center gap-1 bg-black/20 p-1 rounded-lg border border-white/5" onClick={(e) => e.stopPropagation()}>
                     {onMoveUp && (
-                        <button className="action-btn" onClick={() => onMoveUp(task.id)} title="Move Up">
-                            <ArrowUp size={18} />
-                        </button>
+                        <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-slate-500 hover:text-slate-200 rounded-md transition-colors" onClick={() => onMoveUp(task.id)} title="Move Up">
+                            <ArrowUp size={14} />
+                        </motion.button>
                     )}
                     {onMoveDown && (
-                        <button className="action-btn" onClick={() => onMoveDown(task.id)} title="Move Down">
-                            <ArrowDown size={18} />
-                        </button>
+                        <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-slate-500 hover:text-slate-200 rounded-md transition-colors" onClick={() => onMoveDown(task.id)} title="Move Down">
+                            <ArrowDown size={14} />
+                        </motion.button>
                     )}
 
-                    <button className="action-btn" onClick={handleOpenFolder} title="Open Folder">
-                        <Folder size={18} />
-                    </button>
+                    <div className="w-px h-4 bg-white/10 mx-1"></div>
+
+                    <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-slate-400 hover:text-cyan-400 rounded-md transition-colors" onClick={handleOpenFolder} title="Open Folder">
+                        <Folder size={16} />
+                    </motion.button>
 
                     {task.status === 'Downloading' && (
-                        <button className="action-btn" onClick={() => onPause(task.id)} title="Pause" style={{ color: '#fbbf24' }}>
-                            <Pause size={18} />
-                        </button>
+                        <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-amber-400 hover:text-amber-300 rounded-md transition-colors" onClick={() => onPause(task.id)} title="Pause">
+                            <Pause size={16} />
+                        </motion.button>
                     )}
 
                     {(task.status === 'Paused' || task.status === 'Error') && (
-                        <button className="action-btn" onClick={() => onResume(task.id)} title="Resume" style={{ color: '#22c55e' }}>
-                            <Play size={18} />
-                        </button>
+                        <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-emerald-400 hover:text-emerald-300 rounded-md transition-colors" onClick={() => onResume(task.id)} title="Resume">
+                            <Play size={16} />
+                        </motion.button>
                     )}
 
-                    <button className="action-btn" onClick={() => onDelete && onDelete(task.id)} title="Cancel" style={{ color: '#ef4444' }}>
-                        <Trash2 size={18} />
-                    </button>
+                    <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(220,38,38,0.2)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-slate-500 hover:text-red-400 rounded-md transition-colors" onClick={() => onDelete && onDelete(task.id)} title="Cancel">
+                        <Trash2 size={16} />
+                    </motion.button>
+
+                    <div className="w-px h-4 bg-white/10 mx-1"></div>
 
                     <motion.div
                         animate={{ rotate: isExpanded ? 180 : 0 }}
-                        style={{ marginLeft: '10px', cursor: 'pointer', color: '#64748b' }}
+                        className="p-1 text-slate-500"
                     >
-                        <ChevronDown size={18} />
+                        <ChevronDown size={16} />
                     </motion.div>
                 </div>
             </div>
@@ -236,59 +238,110 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
                         transition={{ duration: 0.3 }}
-                        style={{ overflow: 'hidden' }}
+                        className="border-t border-slate-700/30 bg-slate-900/30"
                         onClick={(e) => e.stopPropagation()}
                     >
-                        <div style={{
-                            borderTop: '1px solid rgba(255,255,255,0.05)',
-                            padding: '15px',
-                            background: 'rgba(0,0,0,0.1)'
-                        }}>
+                        <div className="p-4">
                             {/* Thread Visualization */}
                             <ThreadVisualizer
                                 segments={task.segments || []}
                                 totalSize={task.total}
                             />
 
-                            {/* Zip Preview if applicable */}
-                            {(task.filename.endsWith('.zip') || task.filename.endsWith('.jar')) && (
-                                <div style={{ marginTop: '10px' }}>
+                            {/* Advanced Actions Toolbar */}
+                            {task.status === 'Done' && (
+                                <div className="mt-4 pt-3 border-t border-slate-700/30 flex flex-wrap gap-2">
+
+                                    {/* Archive Preview */}
+                                    {(task.filename.endsWith('.zip') || task.filename.endsWith('.jar')) && (
+                                        <button
+                                            onClick={(e) => { e.stopPropagation(); setShowPreview(true); }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20"
+                                        >
+                                            <Archive size={14} /> Browse Content
+                                        </button>
+                                    )}
+
+                                    {/* Mount Drive */}
+                                    {isMountable && (
+                                        <button
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                try {
+                                                    const port = await invoke('mount_drive', { id: task.id, path: task.filename });
+                                                    alert(`Mounted on WebDAV Port: ${port}.\n\nUse 'Map Network Drive' to http://127.0.0.1:${port}`);
+                                                } catch (err) {
+                                                    alert("Mount failed: " + err);
+                                                }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-green-500/10 text-green-400 border border-green-500/20 hover:bg-green-500/20"
+                                        >
+                                            <HardDrive size={14} /> Mount Drive
+                                        </button>
+                                    )}
+
+                                    {/* Cloud Upload */}
                                     <button
-                                        className="preview-btn"
-                                        onClick={() => setShowPreview(true)}
-                                        style={{
-                                            background: 'rgba(59, 130, 246, 0.1)',
-                                            color: '#3b82f6',
-                                            border: '1px solid rgba(59, 130, 246, 0.3)',
-                                            borderRadius: '4px',
-                                            padding: '6px 12px',
-                                            fontSize: '0.8rem',
-                                            cursor: 'pointer',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '6px'
+                                        onClick={async (e) => {
+                                            e.stopPropagation();
+                                            if (!confirm("Upload to configured Cloud Storage?")) return;
+                                            try {
+                                                alert("Upload started... please wait.");
+                                                const result = await invoke('upload_to_cloud', { path: task.filename, targetName: null });
+                                                alert("Success: " + result);
+                                            } catch (err) {
+                                                alert("Upload failed: " + err);
+                                            }
                                         }}
+                                        className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20"
                                     >
-                                        <Archive size={14} /> Preview Archive Content
+                                        <Cloud size={14} /> Upload to Cloud
                                     </button>
+
+                                    {/* Media Tools */}
+                                    {(['mp4', 'mkv', 'avi', 'mov', 'webm'].includes(task.filename.split('.').pop()?.toLowerCase() || '')) && (
+                                        <>
+                                            <button
+                                                onClick={async (e) => {
+                                                    e.stopPropagation();
+                                                    try {
+                                                        alert("Generating Preview (WebP)...");
+                                                        await invoke('process_media', { path: task.filename, action: 'preview' });
+                                                        alert("Preview Generated!");
+                                                    } catch (err) {
+                                                        alert("Media Process Failed: " + err);
+                                                    }
+                                                }}
+                                                className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-pink-500/10 text-pink-400 border border-pink-500/20 hover:bg-pink-500/20"
+                                            >
+                                                <Film size={14} /> Smart Preview
+                                            </button>
+
+                                            <button
+                                                onClick={async (e) => {
+                                                    e.stopPropagation();
+                                                    try {
+                                                        alert("Extracting Audio (MP3)...");
+                                                        await invoke('process_media', { path: task.filename, action: 'audio' });
+                                                        alert("Audio Extracted!");
+                                                    } catch (err) {
+                                                        alert("Media Process Failed: " + err);
+                                                    }
+                                                }}
+                                                className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20"
+                                            >
+                                                <Music size={14} /> Extract Audio
+                                            </button>
+                                        </>
+                                    )}
                                 </div>
                             )}
 
                             {/* More Details Grid */}
-                            <div style={{
-                                display: 'grid',
-                                gridTemplateColumns: 'repeat(3, 1fr)',
-                                gap: '10px',
-                                fontSize: '0.75rem',
-                                color: '#94a3b8',
-                                marginTop: '10px',
-                                background: 'rgba(0,0,0,0.2)',
-                                padding: '10px',
-                                borderRadius: '6px'
-                            }}>
-                                <div>ID: <span style={{ color: '#e2e8f0' }}>{task.id.split('_').pop()}</span></div>
-                                <div>Threads: <span style={{ color: '#e2e8f0' }}>{(task.segments || []).filter(s => s.state === 'Downloading').length}</span></div>
-                                <div>Server: <span style={{ color: '#e2e8f0' }}>Multi-Threaded</span></div>
+                            <div className="grid grid-cols-3 gap-3 text-xs text-slate-500 mt-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700/30">
+                                <div>ID: <span className="text-slate-300 font-mono ml-1">{task.id.split('_').pop()}</span></div>
+                                <div>Threads: <span className="text-slate-300 ml-1">{(task.segments || []).filter(s => s.state === 'Downloading').length}</span></div>
+                                <div>Server: <span className="text-slate-300 ml-1">Multi-Threaded</span></div>
                             </div>
                         </div>
                     </motion.div>
@@ -300,8 +353,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                 <ZipPreviewModal
                     isOpen={showPreview}
                     filePath={`C:\\Users\\aditya\\Desktop\\${task.filename}`}
+                    url={task.url}
                     onClose={() => setShowPreview(false)}
-                    isPartial={task.status === 'Downloading'}
+                    isPartial={task.status === 'Downloading' || task.status === 'Paused'}
                 />
             )}
         </motion.div>

@@ -1,23 +1,21 @@
 use reqwest::Client;
-use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use url::Url;
-use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct GrabbedFile {
     pub url: String,
     pub filename: String,
-    pub file_type: String, // "image", "video", "document", "other"
     pub size: Option<u64>,
+    pub file_type: String, // "image", "video", "document", "other"
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SpiderOptions {
     pub url: String,
     pub max_depth: u32,
     pub same_domain: bool,
-    pub extensions: Vec<String>, // e.g., ["jpg", "png", "mp4"]
+    pub extensions: Vec<String>,
 }
 
 pub struct Spider {
@@ -30,18 +28,15 @@ impl Spider {
     }
 
     pub async fn crawl(&self, options: SpiderOptions) -> Result<Vec<GrabbedFile>, String> {
-        let mut visited = HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        let mut results = Vec::new();
-        
         let start_url = Url::parse(&options.url).map_err(|e| e.to_string())?;
-        let domain = start_url.domain().map(|d| d.to_string());
+        let domain = start_url.domain().ok_or("Invalid URL domain")?.to_string();
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        let mut results = Vec::new();
 
         queue.push_back((start_url.clone(), 0));
         visited.insert(start_url.to_string());
-
-        let img_regex = Regex::new(r#"<img[^>]+src=["']([^"']+)["']"#).unwrap();
-        let link_regex = Regex::new(r#"<a[^>]+href=["']([^"']+)["']"#).unwrap();
 
         while let Some((current_url, depth)) = queue.pop_front() {
             if depth > options.max_depth {
@@ -50,69 +45,97 @@ impl Spider {
 
             println!("Crawling: {}", current_url);
 
+            // Fetch page
             let response = match self.client.get(current_url.clone()).send().await {
                 Ok(r) => r,
                 Err(_) => continue,
             };
 
+            // Check Content-Type
             let content_type = response.headers()
                 .get("content-type")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_string();
 
-            // If it's a file we want, add to results
-            if self.is_target_file(&current_url, &content_type, &options.extensions) {
-                results.push(GrabbedFile {
-                    url: current_url.to_string(),
-                    filename: current_url.path_segments().and_then(|s| s.last()).unwrap_or("file").to_string(),
-                    file_type: self.determine_type(&content_type, &current_url),
-                    size: response.content_length(),
-                });
-                continue; // Don't parse binary files for links
-            }
-
-            // If it's HTML, parse for more links
-            if content_type.contains("text/html") {
-                let html = match response.text().await {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-
-                // Find images
-                for cap in img_regex.captures_iter(&html) {
-                    if let Some(src) = cap.get(1) {
-                        if let Ok(abs_url) = current_url.join(src.as_str()) {
-                            if self.is_target_file(&abs_url, "", &options.extensions) {
-                                if visited.insert(abs_url.to_string()) {
-                                    results.push(GrabbedFile {
-                                        url: abs_url.to_string(),
-                                        filename: abs_url.path_segments().and_then(|s| s.last()).unwrap_or("image").to_string(),
-                                        file_type: "image".to_string(),
-                                        size: None, // We don't know size yet
-                                    });
-                                }
-                            }
-                        }
+            // If it's not HTML, check if it's a file we want
+            if !content_type.contains("text/html") {
+                if let Some(ext) = current_url.path().split('.').last() {
+                    if options.extensions.contains(&ext.to_lowercase()) || options.extensions.is_empty() {
+                         let size = response.content_length();
+                         let filename = current_url.path_segments()
+                            .and_then(|s| s.last())
+                            .unwrap_or("file")
+                            .to_string();
+                        
+                         results.push(GrabbedFile {
+                             url: current_url.to_string(),
+                             filename,
+                             size,
+                             file_type: Self::detect_type(&content_type),
+                         });
                     }
                 }
+                continue;
+            }
 
-                // Find links
-                if depth < options.max_depth {
-                    for cap in link_regex.captures_iter(&html) {
-                        if let Some(href) = cap.get(1) {
-                            if let Ok(abs_url) = current_url.join(href.as_str()) {
-                                // Check domain constraint
-                                if options.same_domain {
-                                    if abs_url.domain().map(|d| d.to_string()) != domain {
-                                        continue;
-                                    }
-                                }
+            // If HTML, parse for links
+            let html = match response.text().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
 
-                                if visited.insert(abs_url.to_string()) {
-                                    queue.push_back((abs_url, depth + 1));
-                                }
-                            }
+            // Simple Regex or string finding for href/src
+            // Using a simple regex to avoid adding `scraper` dependency for now if not present,
+            // but `regex` is usually in dependencies.
+            // Let's assume we can use a basic regex for robustness.
+            // Actually, we checked Cargo.toml and `regex` IS there.
+            
+            let re = regex::Regex::new(r#"(?:href|src)=["']([^"']+)["']"#).unwrap();
+            
+            for cap in re.captures_iter(&html) {
+                if let Some(link) = cap.get(1) {
+                    let link_str = link.as_str();
+                    
+                    // Resolve relative URLs
+                    let next_url = match current_url.join(link_str) {
+                        Ok(u) => u,
+                        Err(_) => continue,
+                    };
+
+                    // Domain restriction
+                    if options.same_domain {
+                         if let Some(d) = next_url.domain() {
+                             if d != domain && !d.ends_with(&format!(".{}", domain)) {
+                                 continue;
+                             }
+                         }
+                    }
+
+                    // Avoid already visited
+                    if !visited.contains(next_url.as_str()) {
+                        visited.insert(next_url.to_string());
+                        
+                        // Check extension BEFORE queueing to decide if we should queue (if HTML) or add to result (if Asset)
+                        // Actually, we treat everything as a potential crawl target if depth allows,
+                        // and filter in the loop top.
+                        // But we can optimize: if extension matches target, it's a result.
+                        // If extension is html-like or no extension, queue it.
+                        
+                        let is_asset = if let Some(ext) = next_url.path().split('.').last() {
+                            options.extensions.contains(&ext.to_lowercase())
+                        } else {
+                            false
+                        };
+                        
+                        if is_asset {
+                            // It's a target file, likely not HTML (unless user wants .html files)
+                            // We can push to results directly or queue to verify headers.
+                            // To be safe (get size), we queue it.
+                            queue.push_back((next_url, depth + 1));
+                        } else {
+                            // It's a potential page
+                             queue.push_back((next_url, depth + 1));
                         }
                     }
                 }
@@ -122,35 +145,11 @@ impl Spider {
         Ok(results)
     }
 
-    fn is_target_file(&self, url: &Url, content_type: &str, extensions: &[String]) -> bool {
-        let path = url.path().to_lowercase();
-        
-        // Check extension
-        for ext in extensions {
-            if path.ends_with(&format!(".{}", ext)) {
-                return true;
-            }
-        }
-
-        // Check content type if extension check failed
-        if !content_type.is_empty() {
-            if content_type.starts_with("image/") && extensions.contains(&"jpg".to_string()) { return true; }
-            if content_type.starts_with("video/") && extensions.contains(&"mp4".to_string()) { return true; }
-            if content_type.starts_with("audio/") && extensions.contains(&"mp3".to_string()) { return true; }
-        }
-
-        false
-    }
-
-    fn determine_type(&self, content_type: &str, url: &Url) -> String {
-        if content_type.starts_with("image/") { return "image".to_string(); }
-        if content_type.starts_with("video/") { return "video".to_string(); }
-        if content_type.starts_with("audio/") { return "audio".to_string(); }
-        
-        let path = url.path().to_lowercase();
-        if path.ends_with(".pdf") || path.ends_with(".doc") { return "document".to_string(); }
-        if path.ends_with(".zip") || path.ends_with(".rar") { return "archive".to_string(); }
-        
-        "other".to_string()
+    fn detect_type(ct: &str) -> String {
+        if ct.contains("image") { "image".to_string() }
+        else if ct.contains("video") { "video".to_string() }
+        else if ct.contains("audio") { "audio".to_string() }
+        else if ct.contains("pdf") || ct.contains("document") { "document".to_string() }
+        else { "other".to_string() }
     }
 }

@@ -12,16 +12,30 @@ pub struct SpeedLimiter {
     last_refill: std::sync::Mutex<Instant>,
     /// Is limiting enabled
     enabled: AtomicBool,
+    /// Timestamp of when the next refill is allowed (microseconds from app start)
+    next_refill_micros: AtomicU64,
+}
+
+lazy_static::lazy_static! {
+    static ref LIMITER_START: std::time::Instant = std::time::Instant::now();
 }
 
 impl SpeedLimiter {
     pub fn new() -> Self {
+        // Ensure start time is initialized
+        let _ = *LIMITER_START;
+        
         Self {
             limit_bytes_per_sec: AtomicU64::new(0),
             tokens: AtomicU64::new(0),
             last_refill: std::sync::Mutex::new(Instant::now()),
             enabled: AtomicBool::new(false),
+            next_refill_micros: AtomicU64::new(0),
         }
+    }
+
+    fn now_micros() -> u64 {
+        std::time::Instant::now().duration_since(*LIMITER_START).as_micros() as u64
     }
 
     /// Set speed limit in bytes per second (0 = unlimited)
@@ -30,6 +44,7 @@ impl SpeedLimiter {
         self.enabled.store(bytes_per_sec > 0, Ordering::SeqCst);
         // Give initial tokens
         self.tokens.store(bytes_per_sec, Ordering::SeqCst);
+        self.next_refill_micros.store(Self::now_micros(), Ordering::SeqCst);
     }
 
     /// Get current limit
@@ -52,20 +67,28 @@ impl SpeedLimiter {
         
         // Wait until we can acquire some tokens
         loop {
-             // 1. Try to refill first (lazily)
-             {
-                 let mut last = self.last_refill.lock().unwrap();
-                 let now = Instant::now();
-                 let elapsed = now.duration_since(*last);
-                 
-                 if elapsed >= Duration::from_millis(50) {
-                     let refill_amount = (limit as f64 * elapsed.as_secs_f64()) as u64;
-                     if refill_amount > 0 {
-                         let current = self.tokens.load(Ordering::Acquire);
-                         // Cap at 1.0 seconds worth to prevent huge bursts after idle
-                         let new_tokens = (current + refill_amount).min(limit); 
-                         self.tokens.store(new_tokens, Ordering::Release);
-                         *last = now;
+             let now = Self::now_micros();
+             let next_refill = self.next_refill_micros.load(Ordering::Relaxed);
+
+             // 1. Try to refill ONLY if it's time (Lock-Free Check)
+             if now >= next_refill {
+                 // Double-check optimization: minimal lock duration
+                 if let Ok(mut last) = self.last_refill.try_lock() {
+                     let now_instant = Instant::now();
+                     let elapsed = now_instant.duration_since(*last);
+                     
+                     if elapsed >= Duration::from_millis(50) {
+                         let refill_amount = (limit as f64 * elapsed.as_secs_f64()) as u64;
+                         if refill_amount > 0 {
+                             let current = self.tokens.load(Ordering::Acquire);
+                             // Cap at 1.0 seconds worth to prevent huge bursts after idle
+                             let new_tokens = (current + refill_amount).min(limit); 
+                             self.tokens.store(new_tokens, Ordering::Release);
+                             *last = now_instant;
+                             
+                             // Update next hint (current time + 50ms)
+                             self.next_refill_micros.store(Self::now_micros() + 50_000, Ordering::Release);
+                         }
                      }
                  }
              }

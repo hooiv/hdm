@@ -5,7 +5,7 @@
 //! file 8 times if the server ignores Range requests.
 
 use rquest::{Client, Response, StatusCode};
-use rquest::header::{HeaderMap, HeaderValue, RANGE, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT, REFERER};
+use rquest::header::{HeaderMap, HeaderValue, RANGE, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT, REFERER, ETAG, LAST_MODIFIED};
 use std::time::Duration;
 
 use crate::downloader::network::{RetryStrategy, analyze_status, is_captive_portal};
@@ -47,6 +47,8 @@ pub struct HttpClientConfig {
     pub max_redirects: usize,
     /// Accept invalid SSL certificates (for testing only!)
     pub danger_accept_invalid_certs: bool,
+    /// Proxy Configuration
+    pub proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 impl Default for HttpClientConfig {
@@ -58,6 +60,7 @@ impl Default for HttpClientConfig {
             follow_redirects: true,
             max_redirects: 10,
             danger_accept_invalid_certs: false, 
+            proxy: None,
         }
     }
 }
@@ -69,7 +72,7 @@ pub const CHROME_USER_AGENT: &str =
 
 /// Build a configured HTTP client
 pub fn build_client(config: &HttpClientConfig) -> Result<Client, rquest::Error> {
-    let builder = Client::builder()
+    let mut builder = Client::builder()
         .timeout(config.timeout)
         .connect_timeout(config.connect_timeout)
         .user_agent(&config.user_agent)
@@ -81,6 +84,12 @@ pub fn build_client(config: &HttpClientConfig) -> Result<Client, rquest::Error> 
 
     if config.danger_accept_invalid_certs {
         // builder = builder.danger_accept_invalid_certs(true); // API diff in rquest 5.x
+    }
+
+    if let Some(proxy_config) = &config.proxy {
+        if let Some(proxy) = proxy_config.to_rquest_proxy() {
+            builder = builder.proxy(proxy);
+        }
     }
 
     builder.build()
@@ -103,6 +112,7 @@ pub fn build_stealth_client(config: &HttpClientConfig) -> Result<Client, rquest:
     default_headers.insert(USER_AGENT, HeaderValue::from_static(CHROME_USER_AGENT)); 
 
     let builder = Client::builder()
+        .user_agent(&config.user_agent)
         .timeout(config.timeout)
         .connect_timeout(config.connect_timeout)
         .default_headers(default_headers)
@@ -124,6 +134,49 @@ pub struct FirstByteScout {
 impl FirstByteScout {
     pub fn new(client: Client) -> Self {
         Self { client }
+    }
+
+    /// Probe the server with a HEAD request first, then a small Range request
+    pub async fn get_head(&self, url: &str) -> Result<rquest::Response, rquest::Error> {
+        self.client.head(url).send().await
+    }
+
+    pub async fn check_for_update(&self, url: &str, local_etag: Option<&str>, local_last_modified: Option<&str>, local_size: u64) -> Result<bool, String> {
+        let response = self.client.head(url).send().await.map_err(|e| e.to_string())?;
+        
+        let headers = response.headers();
+        
+        // 1. Check ETag (Strong validator)
+        if let Some(local_etag) = local_etag {
+            if let Some(server_etag) = headers.get(ETAG) {
+                if let Ok(server_etag_str) = server_etag.to_str() {
+                    if server_etag_str != local_etag {
+                        return Ok(true); // Changed
+                    }
+                }
+            }
+        }
+        
+        // 2. Check Last-Modified (Weak validator)
+        if let Some(local_lm) = local_last_modified {
+             if let Some(server_lm) = headers.get(LAST_MODIFIED) {
+                 if let Ok(server_lm_str) = server_lm.to_str() {
+                     if server_lm_str != local_lm {
+                         // Note: Ideally compare timestamps, but string equality is a safe "changed" trigger
+                         return Ok(true);
+                     }
+                 }
+             }
+        }
+        
+        // 3. Check Content-Length
+        if let Some(len) = response.content_length() {
+            if len != local_size {
+                return Ok(true);
+            }
+        }
+        
+        Ok(false) // No obvious change detected
     }
 
     /// Probe the server with a HEAD request first, then a small Range request

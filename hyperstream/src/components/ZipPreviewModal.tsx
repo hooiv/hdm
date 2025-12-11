@@ -20,26 +20,39 @@ interface ZipPreviewData {
 
 interface ZipPreviewModalProps {
     filePath: string;
+    url?: string;
     isOpen: boolean;
     onClose: () => void;
     isPartial?: boolean;
 }
 
-export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, isOpen, onClose, isPartial = false }) => {
+export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url, isOpen, onClose, isPartial = false }) => {
     const [data, setData] = useState<ZipPreviewData | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        if (isOpen && filePath) {
+        if (isOpen) {
             loadPreview();
         }
-    }, [isOpen, filePath]);
+    }, [isOpen, filePath, url]);
 
     const loadPreview = async () => {
         setLoading(true);
         setError(null);
         try {
+            if (isPartial && url) {
+                // Try Remote Preview first for partial files
+                try {
+                    console.log("Attempting remote ZIP preview...");
+                    const result = await invoke<ZipPreviewData>('preview_zip_remote', { url });
+                    setData(result);
+                    return;
+                } catch (remoteErr) {
+                    console.warn("Remote preview failed, falling back to local partial read:", remoteErr);
+                }
+            }
+
             if (isPartial) {
                 // Read last 64KB (sufficient for EOCD)
                 const bytes = await invoke<number[]>('read_zip_last_bytes', { path: filePath, length: 65536 });

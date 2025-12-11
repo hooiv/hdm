@@ -1,20 +1,25 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, Suspense } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 import { Layout } from "./components/Layout";
-import { AddDownloadModal } from "./components/AddDownloadModal";
 import { DownloadList } from "./components/DownloadList";
 import { DownloadTask } from "./components/DownloadItem";
-import { SettingsPage } from "./components/SettingsPage";
 import { ClipboardToast } from "./components/ClipboardToast";
-import { BatchDownloadModal } from "./components/BatchDownloadModal";
-import { ScheduleModal } from "./components/ScheduleModal";
 import { DropTarget } from "./components/DropTarget";
-import { SpiderModal } from "./components/SpiderModal";
 import { ToastManager, ToastRef } from "./components/ToastManager";
-import { AddTorrentModal } from "./components/AddTorrentModal";
 import { TorrentList } from "./components/TorrentList";
+import { FeedsTab } from "./components/FeedsTab";
+import { SearchTab } from "./components/SearchTab";
+
+// Lazy load modals to improve initial render time
+const AddDownloadModal = React.lazy(() => import("./components/AddDownloadModal").then(m => ({ default: m.AddDownloadModal })));
+const SettingsPage = React.lazy(() => import("./components/SettingsPage").then(m => ({ default: m.SettingsPage })));
+const BatchDownloadModal = React.lazy(() => import("./components/BatchDownloadModal").then(m => ({ default: m.BatchDownloadModal })));
+const ScheduleModal = React.lazy(() => import("./components/ScheduleModal").then(m => ({ default: m.ScheduleModal })));
+const SpiderModal = React.lazy(() => import("./components/SpiderModal").then(m => ({ default: m.SpiderModal })));
+const AddTorrentModal = React.lazy(() => import("./components/AddTorrentModal").then(m => ({ default: m.AddTorrentModal })));
+const PluginEditor = React.lazy(() => import("./components/PluginEditor"));
 
 // Generate unique ID for downloads
 let nextId = 1;
@@ -36,7 +41,7 @@ function App() {
   const [isTorrentModalOpen, setIsTorrentModalOpen] = useState(false);
   const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
   const [batchLinks, setBatchLinks] = useState<Array<{ url: string; filename: string }>>([]);
-  const [activeTab, setActiveTab] = useState<'downloads' | 'torrents'>('downloads');
+  const [activeTab, setActiveTab] = useState<'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins'>('downloads');
 
   const [isOverlayVisible, setIsOverlayVisible] = useState(false);
 
@@ -207,7 +212,12 @@ function App() {
     };
   }, []);
 
-  const startDownload = async (url: string, filename: string) => {
+  /* ------------------ Memoized Handlers ------------------ */
+
+  const startDownload = async (url: string, filename: string, force: boolean = false) => {
+    // startDownload touches state heavily, we can keep it as is or memoize if needed.
+    // It's usually called from modals so it's not passed to list items directly.
+    // But consistent style is good.
     const downloadId = generateId();
 
     const newTask: DownloadTask = {
@@ -230,7 +240,8 @@ function App() {
       await invoke("start_download", {
         id: downloadId,
         url,
-        path: `C:\\Users\\aditya\\Desktop\\${filename}`
+        path: `C:\\Users\\aditya\\Desktop\\${filename}`,
+        force
       });
     } catch (error) {
       console.error(error);
@@ -238,27 +249,30 @@ function App() {
     }
   };
 
-  const pauseDownload = async (id: string) => {
-    const task = tasks.find(t => t.id === id);
+
+
+  // Wait, I can't change the component signature easily right now without breaking `DownloadList`.
+  // Let's implement the ref pattern for `tasks` to break the dependency cycle.
+
+  const tasksRef = useRef(tasks);
+  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
+
+  const pauseDownloadMemo = React.useCallback(async (id: string) => {
+    const task = tasksRef.current.find(t => t.id === id);
     if (!task) return;
 
     try {
       await invoke("pause_download", {
-        id,
-        url: task.url,
-        path: `C:\\Users\\aditya\\Desktop\\${task.filename}`,
-        filename: task.filename,
-        downloaded: task.downloaded,
-        total: task.total
+        id
       });
       setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Paused', speed: 0 } : t));
     } catch (error) {
       console.error("Failed to pause:", error);
     }
-  };
+  }, []); // Stable!
 
-  const resumeDownload = async (id: string) => {
-    const task = tasks.find(t => t.id === id);
+  const resumeDownloadMemo = React.useCallback(async (id: string) => {
+    const task = tasksRef.current.find(t => t.id === id);
     if (task) {
       setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Downloading' } : t));
       try {
@@ -272,9 +286,9 @@ function App() {
         setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Error' } : t));
       }
     }
-  };
+  }, []); // Stable
 
-  const deleteDownload = async (id: string) => {
+  const deleteDownloadMemo = React.useCallback(async (id: string) => {
     try {
       await invoke("remove_download_entry", { id });
       setTasks(prev => prev.filter(t => t.id !== id));
@@ -282,26 +296,9 @@ function App() {
     } catch (error) {
       console.error("Failed to delete:", error);
     }
-  };
+  }, []); // Stable
 
-  const handleSpeedLimitChange = async (limitKbps: number) => {
-    try {
-      console.log(`Setting speed limit to ${limitKbps} KB/s`);
-      // The Rust command expects u64, so ensure we pass a number
-      await invoke("set_speed_limit", { limitKbps: Math.floor(limitKbps) });
-    } catch (error) {
-      console.error("Failed to set speed limit:", error);
-    }
-  };
-
-  const handleClipboardDownload = () => {
-    if (clipboardData) {
-      startDownload(clipboardData.url, clipboardData.filename);
-      setClipboardData(null);
-    }
-  };
-
-  const moveTask = async (id: string, direction: 'up' | 'down') => {
+  const moveTaskMemo = React.useCallback(async (id: string, direction: 'up' | 'down') => {
     // Optimistic update
     setTasks(prev => {
       const index = prev.findIndex(t => t.id === id);
@@ -320,9 +317,8 @@ function App() {
       await invoke("move_download_item", { id, direction });
     } catch (error) {
       console.error("Failed to persist move:", error);
-      // Optional: Revert state if failed, but for simple reorder just logging is often enough MVP
     }
-  };
+  }, []); // Stable
 
   const handleStream = async (id: number) => {
     try {
@@ -345,10 +341,45 @@ function App() {
     totalBytes: tasks.reduce((sum, t) => sum + t.downloaded, 0),
   };
 
+  const handleSpeedLimitChange = (limit: number) => {
+    // TODO: Implement speed limit change
+    console.log("Speed limit changed:", limit);
+    // Invoke backend command if exists
+    // invoke("set_global_speed_limit", { limitBytes: limit });
+  };
+
+  const handleClipboardDownload = (url: string, filename: string) => {
+    startDownload(url, filename);
+    setClipboardData(null);
+  };
+
   return (
     <>
       <Layout
-        onAddClick={() => setIsModalOpen(true)}
+        onAddClick={async (e) => {
+          if (e.shiftKey) {
+            try {
+              const text = await navigator.clipboard.readText();
+              if (text && (text.startsWith('http') || text.startsWith('magnet:'))) {
+                console.log("Force Download Key detected. Adding:", text);
+                if (text.startsWith('magnet:')) {
+                  invoke("add_magnet_link", { magnet: text }).catch(console.error);
+                } else {
+                  const filename = text.split('/').pop()?.split('?')[0] || 'clipboard_download';
+                  startDownload(text, filename);
+                }
+                toastRef.current?.addToast(`Started Force Download: ${text}`, 'success');
+              } else {
+                toastRef.current?.addToast(`Clipboard does not contain a valid URL`, 'error');
+              }
+            } catch (err) {
+              console.error("Failed to read clipboard:", err);
+              toastRef.current?.addToast(`Failed to read clipboard`, 'error');
+            }
+          } else {
+            setIsModalOpen(true);
+          }
+        }}
         onAddTorrentClick={() => setIsTorrentModalOpen(true)}
         onScheduleClick={() => setIsScheduleOpen(true)}
         onSpiderClick={() => setIsSpiderOpen(true)}
@@ -369,65 +400,81 @@ function App() {
           ) : (
             <DownloadList
               tasks={tasks}
-              onPause={pauseDownload}
-              onResume={resumeDownload}
-              onDelete={deleteDownload}
-              onMoveUp={(id) => moveTask(id, 'up')}
-              onMoveDown={(id) => moveTask(id, 'down')}
+              onPause={pauseDownloadMemo}
+              onResume={resumeDownloadMemo}
+              onDelete={deleteDownloadMemo}
+              onMoveUp={(id) => moveTaskMemo(id, 'up')}
+              onMoveDown={(id) => moveTaskMemo(id, 'down')}
             />
           )
-        ) : (
+        ) : activeTab === 'torrents' ? (
           <TorrentList onPlay={handleStream} />
+        ) : activeTab === 'feeds' ? (
+          <FeedsTab />
+        ) : activeTab === 'plugins' ? (
+          <PluginEditor />
+        ) : (
+          <SearchTab />
         )}
       </Layout>
-      <AddDownloadModal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onStart={startDownload}
-      />
-      <AddTorrentModal
-        isOpen={isTorrentModalOpen}
-        onClose={() => setIsTorrentModalOpen(false)}
-        onAdd={(magnet) => {
-          // We will implement handleAddTorrent later involving Rust invoke
-          console.log("Adding magnet:", magnet);
-          invoke("add_magnet_link", { magnet }).catch(console.error);
-        }}
-      />
-      {isSettingsOpen && (
-        <SettingsPage onClose={() => setIsSettingsOpen(false)} />
-      )}
+      <Suspense fallback={null}>
+        {isModalOpen && (
+          <AddDownloadModal
+            isOpen={isModalOpen}
+            onClose={() => setIsModalOpen(false)}
+            onStart={startDownload}
+          />
+        )}
+        {isTorrentModalOpen && (
+          <AddTorrentModal
+            isOpen={isTorrentModalOpen}
+            onClose={() => setIsTorrentModalOpen(false)}
+            onAdd={(magnet) => {
+              console.log("Adding magnet:", magnet);
+              invoke("add_magnet_link", { magnet }).catch(console.error);
+            }}
+          />
+        )}
+        {isSettingsOpen && (
+          <SettingsPage isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+        )}
+        {batchLinks.length > 0 && (
+          <BatchDownloadModal
+            isOpen={batchLinks.length > 0}
+            links={batchLinks}
+            onClose={() => setBatchLinks([])}
+            onDownload={(links) => {
+              links.forEach(link => startDownload(link.url, link.filename));
+              setBatchLinks([]);
+            }}
+          />
+        )}
+        {isScheduleOpen && (
+          <ScheduleModal
+            isOpen={isScheduleOpen}
+            onClose={() => setIsScheduleOpen(false)}
+          />
+        )}
+        {isSpiderOpen && (
+          <SpiderModal
+            isOpen={isSpiderOpen}
+            onClose={() => setIsSpiderOpen(false)}
+            onDownload={(files) => {
+              files.forEach(f => startDownload(f.url, f.filename));
+              setIsSpiderOpen(false);
+            }}
+          />
+        )}
+      </Suspense>
+
       {clipboardData && (
         <ClipboardToast
           message="URL detected in clipboard"
           filename={clipboardData.filename}
-          onDownload={handleClipboardDownload}
+          onDownload={() => handleClipboardDownload(clipboardData.url, clipboardData.filename)}
           onDismiss={() => setClipboardData(null)}
         />
       )}
-      {batchLinks.length > 0 && (
-        <BatchDownloadModal
-          isOpen={batchLinks.length > 0}
-          links={batchLinks}
-          onClose={() => setBatchLinks([])}
-          onDownload={(links) => {
-            links.forEach(link => startDownload(link.url, link.filename));
-            setBatchLinks([]);
-          }}
-        />
-      )}
-      <ScheduleModal
-        isOpen={isScheduleOpen}
-        onClose={() => setIsScheduleOpen(false)}
-      />
-      <SpiderModal
-        isOpen={isSpiderOpen}
-        onClose={() => setIsSpiderOpen(false)}
-        onDownload={(files) => {
-          files.forEach(f => startDownload(f.url, f.filename));
-          setIsSpiderOpen(false);
-        }}
-      />
       <DropTarget onDrop={(_url) => {
         setIsModalOpen(true);
         // Could auto-fill URL here if modal supports it

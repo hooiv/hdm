@@ -7,7 +7,7 @@ interface ThreadVisualizerProps {
     totalSize: number;
 }
 
-export const ThreadVisualizer: React.FC<ThreadVisualizerProps> = ({ segments, totalSize }) => {
+export const ThreadVisualizer = React.memo<ThreadVisualizerProps>(({ segments, totalSize }) => {
     // Determine the max end_byte to use as total size if provided totalSize is 0
     const effectiveTotal = totalSize > 0 ? totalSize : segments.reduce((acc, seg) => Math.max(acc, seg.end_byte), 0);
 
@@ -148,4 +148,4 @@ export const ThreadVisualizer: React.FC<ThreadVisualizerProps> = ({ segments, to
             `}</style>
         </div>
     );
-};
+});

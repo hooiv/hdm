@@ -170,13 +170,8 @@ impl DiskWriter {
 
     /// Flush all pending buffer entries to disk
     fn flush_buffer(&mut self, buffer: &mut VecDeque<BufferEntry>) {
-        while let Some(entry) = buffer.pop_front() {
-            self.write_entry(&entry);
-        }
-    }
+        if buffer.is_empty() { return; }
 
-    /// Write a single buffer entry to disk
-    fn write_entry(&mut self, entry: &BufferEntry) {
         let mut file = match self.file.lock() {
             Ok(f) => f,
             Err(e) => {
@@ -185,18 +180,27 @@ impl DiskWriter {
             }
         };
 
+        while let Some(entry) = buffer.pop_front() {
+            if Self::perform_write(&mut file, &entry) {
+                self.write_count += 1;
+                self.bytes_written += entry.data.len() as u64;
+            }
+        }
+    }
+
+    /// Write a single buffer entry to disk (Static helper to avoid borrow issues)
+    fn perform_write(file: &mut File, entry: &BufferEntry) -> bool {
         if let Err(e) = file.seek(SeekFrom::Start(entry.offset)) {
             eprintln!("[DiskWriter] Seek error at {}: {}", entry.offset, e);
-            return;
+            return false;
         }
 
         if let Err(e) = file.write_all(&entry.data) {
             eprintln!("[DiskWriter] Write error at {}: {}", entry.offset, e);
-            return;
+            return false;
         }
 
-        self.write_count += 1;
-        self.bytes_written += entry.data.len() as u64;
+        true
     }
 
     #[allow(dead_code)]

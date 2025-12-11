@@ -1,0 +1,89 @@
+warning: profile package spec `boring` in profile `dev` did not match any packages
+
+help: a package with a similar name exists: `boring2`
+warning: profile package spec `boring-sys` in profile `dev` did not match any packages
+
+help: a package with a similar name exists: `boring-sys2`
+    Checking hyperstream v0.1.0 (C:\Users\aditya\Desktop\hdm\hyperstream\src-tauri)
+error[E0432]: unresolved import `std::sync::AtomicBool`
+ --> src\network\sync_client.rs:4:22
+  |
+4 | use std::sync::{Arc, AtomicBool};
+  |                      ^^^^^^^^^^ no `AtomicBool` in `sync`
+  |
+  = help: consider importing this struct instead:
+          std::sync::atomic::AtomicBool
+
+warning: unused import: `SinkExt`
+ --> src\network\sync_client.rs:2:31
+  |
+2 | use futures_util::{StreamExt, SinkExt};
+  |                               ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Arc`
+ --> src\network\sync_client.rs:4:17
+  |
+4 | use std::sync::{Arc, AtomicBool};
+  |                 ^^^
+
+warning: unused imports: `Read`, `SeekFrom`, and `Seek`
+ --> src\network\differential\mod.rs:1:15
+  |
+1 | use std::io::{Read, Seek, SeekFrom};
+  |               ^^^^  ^^^^  ^^^^^^^^
+
+warning: unused import: `std::path::Path`
+ --> src\network\differential\mod.rs:3:5
+  |
+3 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src\ai\mod.rs:6:5
+  |
+6 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> src\network\tor.rs:28:18
+    |
+ 28 |     let client = TorClient::create_bootstrapped(runtime, config).await
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- unexpected argument #1 of type `tor_rtcompat::PreferredRuntime`
+    |
+note: associated function defined here
+   --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arti-client-0.24.0\src\client.rs:782:18
+    |
+782 |     pub async fn create_bootstrapped(config: TorClientConfig) -> crate::Result<Self> {
+    |                  ^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+    |
+ 28 -     let client = TorClient::create_bootstrapped(runtime, config).await
+ 28 +     let client = TorClient::create_bootstrapped(config).await
+    |
+
+warning: unused variable: `data_dir_str`
+   --> src\plugin_vm\lua_host.rs:132:13
+    |
+132 |         let data_dir_str = data_dir.to_string_lossy().to_string();
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_dir_str`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `result`
+   --> src\lan_api.rs:169:20
+    |
+169 |     while let Some(result) = user_ws_rx.next().await {
+    |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_result`
+
+warning: unused import: `futures_util::StreamExt`
+ --> src\network\tor.rs:9:5
+  |
+9 | use futures_util::StreamExt;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0061, E0432.
+For more information about an error, try `rustc --explain E0061`.
+warning: `hyperstream` (lib) generated 8 warnings
+error: could not compile `hyperstream` (lib) due to 2 previous errors; 8 warnings emitted

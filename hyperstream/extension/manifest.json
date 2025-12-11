@@ -5,10 +5,14 @@
     "description": "Send downloads to HyperStream Download Manager",
     "permissions": [
         "contextMenus",
-        "activeTab"
+        "activeTab",
+        "scripting",
+        "downloads",
+        "storage"
     ],
     "host_permissions": [
-        "http://localhost:14733/*"
+        "http://localhost:14733/*",
+        "<all_urls>"
     ],
     "background": {
         "service_worker": "background.js"
@@ -25,5 +29,15 @@
         "16": "icons/icon16.png",
         "48": "icons/icon48.png",
         "128": "icons/icon128.png"
-    }
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "content.js"
+            ]
+        }
+    ]
 }

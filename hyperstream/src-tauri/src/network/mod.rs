@@ -5,3 +5,6 @@ pub mod chaos;
 pub mod connection_manager;
 pub mod bittorrent;
 pub mod sni_fragment;
+pub mod tor;
+pub mod sync_client;
+pub mod differential;

@@ -18,7 +18,7 @@ impl Default for BrowserProfile {
 
 /// Build a client that "impersonates" a browser by setting TLS/HTTP2 params manually.
 /// (rquest v5.1.0 does not include pre-defined profiles, so we build our own "lite" version)
-pub fn build_impersonator_client(profile: BrowserProfile) -> Result<Client, String> {
+pub fn build_impersonator_client(profile: BrowserProfile, proxy: Option<&crate::proxy::ProxyConfig>) -> Result<Client, String> {
     
     // 1. Determine User-Agent
     let user_agent = match profile {
@@ -31,9 +31,19 @@ pub fn build_impersonator_client(profile: BrowserProfile) -> Result<Client, Stri
 
     // 2. Build Client with BoringSSL (default in rquest 5.x)
     // TODO: Phase L2b - Add specific HTTP/2 window sizes and priority frames here using .http2_* methods
-    let builder = Client::builder()
+    let mut builder = Client::builder()
         .user_agent(user_agent)
         .cookie_store(true);
+        // .http2_initial_stream_window_size(6 * 1024 * 1024)      // 6MB - Removed as not supported in current rquest
+
+        // .http2_initial_connection_window_size(15 * 1024 * 1024); // 15MB - Removed as not supported
+
+    // 3. Apply Proxy
+    if let Some(config) = proxy {
+        if let Some(p) = config.to_rquest_proxy() {
+            builder = builder.proxy(p);
+        }
+    }
 
     // Note: rquest 5.x uses .min_tls_version(Version method) which we handle in http_client.rs if needed.
     // For now, default is good (TLS 1.2+).
@@ -43,6 +53,6 @@ pub fn build_impersonator_client(profile: BrowserProfile) -> Result<Client, Stri
 }
 
 /// Helper for standard client construction
-pub fn build_client() -> Result<Client, String> {
-    build_impersonator_client(BrowserProfile::default())
+pub fn build_client(proxy: Option<&crate::proxy::ProxyConfig>) -> Result<Client, String> {
+    build_impersonator_client(BrowserProfile::default(), proxy)
 }
