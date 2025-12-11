@@ -20,6 +20,7 @@ const ScheduleModal = React.lazy(() => import("./components/ScheduleModal").then
 const SpiderModal = React.lazy(() => import("./components/SpiderModal").then(m => ({ default: m.SpiderModal })));
 const AddTorrentModal = React.lazy(() => import("./components/AddTorrentModal").then(m => ({ default: m.AddTorrentModal })));
 const PluginEditor = React.lazy(() => import("./components/PluginEditor"));
+import { DashboardStats } from './components/DashboardStats';
 
 // Generate unique ID for downloads
 let nextId = 1;
@@ -353,6 +354,17 @@ function App() {
     setClipboardData(null);
   };
 
+  // Calculate Dashboard Stats
+  const globalSpeed = tasks
+    .filter(d => d.status === 'Downloading')
+    .reduce((acc, curr) => acc + (curr.speed || 0), 0);
+
+  const activeCount = tasks
+    .filter(d => ['Downloading', 'Queued'].includes(d.status)).length;
+
+  const totalDownloaded = tasks
+    .reduce((acc, curr) => acc + (curr.downloaded || 0), 0);
+
   return (
     <>
       <Layout
@@ -389,24 +401,34 @@ function App() {
         onSpeedLimitChange={handleSpeedLimitChange}
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        globalSpeed={globalSpeed}
       >
         {activeTab === 'downloads' ? (
-          tasks.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-state-icon">📥</div>
-              <h3>No Downloads Yet</h3>
-              <p>Click "+ Add Url" to start your first download, or copy a download link to your clipboard.</p>
-            </div>
-          ) : (
-            <DownloadList
-              tasks={tasks}
-              onPause={pauseDownloadMemo}
-              onResume={resumeDownloadMemo}
-              onDelete={deleteDownloadMemo}
-              onMoveUp={(id) => moveTaskMemo(id, 'up')}
-              onMoveDown={(id) => moveTaskMemo(id, 'down')}
+          <div className="flex flex-col h-full">
+            <DashboardStats
+              globalSpeed={globalSpeed}
+              activeCount={activeCount}
+              totalDownloaded={totalDownloaded}
             />
-          )
+            {tasks.length > 0 ? (
+              <DownloadList
+                tasks={tasks}
+                onPause={pauseDownloadMemo}
+                onResume={resumeDownloadMemo}
+                onDelete={deleteDownloadMemo}
+                onMoveUp={(id) => moveTaskMemo(id, 'up')}
+                onMoveDown={(id) => moveTaskMemo(id, 'down')}
+              />
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center text-slate-500 opacity-60">
+                <div className="w-24 h-24 mb-6 rounded-full bg-white/5 flex items-center justify-center shadow-inner">
+                  <span className="text-4xl">📥</span>
+                </div>
+                <h3 className="text-lg font-semibold text-slate-300">No Active Downloads</h3>
+                <p className="text-sm">Add a URL or use the browser extension to start.</p>
+              </div>
+            )}
+          </div>
         ) : activeTab === 'torrents' ? (
           <TorrentList onPlay={handleStream} />
         ) : activeTab === 'feeds' ? (

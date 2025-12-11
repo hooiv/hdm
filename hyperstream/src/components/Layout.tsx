@@ -29,6 +29,7 @@ interface LayoutProps {
     onSpeedLimitChange: (limit: number) => void;
     activeTab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins';
     onTabChange: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins') => void;
+    globalSpeed?: number;
 }
 
 const NavItem: React.FC<{ icon: any; label: string; active: boolean; onClick: () => void; badge?: string | number }> = ({ icon: Icon, label, active, onClick, badge }) => (
