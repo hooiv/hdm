@@ -1,19 +1,19 @@
-use std::thread;
+use crate::audio_events::{AUDIO_PLAYER, SoundEvent};
 
 pub fn play_complete() {
-    thread::spawn(|| {
-        println!("🎵 [Sound] Download Complete!");
+    tokio::spawn(async {
+        AUDIO_PLAYER.play(SoundEvent::DownloadComplete).await;
     });
 }
 
 pub fn play_error() {
-    thread::spawn(|| {
-        println!("🎵 [Sound] Error!");
+    tokio::spawn(async {
+        AUDIO_PLAYER.play(SoundEvent::DownloadError).await;
     });
 }
 
 pub fn play_startup() {
-    thread::spawn(|| {
-        println!("🎵 [Sound] Startup");
+    tokio::spawn(async {
+        AUDIO_PLAYER.play(SoundEvent::DownloadStart).await;
     });
 }

@@ -42,6 +42,14 @@ pub struct Settings {
     /// Maximum adaptive threads
     #[serde(default)]
     pub max_threads: u32,
+
+    // ChatOps (Telegram)
+    #[serde(default)]
+    pub telegram_bot_token: Option<String>,
+    #[serde(default)]
+    pub telegram_chat_id: Option<String>,
+    #[serde(default)]
+    pub chatops_enabled: bool,
     
     // Proxy Settings
     #[serde(default)]
@@ -74,6 +82,22 @@ pub struct Settings {
     // Team Sync
     #[serde(default)]
     pub last_sync_host: Option<String>,
+    
+    // Archive Extraction
+    #[serde(default)]
+    pub auto_extract_archives: bool,
+    #[serde(default)]
+    pub cleanup_archives_after_extract: bool,
+    
+    // P2P File Sharing
+    #[serde(default)]
+    pub p2p_enabled: bool,
+    #[serde(default)]
+    pub p2p_upload_limit_kbps: Option<u64>,
+    
+    // Webhooks
+    #[serde(default)]
+    pub webhooks: Option<Vec<crate::webhooks::WebhookConfig>>,
 }
 
 impl Default for Settings {
@@ -119,6 +143,15 @@ impl Default for Settings {
 
             cloud_secret_key: None,
             last_sync_host: None,
+            auto_extract_archives: false,
+            cleanup_archives_after_extract: false,
+            p2p_enabled: false,
+            p2p_upload_limit_kbps: None,
+            webhooks: None,
+            // ChatOps defaults
+            telegram_bot_token: None,
+            telegram_chat_id: None,
+            chatops_enabled: false,
         }
     }
 }

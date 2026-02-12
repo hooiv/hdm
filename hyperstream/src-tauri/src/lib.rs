@@ -40,6 +40,9 @@ mod search;
 mod cloud_bridge;
 mod media_processor;
 mod ai;
+mod audio_events;
+mod webhooks;
+mod archive_manager;
 
 use persistence::SavedDownload;
 use settings::Settings;
@@ -73,6 +76,7 @@ pub(crate) struct AppState {
     pub(crate) p2p_file_map: http_server::FileMap,
     pub(crate) torrent_manager: Arc<network::bittorrent::manager::TorrentManager>,
     pub(crate) connection_manager: network::connection_manager::ConnectionManager,
+    pub(crate) chatops_manager: Arc<network::chatops::ChatOpsManager>,
 }
 
 #[tauri::command]
@@ -174,6 +178,29 @@ pub async fn start_download_impl(
     _resume_override: Option<u64>
 ) -> Result<(), String> {
     println!("DEBUG: Starting download ID: {}", id);
+    
+    // Play start sound
+    crate::media::sounds::play_startup();
+    
+    // Trigger webhooks for download start
+    {
+        let settings = settings::load_settings();
+        if let Some(webhooks) = settings.webhooks {
+            let manager = webhooks::WebhookManager::new();
+            manager.load_configs(webhooks).await;
+            let payload = webhooks::WebhookPayload {
+                event: "DownloadStart".to_string(),
+                download_id: id.clone(),
+                filename: path.split('\\').last().unwrap_or(&path).to_string(),
+                url: url.clone(),
+                size: 0,
+                speed: 0,
+                filepath: Some(path.clone()),
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+            manager.trigger(webhooks::WebhookEvent::DownloadStart, payload).await;
+        }
+    }
 
     // 1. Check for saved download (Resume logic)
     let saved_downloads = persistence::load_downloads().unwrap_or_default();
@@ -262,9 +289,7 @@ pub async fn start_download_impl(
     }
     let p2p_node = state.p2p_node.clone();
     let id_clone = id.clone();
-    tauri::async_runtime::spawn(async move {
-        p2p_node.advertise_file(id_clone).await;
-    });
+    // P2P file advertising removed (not needed in simplified P2P)
 
     // 4. Initialize Manager
     let manager = downloader::initialization::setup_manager(total_size, saved, resume_from);
@@ -299,6 +324,8 @@ pub async fn start_download_impl(
     let downloaded_monitor = downloaded_total.clone();
     let window_monitor = app.clone();
     let id_monitor = id.clone();
+    let url_monitor = url.clone();
+    let path_monitor = path.clone();
     let mut stop_rx_monitor = stop_tx.subscribe();
     
     tokio::spawn(async move {
@@ -333,6 +360,65 @@ pub async fn start_download_impl(
 
                     if d >= total_size {
                         crate::media::sounds::play_complete();
+                        
+                        // Trigger webhooks for download complete
+                        let id_webhook = id_monitor.clone();
+                        let url_webhook = url_monitor.clone();
+                        let path_webhook = path_monitor.clone();
+                        let size_webhook = total_size;
+                        tokio::spawn(async move {
+                            let settings = settings::load_settings();
+                            if let Some(webhooks) = settings.webhooks {
+                                let manager = webhooks::WebhookManager::new();
+                                manager.load_configs(webhooks).await;
+                                let payload = webhooks::WebhookPayload {
+                                    event: "DownloadComplete".to_string(),
+                                    download_id: id_webhook.clone(),
+                                    filename: path_webhook.split('\\').last().unwrap_or(&path_webhook).to_string(),
+                                    url: url_webhook.clone(),
+                                    size: size_webhook,
+                                    speed: 0,
+                                    filepath: Some(path_webhook.clone()),
+                                    timestamp: chrono::Utc::now().timestamp(),
+                                };
+                                manager.trigger(webhooks::WebhookEvent::DownloadComplete, payload).await;
+                            }
+                        });
+                        
+                        // Auto-extract archives if enabled
+                        let path_archive = path_monitor.clone();
+                        tokio::spawn(async move {
+                            let settings = settings::load_settings();
+                            if settings.auto_extract_archives {
+                                if let Some(archive_info) = archive_manager::ArchiveManager::detect_archive(&path_archive) {
+                                    println!("📦 Detected archive: {:?}", archive_info.archive_type);
+                                    
+                                    // Extract to same directory as archive
+                                    let dest = std::path::Path::new(&path_archive)
+                                        .parent()
+                                        .and_then(|p| p.to_str())
+                                        .unwrap_or(".")
+                                        .to_string();
+                                    
+                                    match archive_manager::ArchiveManager::extract_archive(&path_archive, &dest) {
+                                        Ok(msg) => {
+                                            println!("✅ {}", msg);
+                                            
+                                            // Cleanup archives if enabled
+                                            if settings.cleanup_archives_after_extract {
+                                                if let Err(e) = archive_manager::ArchiveManager::cleanup_archive(&path_archive) {
+                                                    eprintln!("⚠️  Cleanup failed: {}", e);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("❌ Extraction failed: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        
                         break;
                     }
                 }
@@ -476,6 +562,30 @@ pub async fn start_download_impl(
                      });
                      
                      crate::media::sounds::play_error();
+                     
+                     // Trigger webhooks for download error
+                     let id_error = id_worker.clone();
+                     let url_error = url_worker.clone();
+                     let path_error = path_worker.clone();
+                     tokio::spawn(async move {
+                         let settings = settings::load_settings();
+                         if let Some(webhooks) = settings.webhooks {
+                             let manager = webhooks::WebhookManager::new();
+                             manager.load_configs(webhooks).await;
+                             let payload = webhooks::WebhookPayload {
+                                 event: "DownloadError".to_string(),
+                                 download_id: id_error.clone(),
+                                 filename: path_error.split('\\').last().unwrap_or(&path_error).to_string(),
+                                 url: url_error.clone(),
+                                 size: 0,
+                                 speed: 0,
+                                 filepath: Some(path_error.clone()),
+                                 timestamp: chrono::Utc::now().timestamp(),
+                             };
+                             manager.trigger(webhooks::WebhookEvent::DownloadError, payload).await;
+                         }
+                     });
+                     
                      return;
                 }
 
@@ -1782,7 +1892,30 @@ pub fn run() {
             join_workspace,
             get_plugin_source,
             save_plugin_source,
-            delete_plugin
+            delete_plugin,
+            // Audio Settings Commands
+            get_audio_enabled,
+            set_audio_enabled,
+            get_audio_volume,
+            set_audio_volume,
+            play_test_sound,
+            // Webhook Commands
+            get_webhooks,
+            add_webhook,
+            update_webhook,
+            delete_webhook,
+            test_webhook,
+            // Archive Commands
+            detect_archive,
+            extract_archive,
+            cleanup_archive,
+            check_unrar_available,
+            // P2P Commands
+            create_p2p_share,
+            join_p2p_share,
+            list_p2p_sessions,
+            close_p2p_session,
+            get_p2p_stats
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1805,7 +1938,7 @@ pub fn run() {
             
             // Init P2P node
             let p2p_node = tauri::async_runtime::block_on(async {
-                network::p2p::P2PNode::new().await.unwrap_or_else(|e| {
+                network::p2p::P2PNode::new(14735).await.unwrap_or_else(|e| {
                     println!("Warning: P2P failed to start: {}", e);
                     panic!("P2P Init Failed: {}", e);
                 })
@@ -1877,13 +2010,23 @@ pub fn run() {
                 .build(app.handle());
             // =====================================
             
+            // Initialize ChatOps
+            let download_manager = crate::download::manager::DownloadManager::new(app.handle().clone());
+            let settings_arc = std::sync::Arc::new(std::sync::Mutex::new(crate::settings::load_settings()));
+            let chatops_manager = std::sync::Arc::new(crate::network::chatops::ChatOpsManager::new(
+                download_manager.clone(),
+                settings_arc.clone(),
+            ));
+            chatops_manager.start();
+
             // Manage AppState (Matching struct definition)
             app.handle().manage(AppState { 
                  downloads: Mutex::new(HashMap::new()),
-                 p2p_node,
-                 p2p_file_map,
-                 torrent_manager,
+                 p2p_node: p2p_node.clone(),
+                 p2p_file_map: p2p_file_map.clone(),
+                 torrent_manager: torrent_manager.clone(),
                  connection_manager: network::connection_manager::ConnectionManager::default(),
+                 chatops_manager: chatops_manager.clone(),
             });
 
             // Initialize Plugin Manager
@@ -1959,6 +2102,175 @@ async fn delete_plugin(filename: String) -> Result<(), String> {
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// ============ Audio Settings Commands ============
+#[tauri::command]
+async fn get_audio_enabled() -> bool {
+    audio_events::AUDIO_PLAYER.is_enabled().await
+}
+
+#[tauri::command]
+async fn set_audio_enabled(enabled: bool) -> Result<(), String> {
+    audio_events::AUDIO_PLAYER.set_enabled(enabled).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_audio_volume() -> f32 {
+    audio_events::AUDIO_PLAYER.get_volume().await
+}
+
+#[tauri::command]
+async fn set_audio_volume(volume: f32) -> Result<(), String> {
+    audio_events::AUDIO_PLAYER.set_volume(volume).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn play_test_sound(sound_type: String) -> Result<(), String> {
+    let event = match sound_type.as_str() {
+        "success" => audio_events::SoundEvent::DownloadComplete,
+        "error" => audio_events::SoundEvent::DownloadError,
+        "start" => audio_events::SoundEvent::DownloadStart,
+        _ => return Err(format!("Unknown sound type: {}", sound_type)),
+    };
+    
+    audio_events::AUDIO_PLAYER.play(event).await;
+    Ok(())
+}
+
+// ============ Webhook Commands ============
+#[tauri::command]
+async fn get_webhooks() -> Result<Vec<webhooks::WebhookConfig>, String> {
+    let settings = settings::load_settings();
+    Ok(settings.webhooks.unwrap_or_default())
+}
+
+#[tauri::command]
+async fn add_webhook(config: webhooks::WebhookConfig) -> Result<(), String> {
+    let mut settings = settings::load_settings();
+    let mut webhooks = settings.webhooks.unwrap_or_default();
+    webhooks.push(config);
+    settings.webhooks = Some(webhooks);
+    settings::save_settings(&settings)
+}
+
+#[tauri::command]
+async fn update_webhook(id: String, config: webhooks::WebhookConfig) -> Result<(), String> {
+    let mut settings = settings::load_settings();
+    let mut webhooks = settings.webhooks.unwrap_or_default();
+    
+    if let Some(webhook) = webhooks.iter_mut().find(|w| w.id == id) {
+        *webhook = config;
+        settings.webhooks = Some(webhooks);
+        settings::save_settings(&settings)
+    } else {
+        Err("Webhook not found".to_string())
+    }
+}
+
+#[tauri::command]
+async fn delete_webhook(id: String) -> Result<(), String> {
+    let mut settings = settings::load_settings();
+    let mut webhooks = settings.webhooks.unwrap_or_default();
+    webhooks.retain(|w| w.id != id);
+    settings.webhooks = Some(webhooks);
+    settings::save_settings(&settings)
+}
+
+#[tauri::command]
+async fn test_webhook(id: String) -> Result<(), String> {
+    let settings = settings::load_settings();
+    let webhooks = settings.webhooks.unwrap_or_default();
+    
+    let config = webhooks.iter()
+        .find(|w| w.id == id)
+        .ok_or("Webhook not found")?;
+    
+    let payload = webhooks::WebhookPayload {
+        event: "DownloadComplete".to_string(),
+        download_id: "test_123".to_string(),
+        filename: "test_file.zip".to_string(),
+        url: "https://example.com/test.zip".to_string(),
+        size: 104857600, // 100 MB
+        speed: 10485760, // 10 MB/s
+        filepath: Some("C:\\Downloads\\test_file.zip".to_string()),
+        timestamp: chrono::Utc::now().timestamp(),
+    };
+    
+    let manager = webhooks::WebhookManager::new();
+    manager.load_configs(vec![config.clone()]).await;
+    manager.trigger(webhooks::WebhookEvent::DownloadComplete, payload).await;
+    
+    Ok(())
+}
+
+// ============ Archive Commands ============
+#[tauri::command]
+async fn detect_archive(path: String) -> Option<archive_manager::ArchiveInfo> {
+    archive_manager::ArchiveManager::detect_archive(&path)
+}
+
+#[tauri::command]
+async fn extract_archive(archive_path: String, dest_dir: Option<String>) -> Result<String, String> {
+    // Use same directory as archive if dest not specified
+    let dest = if let Some(d) = dest_dir {
+        d
+    } else {
+        std::path::Path::new(&archive_path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or(".")
+            .to_string()
+    };
+    
+    archive_manager::ArchiveManager::extract_archive(&archive_path, &dest)
+}
+
+#[tauri::command]
+async fn cleanup_archive(archive_path: String) -> Result<(), String> {
+    archive_manager::ArchiveManager::cleanup_archive(&archive_path)
+}
+
+#[tauri::command]
+fn check_unrar_available() -> bool {
+    archive_manager::ArchiveManager::check_unrar_available()
+}
+
+// ============ P2P Commands ============
+#[tauri::command]
+async fn create_p2p_share(
+    download_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<network::p2p::P2PShareSession, String> {
+    let p2p = state.p2p_node.clone();
+    p2p.create_share_session(download_id).await
+}
+
+#[tauri::command]
+async fn join_p2p_share(
+    code: String,
+    peer_addr: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<network::p2p::P2PShareSession, String> {
+    let p2p = state.p2p_node.clone();
+    p2p.join_share_session(code, peer_addr).await
+}
+
+#[tauri::command]
+fn list_p2p_sessions(state: tauri::State<'_, AppState>) -> Vec<network::p2p::P2PShareSession> {
+    state.p2p_node.list_sessions()
+}
+
+#[tauri::command]
+fn close_p2p_session(session_id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.p2p_node.close_session(&session_id)
+}
+
+#[tauri::command]
+fn get_p2p_stats(state: tauri::State<'_, AppState>) -> network::p2p::P2PStats {
+    state.p2p_node.get_stats()
 }
 
 // Old dummy commands removed

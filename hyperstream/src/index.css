@@ -5,9 +5,12 @@
 @tailwind utilities;
 
 :root {
-    font-family: 'Outfit', system-ui, sans-serif;
-    line-height: 1.5;
+    font-family: 'Outfit', system-ui, -apple-system, sans-serif;
+    line-height: 1.6;
+    /* Improved readability */
     font-weight: 400;
+    letter-spacing: -0.01em;
+    /* Slight tighter tracking for modern look */
 
     color-scheme: light dark;
     color: rgba(255, 255, 255, 0.87);
@@ -17,6 +20,30 @@
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom Mac-like Scrollbars */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.3);
+    border-radius: 10px;
+    transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.5);
+}
+
+::-webkit-scrollbar-corner {
+    background: transparent;
 }
 
 /* Reset for transparent window */

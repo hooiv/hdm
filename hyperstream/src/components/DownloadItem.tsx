@@ -4,7 +4,8 @@ import { ZipPreviewModal } from './ZipPreviewModal';
 import { Segment } from '../types';
 import { ThreadVisualizer } from './ThreadVisualizer';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Folder, Play, Pause, Trash2, FileText, ChevronDown, Archive, ArrowUp, ArrowDown, HardDrive, Cloud, Film, Music } from 'lucide-react';
+import { Folder, Play, Pause, Trash2, FileText, ChevronDown, Archive, ArrowUp, ArrowDown, HardDrive, Cloud, Film, Music, Share2 } from 'lucide-react';
+import P2PShareModal from './P2PShareModal';
 
 export interface DownloadTask {
     id: string;
@@ -103,6 +104,7 @@ const getFileCategory = (filename: string): { icon: string; label: string; color
 export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onResume, onDelete, onMoveUp, onMoveDown }) => {
     const [showPreview, setShowPreview] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
+    const [showP2PShare, setShowP2PShare] = useState(false);
 
     // Derived values
     const remainingBytes = task.total - task.downloaded;
@@ -218,6 +220,19 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                     <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(220,38,38,0.2)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-slate-500 hover:text-red-400 rounded-md transition-colors" onClick={() => onDelete && onDelete(task.id)} title="Cancel">
                         <Trash2 size={16} />
                     </motion.button>
+
+                    {/* P2P Share Button */}
+                    {(task.status === 'Done' || task.status === 'Downloading') && (
+                        <motion.button
+                            whileHover={{ scale: 1.1, backgroundColor: "rgba(6,182,212,0.2)" }}
+                            whileTap={{ scale: 0.9 }}
+                            className="p-1.5 text-slate-500 hover:text-cyan-400 rounded-md transition-colors"
+                            onClick={() => setShowP2PShare(true)}
+                            title="Share via P2P"
+                        >
+                            <Share2 size={16} />
+                        </motion.button>
+                    )}
 
                     <div className="w-px h-4 bg-white/10 mx-1"></div>
 
@@ -358,6 +373,13 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                     isPartial={task.status === 'Downloading' || task.status === 'Paused'}
                 />
             )}
+
+            <P2PShareModal
+                isOpen={showP2PShare}
+                onClose={() => setShowP2PShare(false)}
+                downloadId={task.id}
+                downloadName={task.filename}
+            />
         </motion.div>
     );
 });

@@ -1,6 +1,7 @@
 pub mod headers;
 pub mod masq;
 pub mod p2p;
+pub mod chatops;
 pub mod chaos;
 pub mod connection_manager;
 pub mod bittorrent;
