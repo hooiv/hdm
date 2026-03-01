@@ -393,6 +393,253 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                                         <Link size={14} /> Share via Link
                                     </button>
 
+                                    {/* Run in Sandbox - for .exe and .msi files */}
+                                    {['exe', 'msi'].includes(task.filename.split('.').pop()?.toLowerCase() || '') && (
+                                        <button
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                try {
+                                                    const result = await invoke<string>('run_in_sandbox', { path: `C:\\Users\\aditya\\Desktop\\${task.filename}` });
+                                                    alert(`🛡️ ${result}`);
+                                                } catch (err) {
+                                                    alert('Sandbox launch failed: ' + err);
+                                                }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20"
+                                        >
+                                            <Shield size={14} /> Run in Sandbox
+                                        </button>
+                                    )}
+
+                                    {/* Blockchain Notarize */}
+                                    <button
+                                        onClick={async (e) => {
+                                            e.stopPropagation();
+                                            try {
+                                                alert('📜 Submitting to Timestamp Authority...');
+                                                const result: any = await invoke('notarize_file', { path: `C:\\Users\\aditya\\Desktop\\${task.filename}` });
+                                                alert(`📜 Notarized!\nSHA-256: ${result.hash}\nTSR saved: ${result.tsr_path}\nTimestamp: ${result.timestamp}`);
+                                            } catch (err) {
+                                                alert('Notarization failed: ' + err);
+                                            }
+                                        }}
+                                        className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 hover:bg-yellow-500/20"
+                                    >
+                                        <Globe size={14} /> Notarize
+                                    </button>
+
+                                    {/* Mirror Hunter */}
+                                    <button
+                                        onClick={async (e) => {
+                                            e.stopPropagation();
+                                            try {
+                                                alert('🔍 Searching for mirrors...');
+                                                const result: any = await invoke('find_mirrors', { path: `C:\\Users\\aditya\\Desktop\\${task.filename}` });
+                                                const mirrorList = result.mirrors?.map((m: any) => `${m.source}: ${m.url}`).join('\n') || 'None found';
+                                                alert(`🔍 Found ${result.mirrors_found} mirror(s)\nSHA-256: ${result.sha256}\nMD5: ${result.md5}\n\n${mirrorList}`);
+                                            } catch (err) {
+                                                alert('Mirror search failed: ' + err);
+                                            }
+                                        }}
+                                        className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-teal-500/10 text-teal-400 border border-teal-500/20 hover:bg-teal-500/20"
+                                    >
+                                        <RefreshCw size={14} /> Find Mirrors
+                                    </button>
+
+                                    {/* Flash to USB - for .iso and .img files */}
+                                    {['iso', 'img'].includes(task.filename.split('.').pop()?.toLowerCase() || '') && (
+                                        <button
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                try {
+                                                    const drives: any[] = await invoke('list_usb_drives');
+                                                    if (!drives || drives.length === 0) {
+                                                        alert('No USB drives found. Insert a USB drive and try again.');
+                                                        return;
+                                                    }
+                                                    const driveList = drives.map((d: any) => `Drive ${d.number}: ${d.model} (${d.size_display})`).join('\n');
+                                                    const choice = prompt(`⚡ Select USB drive to flash:\n\n${driveList}\n\n⚠️ WARNING: ALL DATA WILL BE ERASED!\n\nEnter drive number:`);
+                                                    if (choice === null) return;
+                                                    const driveNum = parseInt(choice);
+                                                    if (isNaN(driveNum)) { alert('Invalid drive number'); return; }
+                                                    if (!confirm(`⚠️ FINAL WARNING: This will ERASE ALL DATA on Drive ${driveNum}. Continue?`)) return;
+                                                    const result = await invoke<string>('flash_to_usb', { isoPath: `C:\\Users\\aditya\\Desktop\\${task.filename}`, driveNumber: driveNum });
+                                                    alert(`⚡ ${result}`);
+                                                } catch (err) {
+                                                    alert('Flash failed: ' + err);
+                                                }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20"
+                                        >
+                                            <HardDrive size={14} /> Flash to USB
+                                        </button>
+                                    )}
+
+                                    {/* C2PA Content Authenticity */}
+                                    {['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'tiff'].includes(task.filename.split('.').pop()?.toLowerCase() || '') && (
+                                        <button
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                try {
+                                                    const result: any = await invoke('validate_c2pa', { path: `C:\\Users\\aditya\\Desktop\\${task.filename}` });
+                                                    alert(`${result.description}\n\nJUMBF: ${result.has_jumbf_manifest}\nXMP C2PA: ${result.has_xmp_c2pa}\nAdobe: ${result.has_adobe_provenance}`);
+                                                } catch (err) {
+                                                    alert('C2PA validation failed: ' + err);
+                                                }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-violet-500/10 text-violet-400 border border-violet-500/20 hover:bg-violet-500/20"
+                                        >
+                                            <Shield size={14} /> Verify Authenticity
+                                        </button>
+                                    )}
+
+                                    {/* API Fuzz URL */}
+                                    <button
+                                        onClick={async (e) => {
+                                            e.stopPropagation();
+                                            try {
+                                                alert('🔬 Fuzzing URL parameters...');
+                                                const result: any = await invoke('fuzz_url', { url: task.url });
+                                                const interesting = result.mutations?.filter((m: any) => m.interesting) || [];
+                                                const summary = interesting.map((m: any) => `${m.mutation_type}: ${m.status_code} (${m.body_size}B)`).join('\n');
+                                                alert(`🔬 Fuzz complete!\n${result.mutations?.length || 0} mutations tested\n${interesting.length} interesting:\n\n${summary || 'None'}`);
+                                            } catch (err) {
+                                                alert('Fuzzing failed: ' + err);
+                                            }
+                                        }}
+                                        className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20"
+                                    >
+                                        <RefreshCw size={14} /> Fuzz URL
+                                    </button>
+
+                                    {/* Steganography - PNG files */}
+                                    {task.filename.toLowerCase().endsWith('.png') && (
+                                        <>
+                                            <button
+                                                onClick={async (e) => {
+                                                    e.stopPropagation();
+                                                    const secret = prompt('Enter secret message to hide:');
+                                                    if (!secret) return;
+                                                    try {
+                                                        const result: any = await invoke('stego_hide', { imagePath: `C:\\Users\\aditya\\Desktop\\${task.filename}`, secretData: secret });
+                                                        alert(`🔒 Secret hidden!\nOutput: ${result.output_path}\nBits used: ${result.bits_used}`);
+                                                    } catch (err) { alert('Stego hide failed: ' + err); }
+                                                }}
+                                                className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-fuchsia-500/10 text-fuchsia-400 border border-fuchsia-500/20 hover:bg-fuchsia-500/20"
+                                            >
+                                                <Shield size={14} /> Stego Hide
+                                            </button>
+                                            <button
+                                                onClick={async (e) => {
+                                                    e.stopPropagation();
+                                                    try {
+                                                        const result: any = await invoke('stego_extract', { imagePath: `C:\\Users\\aditya\\Desktop\\${task.filename}` });
+                                                        alert(`🔓 Secret extracted!\n\n${result.message}`);
+                                                    } catch (err) { alert('Stego extract failed: ' + err); }
+                                                }}
+                                                className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-fuchsia-500/10 text-fuchsia-400 border border-fuchsia-500/20 hover:bg-fuchsia-500/20"
+                                            >
+                                                <Shield size={14} /> Stego Extract
+                                            </button>
+                                        </>
+                                    )}
+
+                                    {/* Extract Archive */}
+                                    {['zip', 'jar', 'rar', '7z', 'tgz'].includes(task.filename.split('.').pop()?.toLowerCase() || '') && (
+                                        <button
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                try {
+                                                    alert('📦 Extracting archive...');
+                                                    const result: any = await invoke('auto_extract_archive', { path: `C:\\Users\\aditya\\Desktop\\${task.filename}`, destination: null });
+                                                    alert(`📦 Extracted ${result.files_extracted} files to:\n${result.destination}`);
+                                                } catch (err) { alert('Extract failed: ' + err); }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-lime-500/10 text-lime-400 border border-lime-500/20 hover:bg-lime-500/20"
+                                        >
+                                            <Archive size={14} /> Extract
+                                        </button>
+                                    )}
+
+                                    {/* SQL Query - CSV/JSON files */}
+                                    {['csv', 'json'].includes(task.filename.split('.').pop()?.toLowerCase() || '') && (
+                                        <button
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                const sql = prompt('Enter SQL query:\n\nExample: SELECT * FROM file WHERE column > 10 LIMIT 20');
+                                                if (!sql) return;
+                                                try {
+                                                    const result: any = await invoke('query_file', { path: `C:\\Users\\aditya\\Desktop\\${task.filename}`, sql });
+                                                    const preview = JSON.stringify(result.rows?.slice(0, 5), null, 2);
+                                                    alert(`📊 Query Results\nTotal: ${result.total_rows} rows\nColumns: ${result.columns?.join(', ')}\n\nFirst 5:\n${preview}`);
+                                                } catch (err) { alert('Query failed: ' + err); }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-sky-500/10 text-sky-400 border border-sky-500/20 hover:bg-sky-500/20"
+                                        >
+                                            <FileText size={14} /> SQL Query
+                                        </button>
+                                    )}
+
+                                    {/* DLNA Cast - media files */}
+                                    {['mp4', 'mkv', 'avi', 'mp3', 'flac', 'wav'].includes(task.filename.split('.').pop()?.toLowerCase() || '') && (
+                                        <button
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                try {
+                                                    alert('📺 Scanning for DLNA devices...');
+                                                    const devices: any[] = await invoke('discover_dlna');
+                                                    if (!devices || devices.length === 0) {
+                                                        alert('No DLNA devices found on your network.');
+                                                        return;
+                                                    }
+                                                    const list = devices.map((d, i) => `${i + 1}. ${d.name}`).join('\n');
+                                                    const choice = prompt(`📺 Select device:\n\n${list}\n\nEnter number:`);
+                                                    if (!choice) return;
+                                                    const idx = parseInt(choice) - 1;
+                                                    if (idx < 0 || idx >= devices.length) { alert('Invalid choice'); return; }
+                                                    const result = await invoke<string>('cast_to_dlna', { filePath: `C:\\Users\\aditya\\Desktop\\${task.filename}`, deviceLocation: devices[idx].location });
+                                                    alert(`📺 ${result}`);
+                                                } catch (err) { alert('Cast failed: ' + err); }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20"
+                                        >
+                                            <Play size={14} /> Cast to TV
+                                        </button>
+                                    )}
+
+                                    {/* AI Subtitles - video files */}
+                                    {['mp4', 'mkv', 'avi', 'mov', 'webm'].includes(task.filename.split('.').pop()?.toLowerCase() || '') && (
+                                        <button
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                try {
+                                                    alert('🎬 Generating subtitles...');
+                                                    const result: any = await invoke('generate_subtitles', { videoPath: `C:\\Users\\aditya\\Desktop\\${task.filename}` });
+                                                    alert(`🎬 Subtitles ${result.status}!\nMethod: ${result.method}\nSRT: ${result.srt_path}\nSegments: ${result.subtitle_lines}${result.note ? '\n\nNote: ' + result.note : ''}`);
+                                                } catch (err) { alert('Subtitle generation failed: ' + err); }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-pink-500/10 text-pink-400 border border-pink-500/20 hover:bg-pink-500/20"
+                                        >
+                                            <Film size={14} /> Subtitles
+                                        </button>
+                                    )}
+
+                                    {/* QoS Priority */}
+                                    <button
+                                        onClick={async (e) => {
+                                            e.stopPropagation();
+                                            const level = prompt('Set priority:\n\ncritical - Max speed\nhigh - 75%\nnormal - 50% (default)\nlow - 25%\nbackground - 10%\n\nEnter level:');
+                                            if (!level) return;
+                                            try {
+                                                const result = await invoke<string>('set_download_priority', { id: task.id, level });
+                                                alert(`⚡ ${result}`);
+                                            } catch (err) { alert('QoS failed: ' + err); }
+                                        }}
+                                        className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20"
+                                    >
+                                        <ArrowUp size={14} /> Priority
+                                    </button>
+
                                     {shareUrl && (
                                         <div className="w-full mt-2 p-2 bg-cyan-500/5 border border-cyan-500/20 rounded-md text-xs text-cyan-400 font-mono break-all">
                                             🔗 {shareUrl}

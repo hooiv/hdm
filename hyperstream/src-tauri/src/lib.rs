@@ -53,6 +53,25 @@ mod power_manager;
 pub mod cas_manager;
 mod warc_archiver;
 mod git_lfs;
+mod sandbox;
+mod notarize;
+mod mirror_hunter;
+mod usb_flasher;
+mod api_replay;
+mod c2pa_validator;
+mod bandwidth_arb;
+mod stego_vault;
+mod tui_dashboard;
+mod auto_extract;
+mod ipfs_gateway;
+mod sql_query;
+mod dlna_cast;
+mod qos_manager;
+mod mod_optimizer;
+mod rclone_bridge;
+mod subtitle_gen;
+mod virtual_drive;
+mod geofence;
 
 use persistence::SavedDownload;
 use settings::Settings;
@@ -1824,6 +1843,158 @@ async fn download_as_warc(url: String, save_path: String) -> Result<String, Stri
     crate::warc_archiver::download_as_warc(url, std::path::PathBuf::from(save_path)).await
 }
 
+#[tauri::command]
+fn run_in_sandbox(path: String) -> Result<String, String> {
+    crate::sandbox::run_in_sandbox(path)
+}
+
+#[tauri::command]
+async fn notarize_file(path: String) -> Result<serde_json::Value, String> {
+    crate::notarize::notarize_file(path).await
+}
+
+#[tauri::command]
+async fn verify_notarization(path: String) -> Result<serde_json::Value, String> {
+    crate::notarize::verify_notarization(path).await
+}
+
+#[tauri::command]
+async fn find_mirrors(path: String) -> Result<serde_json::Value, String> {
+    crate::mirror_hunter::find_mirrors(path).await
+}
+
+#[tauri::command]
+fn list_usb_drives() -> Result<Vec<crate::usb_flasher::UsbDrive>, String> {
+    crate::usb_flasher::list_usb_drives()
+}
+
+#[tauri::command]
+async fn flash_to_usb(iso_path: String, drive_number: u32) -> Result<String, String> {
+    crate::usb_flasher::flash_to_usb(iso_path, drive_number).await
+}
+
+#[tauri::command]
+async fn replay_request(
+    url: String, method: String,
+    headers: Option<std::collections::HashMap<String, String>>,
+    body: Option<String>
+) -> Result<crate::api_replay::ReplayResult, String> {
+    crate::api_replay::replay_request(url, method, headers, body).await
+}
+
+#[tauri::command]
+async fn fuzz_url(url: String) -> Result<serde_json::Value, String> {
+    let result = crate::api_replay::fuzz_url(url).await?;
+    serde_json::to_value(result).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn validate_c2pa(path: String) -> Result<serde_json::Value, String> {
+    crate::c2pa_validator::validate_c2pa(path).await
+}
+
+#[tauri::command]
+async fn arbitrage_download(urls: Vec<String>) -> Result<serde_json::Value, String> {
+    let results = crate::bandwidth_arb::arbitrage_probe(urls).await?;
+    serde_json::to_value(results).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn stego_hide(image_path: String, secret_data: String) -> Result<serde_json::Value, String> {
+    crate::stego_vault::stego_hide(image_path, secret_data).await
+}
+
+#[tauri::command]
+async fn stego_extract(image_path: String) -> Result<serde_json::Value, String> {
+    crate::stego_vault::stego_extract(image_path).await
+}
+
+#[tauri::command]
+fn launch_tui_dashboard() -> Result<String, String> {
+    crate::tui_dashboard::launch_tui_dashboard()
+}
+
+#[tauri::command]
+async fn auto_extract_archive(path: String, destination: Option<String>) -> Result<serde_json::Value, String> {
+    crate::auto_extract::extract_archive(path, destination).await
+}
+
+#[tauri::command]
+async fn download_ipfs(cid: String, save_path: String) -> Result<serde_json::Value, String> {
+    crate::ipfs_gateway::download_ipfs(cid, save_path).await
+}
+
+#[tauri::command]
+async fn query_file(path: String, sql: String) -> Result<serde_json::Value, String> {
+    crate::sql_query::query_file(path, sql).await
+}
+
+#[tauri::command]
+async fn discover_dlna() -> Result<Vec<crate::dlna_cast::DlnaDevice>, String> {
+    crate::dlna_cast::discover_dlna().await
+}
+
+#[tauri::command]
+async fn cast_to_dlna(file_path: String, device_location: String) -> Result<String, String> {
+    crate::dlna_cast::cast_to_dlna(file_path, device_location).await
+}
+
+#[tauri::command]
+fn set_download_priority(id: String, level: String) -> Result<String, String> {
+    crate::qos_manager::set_download_priority(id, level)
+}
+
+#[tauri::command]
+fn get_qos_stats() -> Result<crate::qos_manager::QosStats, String> {
+    crate::qos_manager::get_qos_stats()
+}
+
+#[tauri::command]
+async fn optimize_mods(paths: Vec<String>) -> Result<serde_json::Value, String> {
+    let result = crate::mod_optimizer::optimize_mods(paths).await?;
+    serde_json::to_value(result).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rclone_list_remotes() -> Result<Vec<crate::rclone_bridge::RcloneRemote>, String> {
+    crate::rclone_bridge::rclone_list_remotes()
+}
+
+#[tauri::command]
+fn rclone_transfer(source: String, destination: String) -> Result<String, String> {
+    crate::rclone_bridge::rclone_transfer(source, destination)
+}
+
+#[tauri::command]
+async fn generate_subtitles(video_path: String) -> Result<serde_json::Value, String> {
+    crate::subtitle_gen::generate_subtitles(video_path).await
+}
+
+#[tauri::command]
+fn mount_drive(path: String, letter: String) -> Result<String, String> {
+    crate::virtual_drive::mount_drive(path, letter)
+}
+
+#[tauri::command]
+fn unmount_drive(letter: String) -> Result<String, String> {
+    crate::virtual_drive::unmount_drive(letter)
+}
+
+#[tauri::command]
+fn list_virtual_drives() -> Result<Vec<crate::virtual_drive::MountedDrive>, String> {
+    crate::virtual_drive::list_virtual_drives()
+}
+
+#[tauri::command]
+fn set_geofence_rule(url_pattern: String, region: String, proxy_type: String, proxy_address: String) -> Result<String, String> {
+    crate::geofence::set_geofence_rule(url_pattern, region, proxy_type, proxy_address)
+}
+
+#[tauri::command]
+fn get_geofence_rules() -> Result<Vec<crate::geofence::GeofenceRule>, String> {
+    crate::geofence::get_geofence_rules()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load settings and apply
@@ -2056,7 +2227,36 @@ pub fn run() {
             doi_resolver::resolve_doi,
             // Docker Image Puller
             docker_pull::fetch_docker_manifest,
-            download_as_warc
+            download_as_warc,
+            run_in_sandbox,
+            notarize_file,
+            verify_notarization,
+            find_mirrors,
+            list_usb_drives,
+            flash_to_usb,
+            replay_request,
+            fuzz_url,
+            validate_c2pa,
+            arbitrage_download,
+            stego_hide,
+            stego_extract,
+            launch_tui_dashboard,
+            auto_extract_archive,
+            download_ipfs,
+            query_file,
+            discover_dlna,
+            cast_to_dlna,
+            set_download_priority,
+            get_qos_stats,
+            optimize_mods,
+            rclone_list_remotes,
+            rclone_transfer,
+            generate_subtitles,
+            mount_drive,
+            unmount_drive,
+            list_virtual_drives,
+            set_geofence_rule,
+            get_geofence_rules
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
