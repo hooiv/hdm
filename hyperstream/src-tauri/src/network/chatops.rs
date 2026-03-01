@@ -53,7 +53,7 @@ impl ChatOpsManager {
 
     pub fn start(&self) {
         let this = self.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             this.run_loop().await;
         });
     }
@@ -147,7 +147,7 @@ impl ChatOpsManager {
                         let mut msg = format!("🚀 *Active ({})* :\n\n", active.len());
                         for d in active.iter().take(5) {
                             let pct = if d.total_size > 0 {
-                                (d.downloaded_bytes as f64 / d.total_size as f64 * 100.0)
+                                d.downloaded_bytes as f64 / d.total_size as f64 * 100.0
                             } else { 0.0 };
                             msg.push_str(&format!("📄 {}\n   {:.1}% of {}\n\n",
                                 d.filename,

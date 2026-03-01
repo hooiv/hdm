@@ -1,17 +1,71 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Download, X, File, Link as LinkIcon, AlertCircle } from 'lucide-react';
+import { Download, X, File, Link as LinkIcon, AlertCircle, BookOpen } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 
 interface AddDownloadModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onStart: (url: string, filename: string, force?: boolean) => void;
+    onStart: (url: string, filename: string, force?: boolean, customHeaders?: Record<string, string>) => void;
 }
 
 export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onClose, onStart }) => {
     const [url, setUrl] = useState('');
     const [filename, setFilename] = useState('');
     const [isForceMode, setIsForceMode] = useState(false);
+    const [isWarcMode, setIsWarcMode] = useState(false);
+    const [isResolving, setIsResolving] = useState(false);
+    const [bibtex, setBibtex] = useState('');
+
+    const [isFetchingDocker, setIsFetchingDocker] = useState(false);
+    const [dockerInfo, setDockerInfo] = useState<any>(null);
+
+    const isDoi = url.trim().startsWith('10.') || url.includes('doi.org/');
+    const isDocker = url.trim().startsWith('docker pull ') || url.trim().startsWith('docker:');
+
+    const handleResolveDoi = async () => {
+        if (!url) return;
+        setIsResolving(true);
+        setBibtex('');
+        try {
+            const result = await invoke<string>('resolve_doi', { doi: url });
+            setBibtex(result);
+
+            // Try to extract title for filename
+            const titleMatch = result.match(/title\s*=\s*[{"]([^}"]+)[}"]/i);
+            if (titleMatch && titleMatch[1]) {
+                const safeTitle = titleMatch[1].replace(/[^a-z0-9]/gi, '_').toLowerCase();
+                setFilename(`${safeTitle}.pdf`);
+            }
+        } catch (e) {
+            console.error("DOI Error:", e);
+        } finally {
+            setIsResolving(false);
+        }
+    };
+
+    const handleFetchDocker = async () => {
+        if (!url) return;
+        setIsFetchingDocker(true);
+        setDockerInfo(null);
+        try {
+            let image = url.trim();
+            if (image.startsWith('docker pull ')) {
+                image = image.replace('docker pull ', '').trim();
+            } else if (image.startsWith('docker:')) {
+                image = image.replace('docker:', '').trim();
+            }
+
+            const info = await invoke<any>('fetch_docker_manifest', { image });
+            setDockerInfo(info);
+            setFilename(`${info.name.replace('/', '_')}_${info.tag}.tar`);
+        } catch (e) {
+            console.error("Docker Error:", e);
+            alert("Docker pull failed: " + e);
+        } finally {
+            setIsFetchingDocker(false);
+        }
+    };
 
     // Auto-extract filename
     React.useEffect(() => {
@@ -28,11 +82,34 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
+
+        if (dockerInfo) {
+            dockerInfo.layers.forEach((layer: any, idx: number) => {
+                const layerFilename = `docker_${dockerInfo.name.replace('/', '_')}_${dockerInfo.tag}_layer${idx}.tar.gz`;
+                onStart(layer.url, layerFilename, false, layer.headers);
+            });
+            setUrl('');
+            setFilename('');
+            setDockerInfo(null);
+            onClose();
+            return;
+        }
+
         if (url && filename) {
-            onStart(url, filename, isForceMode);
+            if (isWarcMode) {
+                // Background task
+                invoke('download_as_warc', {
+                    url,
+                    savePath: `C:\\Users\\aditya\\Desktop\\${filename}${filename.endsWith('.warc') ? '' : '.warc'}`
+                }).then(() => alert(`Successfully archived to WARC: ${filename}`))
+                    .catch(e => alert(`Failed to archive WARC: ${e}`));
+            } else {
+                onStart(url, filename, isForceMode);
+            }
             setUrl('');
             setFilename('');
             setIsForceMode(false);
+            setBibtex('');
             onClose();
         }
     };
@@ -78,10 +155,32 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
                                         type="text"
                                         value={url}
                                         onChange={(e) => setUrl(e.target.value)}
-                                        placeholder="https://example.com/file.zip"
+                                        placeholder="https://example.com/file.zip or 10.1000/xyz123"
                                         autoFocus
                                         className="w-full bg-slate-800/50 border border-slate-700 rounded-lg py-2.5 pl-10 pr-4 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 transition-all font-mono text-sm"
                                     />
+                                    {isDoi && (
+                                        <button
+                                            type="button"
+                                            onClick={handleResolveDoi}
+                                            disabled={isResolving}
+                                            className="absolute right-2 top-2 bottom-2 px-3 bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded flex items-center gap-1 text-xs font-semibold transition-colors disabled:opacity-50"
+                                        >
+                                            <BookOpen size={14} />
+                                            {isResolving ? 'Resolving...' : 'Resolve DOI'}
+                                        </button>
+                                    )}
+                                    {isDocker && !dockerInfo && (
+                                        <button
+                                            type="button"
+                                            onClick={handleFetchDocker}
+                                            disabled={isFetchingDocker}
+                                            className="absolute right-2 top-2 bottom-2 px-3 bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 rounded flex items-center gap-1 text-xs font-semibold transition-colors disabled:opacity-50"
+                                        >
+                                            <AlertCircle size={14} />
+                                            {isFetchingDocker ? 'Fetching...' : 'Fetch Manifest'}
+                                        </button>
+                                    )}
                                 </div>
                             </div>
 
@@ -99,20 +198,68 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
                                 </div>
                             </div>
 
-                            {/* Force Download Toggle (Shift Key visualizer) */}
-                            <div
-                                className={`flex items-center gap-3 p-3 rounded-lg border transition-all cursor-pointer ${isForceMode ? 'bg-amber-900/20 border-amber-500/30' : 'bg-slate-800/30 border-transparent hover:bg-slate-800/50'}`}
-                                onClick={() => setIsForceMode(!isForceMode)}
-                            >
-                                <div className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${isForceMode ? 'bg-amber-500 border-amber-500' : 'border-slate-600'}`}>
-                                    {isForceMode && <div className="w-2 h-2 bg-white rounded-sm" />}
-                                </div>
-                                <div className="flex-1">
-                                    <p className={`text-sm font-medium ${isForceMode ? 'text-amber-400' : 'text-slate-400'}`}>Force Download Mode</p>
-                                    <p className="text-xs text-slate-500">Bypasses pre-checks. Use for problematic links.</p>
-                                </div>
-                                {isForceMode && <AlertCircle size={16} className="text-amber-500" />}
-                            </div>
+                            {bibtex && (
+                                <motion.div
+                                    initial={{ opacity: 0, height: 0 }}
+                                    animate={{ opacity: 1, height: 'auto' }}
+                                    className="bg-slate-900/50 border border-slate-700/50 rounded-lg p-3 overflow-hidden text-xs text-slate-400 font-mono"
+                                >
+                                    <pre className="whitespace-pre-wrap max-h-32 overflow-y-auto custom-scrollbar">
+                                        {bibtex}
+                                    </pre>
+                                </motion.div>
+                            )}
+
+                            {dockerInfo && (
+                                <motion.div
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    className="bg-cyan-900/20 border border-cyan-700/50 rounded-lg p-4 text-cyan-100 flex flex-col gap-2"
+                                >
+                                    <div className="flex items-center gap-2 text-cyan-400 font-bold mb-1">
+                                        <Download size={18} />
+                                        Docker Image Context
+                                    </div>
+                                    <p className="text-sm font-mono"><span className="text-cyan-500">Image:</span> {dockerInfo.name}:{dockerInfo.tag}</p>
+                                    <p className="text-sm"><span className="text-cyan-500 font-mono">Layers:</span> {dockerInfo.layers?.length || 0} manifest blobs</p>
+                                    <p className="text-xs text-cyan-400/80 mt-2">
+                                        Submitting will enqueue all {(dockerInfo.layers?.length || 0)} layers as rapid parallel downloads.
+                                    </p>
+                                </motion.div>
+                            )}
+
+                            {!dockerInfo && (
+                                <>
+                                    {/* Force Download Toggle (Shift Key visualizer) */}
+                                    <div
+                                        className={`flex items-center gap-3 p-3 rounded-lg border transition-all cursor-pointer ${isForceMode ? 'bg-amber-900/20 border-amber-500/30' : 'bg-slate-800/30 border-transparent hover:bg-slate-800/50'}`}
+                                        onClick={() => setIsForceMode(!isForceMode)}
+                                    >
+                                        <div className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${isForceMode ? 'bg-amber-500 border-amber-500' : 'border-slate-600'}`}>
+                                            {isForceMode && <div className="w-2 h-2 bg-white rounded-sm" />}
+                                        </div>
+                                        <div className="flex-1">
+                                            <p className={`text-sm font-medium ${isForceMode ? 'text-amber-400' : 'text-slate-400'}`}>Force Download Mode</p>
+                                            <p className="text-xs text-slate-500">Bypasses pre-checks. Use for problematic links.</p>
+                                        </div>
+                                        {isForceMode && <AlertCircle size={16} className="text-amber-500" />}
+                                    </div>
+
+                                    {/* WARC Mode Toggle */}
+                                    <div
+                                        className={`flex items-center gap-3 p-3 rounded-lg border transition-all cursor-pointer ${isWarcMode ? 'bg-indigo-900/20 border-indigo-500/30' : 'bg-slate-800/30 border-transparent hover:bg-slate-800/50'}`}
+                                        onClick={() => { setIsWarcMode(!isWarcMode); setIsForceMode(false); }}
+                                    >
+                                        <div className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${isWarcMode ? 'bg-indigo-500 border-indigo-500' : 'border-slate-600'}`}>
+                                            {isWarcMode && <div className="w-2 h-2 bg-white rounded-sm" />}
+                                        </div>
+                                        <div className="flex-1">
+                                            <p className={`text-sm font-medium ${isWarcMode ? 'text-indigo-400' : 'text-slate-400'}`}>Save as WARC Archive</p>
+                                            <p className="text-xs text-slate-500">Downloads entire page and assets into a .warc file.</p>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
 
                             <div className="flex gap-3 mt-6 pt-2">
                                 <button

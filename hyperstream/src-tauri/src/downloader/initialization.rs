@@ -6,30 +6,37 @@ use crate::downloader::disk;
 use crate::persistence::SavedDownload;
 
 /// Strategies to determine file size (HEAD, Range 0-1, etc.)
-pub async fn determine_total_size(client: &Client, url: &str) -> Result<u64, String> {
+pub async fn determine_total_size(client: &Client, url: &str) -> Result<(u64, Option<String>, Option<String>), String> {
     // 1. Try HEAD request
     let head_resp = client.head(url).send().await.map_err(|e| e.to_string())?;
     
+    let etag = head_resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let md5 = head_resp.headers().get("content-md5").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    
     if let Some(len) = head_resp.content_length() {
-        if len > 0 { return Ok(len); }
+        if len > 0 { return Ok((len, etag, md5)); }
     }
 
     // Manual content-length check if not parsed automatically
     if let Some(len_header) = head_resp.headers().get("content-length") {
         if let Ok(len_str) = len_header.to_str() {
             if let Ok(len) = len_str.parse::<u64>() {
-                return Ok(len);
+                return Ok((len, etag, md5));
             }
         }
     }
 
     // 2. Try Range 0-1 request
     let range_resp = client.get(url).header("Range", "bytes=0-1").send().await.map_err(|e| e.to_string())?;
+    
+    let etag = range_resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let md5 = range_resp.headers().get("content-md5").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    
     if let Some(content_range) = range_resp.headers().get("content-range") {
         let s = content_range.to_str().unwrap_or("");
         if let Some(slash_pos) = s.find('/') {
             if let Ok(size) = s[slash_pos + 1..].parse::<u64>() {
-                return Ok(size);
+                return Ok((size, etag, md5));
             }
         }
     }

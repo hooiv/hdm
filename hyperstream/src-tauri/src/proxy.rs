@@ -154,17 +154,9 @@ impl ProxyConfig {
         false
     }
 
-    /// Build a reqwest Client with this proxy config
-    pub fn build_client(&self) -> Result<Client, String> {
-        let mut builder = Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            .min_tls_version(reqwest::tls::Version::TLS_1_2);
-
-        if let Some(proxy) = self.to_reqwest_proxy() {
-            builder = builder.proxy(proxy);
-        }
-
-        builder.build().map_err(|e| format!("Failed to build client: {}", e))
+    /// Build a rquest Client with this proxy config
+    pub fn build_client(&self) -> Result<rquest::Client, String> {
+        crate::network::masq::build_client(Some(self), None)
     }
 }
 

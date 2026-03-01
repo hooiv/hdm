@@ -4,7 +4,7 @@ import { ZipPreviewModal } from './ZipPreviewModal';
 import { Segment } from '../types';
 import { ThreadVisualizer } from './ThreadVisualizer';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Folder, Play, Pause, Trash2, FileText, ChevronDown, Archive, ArrowUp, ArrowDown, HardDrive, Cloud, Film, Music, Share2 } from 'lucide-react';
+import { Folder, Play, Pause, Trash2, FileText, ChevronDown, Archive, ArrowUp, ArrowDown, HardDrive, Cloud, Film, Music, Share2, Shield, Link, Globe, RefreshCw } from 'lucide-react';
 import P2PShareModal from './P2PShareModal';
 
 export interface DownloadTask {
@@ -105,6 +105,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
     const [showPreview, setShowPreview] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const [showP2PShare, setShowP2PShare] = useState(false);
+    const [shareUrl, setShareUrl] = useState<string | null>(null);
+    const [scrubbing, setScrubbing] = useState(false);
+    const [checkingWayback, setCheckingWayback] = useState(false);
 
     // Derived values
     const remainingBytes = task.total - task.downloaded;
@@ -348,6 +351,104 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                                                 <Music size={14} /> Extract Audio
                                             </button>
                                         </>
+                                    )}
+
+                                    {/* Scrub Metadata - for images & PDFs */}
+                                    {['jpg', 'jpeg', 'png', 'pdf'].includes(task.filename.split('.').pop()?.toLowerCase() || '') && (
+                                        <button
+                                            disabled={scrubbing}
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                setScrubbing(true);
+                                                try {
+                                                    const result: any = await invoke('scrub_metadata', { path: `C:\\Users\\aditya\\Desktop\\${task.filename}` });
+                                                    alert(`✅ Metadata scrubbed!\nRemoved: ${result.fields_removed.length} fields (${result.bytes_removed} bytes)`);
+                                                } catch (err) {
+                                                    alert('Scrub failed: ' + err);
+                                                } finally {
+                                                    setScrubbing(false);
+                                                }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50"
+                                        >
+                                            <Shield size={14} /> {scrubbing ? 'Scrubbing...' : 'Scrub Metadata'}
+                                        </button>
+                                    )}
+
+                                    {/* Share via Link (Ephemeral Server) */}
+                                    <button
+                                        onClick={async (e) => {
+                                            e.stopPropagation();
+                                            try {
+                                                const result: any = await invoke('start_ephemeral_share', { path: `C:\\Users\\aditya\\Desktop\\${task.filename}`, timeoutMins: 60 });
+                                                setShareUrl(result.url);
+                                                navigator.clipboard?.writeText(result.url);
+                                                alert(`🔗 Share link copied!\n${result.url}\n\nExpires in 1 hour.`);
+                                            } catch (err) {
+                                                alert('Share failed: ' + err);
+                                            }
+                                        }}
+                                        className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20"
+                                    >
+                                        <Link size={14} /> Share via Link
+                                    </button>
+
+                                    {shareUrl && (
+                                        <div className="w-full mt-2 p-2 bg-cyan-500/5 border border-cyan-500/20 rounded-md text-xs text-cyan-400 font-mono break-all">
+                                            🔗 {shareUrl}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Actions for Error/Paused downloads */}
+                            {(task.status === 'Error' || task.status === 'Paused') && (
+                                <div className="mt-4 pt-3 border-t border-slate-700/30 flex flex-wrap gap-2">
+                                    <button
+                                        onClick={async (e) => {
+                                            e.stopPropagation();
+                                            const newUrl = prompt("Enter the new URL to refresh this download:");
+                                            if (newUrl && newUrl.trim() !== "") {
+                                                try {
+                                                    await invoke('refresh_download_url', { id: task.id, newUrl: newUrl.trim() });
+                                                    alert('✅ Download URL refreshed successfully. Click Resume to retry.');
+                                                } catch (err) {
+                                                    alert('Refresh failed: ' + err);
+                                                }
+                                            }
+                                        }}
+                                        className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20"
+                                    >
+                                        <RefreshCw size={14} /> Refresh Address
+                                    </button>
+
+                                    {task.status === 'Error' && (
+                                        <button
+                                            disabled={checkingWayback}
+                                            onClick={async (e) => {
+                                                e.stopPropagation();
+                                                setCheckingWayback(true);
+                                                try {
+                                                    const snapshot: any = await invoke('check_wayback_availability', { url: task.url });
+                                                    if (snapshot) {
+                                                        const downloadUrl: string = await invoke('get_wayback_url', { waybackUrl: snapshot.url });
+                                                        if (confirm(`Found in Wayback Machine!\n\nArchived: ${snapshot.timestamp}\n\nUse archived URL to retry download?`)) {
+                                                            await invoke('refresh_download_url', { id: task.id, newUrl: downloadUrl });
+                                                            alert('✅ URL refreshed with Wayback archive. Click Resume to retry.');
+                                                        }
+                                                    } else {
+                                                        alert('❌ No archived version found in the Wayback Machine.');
+                                                    }
+                                                } catch (err) {
+                                                    alert('Wayback check failed: ' + err);
+                                                } finally {
+                                                    setCheckingWayback(false);
+                                                }
+                                            }}
+                                            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20 disabled:opacity-50"
+                                        >
+                                            <Globe size={14} /> {checkingWayback ? 'Searching...' : '🕸 Try Wayback Machine'}
+                                        </button>
                                     )}
                                 </div>
                             )}

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
-import { Settings, X, Folder, Activity, Globe, Cloud, Save, Shield, Users, Volume2, Webhook, Plus, Trash2, PlayCircle, MessageSquare } from 'lucide-react';
+import { Settings, X, Folder, Activity, Globe, Cloud, Save, Shield, Users, Volume2, Webhook, Plus, Trash2, PlayCircle, MessageSquare, Home } from 'lucide-react';
 
 interface SettingsData {
     download_dir: string;
@@ -40,6 +40,17 @@ interface SettingsData {
     telegram_bot_token?: string;
     telegram_chat_id?: string;
     chatops_enabled?: boolean;
+    // VPN 
+    vpn_auto_connect: boolean;
+    vpn_connection_name: string;
+    // MQTT
+    mqtt_enabled: boolean;
+    mqtt_broker_url: string;
+    mqtt_topic: string;
+
+    // Smart Sleep
+    prevent_sleep_during_download: boolean;
+    pause_on_low_battery: boolean;
 }
 
 // Reusable Components
@@ -83,7 +94,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isOpen, onClose }) =
         cloud_secret_key: '',
         chaos_latency_ms: 0,
         chaos_error_rate: 0,
-        use_tor: false
+        use_tor: false,
+        last_sync_host: "",
+        vpn_auto_connect: false,
+        vpn_connection_name: "",
+        mqtt_enabled: false,
+        mqtt_broker_url: "mqtt://localhost:1883",
+        mqtt_topic: "hyperstream/downloads",
+        prevent_sleep_during_download: true,
+        pause_on_low_battery: true,
     });
 
     const [saved, setSaved] = useState(false);
@@ -337,6 +356,28 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isOpen, onClose }) =
                                     checked={settings.vpn_mode}
                                     onChange={(val) => setSettings({ ...settings, vpn_mode: val })}
                                 />
+
+                                <div className="mt-4 pt-4 border-t border-slate-700/30">
+                                    <h4 className="text-slate-200 font-medium mb-2">VPN Auto-Connect</h4>
+                                    <p className="text-sm text-slate-500 mb-4">Automatically dial a VPN connection before starting downloads.</p>
+                                    <Toggle
+                                        label="Enable VPN Auto-Connect"
+                                        checked={settings.vpn_auto_connect}
+                                        onChange={(val) => setSettings({ ...settings, vpn_auto_connect: val })}
+                                    />
+                                    {settings.vpn_auto_connect && (
+                                        <div className="pt-3">
+                                            <label className="text-sm font-medium text-slate-400 mb-2 block">VPN Connection Name</label>
+                                            <input
+                                                type="text"
+                                                placeholder="e.g. MyVPN"
+                                                value={settings.vpn_connection_name}
+                                                onChange={(e) => setSettings({ ...settings, vpn_connection_name: e.target.value })}
+                                                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
+                                            />
+                                        </div>
+                                    )}
+                                </div>
                             </div>
 
                             {/* Tor Section */}
@@ -467,6 +508,30 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isOpen, onClose }) =
                                 </div>
                             </div>
 
+                            {/* Power Management */}
+                            <div className="space-y-4">
+                                <SectionHeader icon={Activity} title="Power Management" />
+                                <div className="bg-slate-800/20 rounded-xl p-5 border border-slate-700/30 space-y-4">
+                                    <div className="space-y-1">
+                                        <Toggle
+                                            label="Prevent Sleep During Download"
+                                            checked={settings.prevent_sleep_during_download !== false}
+                                            onChange={(v) => setSettings({ ...settings, prevent_sleep_during_download: v })}
+                                        />
+                                        <p className="text-xs text-slate-500 ml-1 mb-2">Keeps the system awake while downloads are active.</p>
+                                    </div>
+
+                                    <div className="space-y-1 pt-4 border-t border-slate-700/30">
+                                        <Toggle
+                                            label="Pause on Low Battery (15%)"
+                                            checked={settings.pause_on_low_battery !== false}
+                                            onChange={(v) => setSettings({ ...settings, pause_on_low_battery: v })}
+                                        />
+                                        <p className="text-xs text-slate-500 ml-1">Automatically pauses active downloads if battery drops below 15%.</p>
+                                    </div>
+                                </div>
+                            </div>
+
                             {/* Sound Settings */}
                             <div className="space-y-4">
                                 <SectionHeader icon={Volume2} title="Sound Events" />
@@ -529,6 +594,98 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isOpen, onClose }) =
                                                         Start
                                                     </button>
                                                 </div>
+                                            </div>
+
+                                            {/* Custom Sound Files (Z1) */}
+                                            <div className="space-y-3 pt-3 border-t border-slate-700/30">
+                                                <label className="text-sm font-medium text-slate-400">Custom Sound Files</label>
+                                                <p className="text-xs text-slate-500 mb-2">Override default sounds with your own WAV files.</p>
+                                                {(['start', 'complete', 'error'] as const).map((eventType) => (
+                                                    <div key={eventType} className="flex items-center gap-3">
+                                                        <span className="text-xs text-slate-400 w-20 capitalize font-medium">{eventType}</span>
+                                                        <input
+                                                            type="text"
+                                                            readOnly
+                                                            placeholder="Default (embedded)"
+                                                            className="flex-1 bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-1.5 text-slate-300 text-xs font-mono truncate"
+                                                            id={`custom-sound-${eventType}`}
+                                                        />
+                                                        <button
+                                                            onClick={async () => {
+                                                                try {
+                                                                    const path = await invoke<string>('select_file', { filter: 'wav' });
+                                                                    if (path) {
+                                                                        await invoke('set_custom_sound_path', { eventType, path });
+                                                                        const input = document.getElementById(`custom-sound-${eventType}`) as HTMLInputElement;
+                                                                        if (input) input.value = path;
+                                                                    }
+                                                                } catch (e) { console.error(e); }
+                                                            }}
+                                                            className="px-3 py-1.5 bg-blue-500/20 text-blue-400 border border-blue-500/20 hover:bg-blue-500/30 rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
+                                                        >
+                                                            Browse
+                                                        </button>
+                                                        <button
+                                                            onClick={async () => {
+                                                                try {
+                                                                    await invoke('clear_custom_sound_path', { eventType });
+                                                                    const input = document.getElementById(`custom-sound-${eventType}`) as HTMLInputElement;
+                                                                    if (input) input.value = '';
+                                                                } catch (e) { console.error(e); }
+                                                            }}
+                                                            className="px-2 py-1.5 bg-slate-700/50 text-slate-400 hover:bg-slate-700 hover:text-slate-200 rounded-lg text-xs transition-colors"
+                                                        >
+                                                            Reset
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </motion.div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* MQTT Smart Home Integration */}
+                            <div className="space-y-4">
+                                <SectionHeader icon={Home} title="Smart Home (MQTT)" />
+                                <div className="bg-slate-800/20 rounded-xl p-5 border border-slate-700/30">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <div>
+                                            <h4 className="text-slate-200 font-medium">MQTT Notifications</h4>
+                                            <p className="text-sm text-slate-500">Publish download events to an MQTT broker.</p>
+                                        </div>
+                                        <Toggle
+                                            checked={settings.mqtt_enabled}
+                                            onChange={(v) => setSettings({ ...settings, mqtt_enabled: v })}
+                                        />
+                                    </div>
+
+                                    {settings.mqtt_enabled && (
+                                        <motion.div
+                                            initial={{ opacity: 0, height: 0 }}
+                                            animate={{ opacity: 1, height: 'auto' }}
+                                            className="grid gap-4 pt-4 border-t border-slate-700/30"
+                                        >
+                                            <div className="space-y-2">
+                                                <label className="text-xs font-semibold text-slate-500 uppercase">Broker URL</label>
+                                                <input
+                                                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:border-blue-500 focus:outline-none"
+                                                    value={settings.mqtt_broker_url}
+                                                    onChange={e => setSettings({ ...settings, mqtt_broker_url: e.target.value })}
+                                                    placeholder="mqtt://localhost:1883"
+                                                />
+                                            </div>
+                                            <div className="space-y-2">
+                                                <label className="text-xs font-semibold text-slate-500 uppercase">Topic</label>
+                                                <input
+                                                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:border-blue-500 focus:outline-none"
+                                                    value={settings.mqtt_topic}
+                                                    onChange={e => setSettings({ ...settings, mqtt_topic: e.target.value })}
+                                                    placeholder="hyperstream/events"
+                                                />
+                                            </div>
+                                            <div className="text-xs text-slate-400 bg-slate-900/50 p-3 rounded border border-slate-700/30 mt-2">
+                                                Events published: `DownloadStart`, `DownloadComplete`, `DownloadError`
                                             </div>
                                         </motion.div>
                                     )}

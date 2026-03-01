@@ -98,6 +98,38 @@ pub struct Settings {
     // Webhooks
     #[serde(default)]
     pub webhooks: Option<Vec<crate::webhooks::WebhookConfig>>,
+
+    // Custom Sound Files (Z1)
+    #[serde(default)]
+    pub custom_sound_start: Option<String>,
+    #[serde(default)]
+    pub custom_sound_complete: Option<String>,
+    #[serde(default)]
+    pub custom_sound_error: Option<String>,
+
+    // Metadata Scrubber
+    #[serde(default)]
+    pub auto_scrub_metadata: bool,
+
+    // VPN Auto-Connect
+    #[serde(default)]
+    pub vpn_auto_connect: bool,
+    #[serde(default)]
+    pub vpn_connection_name: Option<String>,
+
+    // MQTT Smart Home
+    #[serde(default)]
+    pub mqtt_enabled: bool,
+    #[serde(default)]
+    pub mqtt_broker_url: String,
+    #[serde(default)]
+    pub mqtt_topic: String,
+
+    // Smart Sleep (Power Management)
+    #[serde(default)]
+    pub prevent_sleep_during_download: bool,
+    #[serde(default)]
+    pub pause_on_low_battery: bool,
 }
 
 impl Default for Settings {
@@ -148,10 +180,25 @@ impl Default for Settings {
             p2p_enabled: false,
             p2p_upload_limit_kbps: None,
             webhooks: None,
+            // Custom Sound Files
+            custom_sound_start: None,
+            custom_sound_complete: None,
+            custom_sound_error: None,
+            // Metadata Scrubber
+            auto_scrub_metadata: false,
             // ChatOps defaults
             telegram_bot_token: None,
             telegram_chat_id: None,
             chatops_enabled: false,
+            // VPN Defaults
+            vpn_auto_connect: false,
+            vpn_connection_name: None,
+            // MQTT Defaults
+            mqtt_enabled: false,
+            mqtt_broker_url: "mqtt://localhost:1883".to_string(),
+            mqtt_topic: "hyperstream/downloads".to_string(),
+            prevent_sleep_during_download: true,
+            pause_on_low_battery: true,
         }
     }
 }

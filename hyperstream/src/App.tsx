@@ -215,7 +215,7 @@ function App() {
 
   /* ------------------ Memoized Handlers ------------------ */
 
-  const startDownload = async (url: string, filename: string, force: boolean = false) => {
+  const startDownload = async (url: string, filename: string, force: boolean = false, customHeaders?: Record<string, string>) => {
     // startDownload touches state heavily, we can keep it as is or memoize if needed.
     // It's usually called from modals so it's not passed to list items directly.
     // But consistent style is good.
@@ -242,7 +242,8 @@ function App() {
         id: downloadId,
         url,
         path: `C:\\Users\\aditya\\Desktop\\${filename}`,
-        force
+        force,
+        customHeaders: customHeaders || null
       });
     } catch (error) {
       console.error(error);

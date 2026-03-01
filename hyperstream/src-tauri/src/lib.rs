@@ -23,6 +23,8 @@ mod network;
 mod scheduler;
 mod media;
 mod plugin_vm;
+pub mod mqtt_client;
+mod doi_resolver;
 mod spider;
 
 mod zip_preview;
@@ -43,6 +45,14 @@ mod ai;
 mod audio_events;
 mod webhooks;
 mod archive_manager;
+mod metadata_scrubber;
+mod ephemeral_server;
+mod wayback;
+mod docker_pull;
+mod power_manager;
+pub mod cas_manager;
+mod warc_archiver;
+mod git_lfs;
 
 use persistence::SavedDownload;
 use settings::Settings;
@@ -165,8 +175,9 @@ async fn start_download(
     url: String,
     path: String,
     _force: Option<bool>,
+    custom_headers: Option<std::collections::HashMap<String, String>>
 ) -> Result<(), String> {
-    start_download_impl(&app, &state, id, url, path, None).await
+    start_download_impl(&app, &state, id, url, path, None, custom_headers).await
 }
 
 pub async fn start_download_impl(
@@ -175,12 +186,35 @@ pub async fn start_download_impl(
     id: String, 
     url: String, 
     path: String,
-    _resume_override: Option<u64>
+    _resume_override: Option<u64>,
+    custom_headers: Option<std::collections::HashMap<String, String>>
 ) -> Result<(), String> {
     println!("DEBUG: Starting download ID: {}", id);
     
     // Play start sound
     crate::media::sounds::play_startup();
+    
+    // VPN Auto-Connect (Tier 1)
+    {
+        let settings = settings::load_settings();
+        if settings.vpn_auto_connect {
+            if let Some(ref vpn_name) = settings.vpn_connection_name {
+                if !vpn_name.trim().is_empty() {
+                    println!("DEBUG: Auto-connecting to VPN: {}", vpn_name);
+                    let status = std::process::Command::new("rasdial")
+                        .arg(vpn_name)
+                        .status()
+                        .map_err(|e| format!("Failed to execute rasdial: {}", e))?;
+                    
+                    if !status.success() {
+                        eprintln!("WARNING: VPN auto-connect to '{}' failed with status: {:?}", vpn_name, status);
+                    } else {
+                        println!("DEBUG: Successfully connected to VPN: {}", vpn_name);
+                    }
+                }
+            }
+        }
+    }
     
     // Trigger webhooks for download start
     {
@@ -201,6 +235,14 @@ pub async fn start_download_impl(
             manager.trigger(webhooks::WebhookEvent::DownloadStart, payload).await;
         }
     }
+    
+    // Trigger MQTT for download start
+    crate::mqtt_client::publish_event(
+        "DownloadStart",
+        &id,
+        path.split('\\').last().unwrap_or(&path),
+        "Downloading"
+    );
 
     // 1. Check for saved download (Resume logic)
     let saved_downloads = persistence::load_downloads().unwrap_or_default();
@@ -271,13 +313,62 @@ pub async fn start_download_impl(
 
     // Use masquerading to evade anti-bot blocking
     let client = if settings.dpi_evasion {
-        network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome, Some(&proxy_config))
+        network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome, Some(&proxy_config), custom_headers.clone())
     } else {
-        network::masq::build_client(Some(&proxy_config))
+        network::masq::build_client(Some(&proxy_config), custom_headers.clone())
     }.map_err(|e| e.to_string())?;
 
-    let total_size = downloader::initialization::determine_total_size(&client, &url).await?;
+    let mut actual_url = url.clone();
+    let (mut total_size, mut etag, mut md5) = downloader::initialization::determine_total_size(&client, &actual_url).await?;
 
+    // Git LFS Accelerator check
+    if total_size > 0 && total_size < 1024 * 5 {
+        if let Ok(res) = client.get(&actual_url).send().await {
+            if let Ok(text) = res.text().await {
+                if let Some(new_url) = crate::git_lfs::resolve_lfs_pointer(&actual_url, &text).await {
+                    println!("DEBUG: Git LFS pointer detected! Swapping to real binaries via Batch API.");
+                    actual_url = new_url;
+                    // Re-determine size
+                    let sz_res = downloader::initialization::determine_total_size(&client, &actual_url).await;
+                    if let Ok((sz, et, md)) = sz_res {
+                        total_size = sz;
+                        etag = et;
+                        md5 = md;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check CAS Deduplication
+    if let Some(existing_path) = crate::cas_manager::check_cas(etag.as_deref(), md5.as_deref()) {
+        println!("CAS Match Found! Hardlinking from {}", existing_path);
+        // Attempt to hardlink
+        if std::fs::hard_link(&existing_path, &path).is_ok() {
+            println!("Hardlink successful for {}", path);
+            
+            // Register success... emit completion... and return
+            let _ = app.emit("download_progress", Payload {
+                id: id.clone(),
+                downloaded: total_size,
+                total: total_size,
+                segments: vec![],
+            });
+            
+            // Persistence
+            let mut saved_downloads = persistence::load_downloads().unwrap_or_default();
+            if let Some(d) = saved_downloads.iter_mut().find(|d| d.id == id) {
+                d.status = "Completed".to_string();
+                d.downloaded_bytes = total_size;
+            }
+            let _ = persistence::save_downloads(&saved_downloads);
+            
+            crate::media::sounds::play_complete();
+            return Ok(());
+        } else {
+            println!("Failed to create hardlink, falling back to download");
+        }
+    }
     // 3. Initialize File
     let file = downloader::initialization::setup_file(&path, resume_from, total_size)?;
     let file_mutex = file;
@@ -287,8 +378,6 @@ pub async fn start_download_impl(
         let mut map = state.p2p_file_map.lock().unwrap();
         map.insert(id.clone(), StreamingSource::FileSystem(std::path::PathBuf::from(&path)));
     }
-    let p2p_node = state.p2p_node.clone();
-    let id_clone = id.clone();
     // P2P file advertising removed (not needed in simplified P2P)
 
     // 4. Initialize Manager
@@ -324,8 +413,10 @@ pub async fn start_download_impl(
     let downloaded_monitor = downloaded_total.clone();
     let window_monitor = app.clone();
     let id_monitor = id.clone();
-    let url_monitor = url.clone();
+    let url_monitor = actual_url.clone();
     let path_monitor = path.clone();
+    let etag_monitor = etag.clone();
+    let md5_monitor = md5.clone();
     let mut stop_rx_monitor = stop_tx.subscribe();
     
     tokio::spawn(async move {
@@ -360,6 +451,7 @@ pub async fn start_download_impl(
 
                     if d >= total_size {
                         crate::media::sounds::play_complete();
+                        crate::cas_manager::register_cas(etag_monitor.as_deref(), md5_monitor.as_deref(), &path_monitor);
                         
                         // Trigger webhooks for download complete
                         let id_webhook = id_monitor.clone();
@@ -384,6 +476,14 @@ pub async fn start_download_impl(
                                 manager.trigger(webhooks::WebhookEvent::DownloadComplete, payload).await;
                             }
                         });
+                        
+                        // Trigger MQTT for download complete
+                        crate::mqtt_client::publish_event(
+                            "DownloadComplete",
+                            &id_monitor,
+                            path_monitor.split('\\').last().unwrap_or(&path_monitor),
+                            "Complete"
+                        );
                         
                         // Auto-extract archives if enabled
                         let path_archive = path_monitor.clone();
@@ -585,6 +685,14 @@ pub async fn start_download_impl(
                              manager.trigger(webhooks::WebhookEvent::DownloadError, payload).await;
                          }
                      });
+                     
+                     // Trigger MQTT for download error (Hot-Swap needed)
+                     crate::mqtt_client::publish_event(
+                         "DownloadError",
+                         &id_worker,
+                         path_worker.split('\\').last().unwrap_or(&path_worker),
+                         "WaitingForRefresh"
+                     );
                      
                      return;
                 }
@@ -937,7 +1045,7 @@ async fn test_browser_fingerprint() -> Result<String, String> {
     let proxy_config = crate::proxy::ProxyConfig::from_settings(&settings);
 
     // Enable DPI evasion for the test to verify headers
-    let client = network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome, Some(&proxy_config))
+    let client = network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome, Some(&proxy_config), None)
         .map_err(|e| e.to_string())?;
     
     // Hit a trace URL (using httpbin for now to show headers)
@@ -1711,12 +1819,23 @@ fn get_chaos_config() -> serde_json::Value {
     })
 }
 
+#[tauri::command]
+async fn download_as_warc(url: String, save_path: String) -> Result<String, String> {
+    crate::warc_archiver::download_as_warc(url, std::path::PathBuf::from(save_path)).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load settings and apply
     let initial_settings = settings::load_settings();
     speed_limiter::GLOBAL_LIMITER.set_limit(initial_settings.speed_limit_kbps * 1024);
     clipboard::CLIPBOARD_MONITOR.set_enabled(initial_settings.clipboard_monitor);
+    
+    // Load custom sounds from settings (Z1)
+    let custom_sound_settings = initial_settings.clone();
+    tauri::async_runtime::spawn(async move {
+        audio_events::AUDIO_PLAYER.load_custom_sounds_from_settings(&custom_sound_settings).await;
+    });
     
     // Auto-start Tor if enabled
     if initial_settings.use_tor {
@@ -1915,7 +2034,29 @@ pub fn run() {
             join_p2p_share,
             list_p2p_sessions,
             close_p2p_session,
-            get_p2p_stats
+            get_p2p_stats,
+            // P2P Upload Limit
+            set_p2p_upload_limit,
+            get_p2p_upload_limit,
+            // Custom Sound Files
+            set_custom_sound_path,
+            clear_custom_sound_path,
+            get_custom_sound_paths,
+            // Metadata Scrubber
+            scrub_metadata,
+            get_file_metadata,
+            // Ephemeral Web Server
+            start_ephemeral_share,
+            stop_ephemeral_share,
+            list_ephemeral_shares,
+            // Wayback Machine
+            check_wayback_availability,
+            get_wayback_url,
+            // DOI Resolver
+            doi_resolver::resolve_doi,
+            // Docker Image Puller
+            docker_pull::fetch_docker_manifest,
+            download_as_warc
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -2036,6 +2177,59 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = pm_clone.load_plugins().await {
                    eprintln!("Failed to load plugins: {}", e);
+                }
+            });
+            
+            // Smart Sleep + Battery Polling
+            let battery_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let settings = crate::settings::load_settings();
+                    let state = battery_app_handle.state::<AppState>();
+                    
+                    let active_count = {
+                        let downloads = state.downloads.lock().unwrap();
+                        downloads.len()
+                    };
+                    
+                    if settings.prevent_sleep_during_download {
+                        crate::power_manager::prevent_sleep(active_count > 0);
+                    } else {
+                        crate::power_manager::prevent_sleep(false);
+                    }
+                    
+                    if settings.pause_on_low_battery {
+                        if let Some(pct) = crate::power_manager::get_battery_percentage() {
+                            if pct <= 15 && active_count > 0 {
+                                println!("🔋 Battery critical ({}%). Pausing all downloads.", pct);
+                                let mut to_pause = Vec::new();
+                                {
+                                    let downloads = state.downloads.lock().unwrap();
+                                    to_pause = downloads.keys().cloned().collect();
+                                }
+                                
+                                let mut saved_downloads = crate::persistence::load_downloads().unwrap_or_default();
+                                let mut did_pause = false;
+                                
+                                for id in to_pause {
+                                    let mut downloads = state.downloads.lock().unwrap();
+                                    if let Some(session) = downloads.remove(&id) {
+                                        let _ = session.stop_tx.send(());
+                                        if let Some(d) = saved_downloads.iter_mut().find(|d| d.id == id) {
+                                            d.status = "Paused".to_string();
+                                        }
+                                        did_pause = true;
+                                    }
+                                }
+                                
+                                if did_pause {
+                                    let _ = crate::persistence::save_downloads(&saved_downloads);
+                                }
+                            }
+                        }
+                    }
                 }
             });
             
@@ -2272,3 +2466,112 @@ fn get_p2p_stats(state: tauri::State<'_, AppState>) -> network::p2p::P2PStats {
 }
 
 // Old dummy commands removed
+
+// ============ P2P Upload Limit Commands (G1) ============
+#[tauri::command]
+fn set_p2p_upload_limit(kbps: u64, state: tauri::State<'_, AppState>) {
+    state.p2p_node.set_upload_limit(kbps);
+}
+
+#[tauri::command]
+fn get_p2p_upload_limit(state: tauri::State<'_, AppState>) -> u64 {
+    state.p2p_node.get_upload_limit()
+}
+
+// ============ Custom Sound File Commands (Z1) ============
+#[tauri::command]
+async fn set_custom_sound_path(event_type: String, path: String) -> Result<(), String> {
+    let event = match event_type.as_str() {
+        "start" => audio_events::SoundEvent::DownloadStart,
+        "complete" => audio_events::SoundEvent::DownloadComplete,
+        "error" => audio_events::SoundEvent::DownloadError,
+        _ => return Err(format!("Unknown sound event: {}", event_type)),
+    };
+    
+    // Validate file exists
+    if !std::path::Path::new(&path).exists() {
+        return Err("Sound file does not exist".to_string());
+    }
+    
+    audio_events::AUDIO_PLAYER.set_custom_sound(event, std::path::PathBuf::from(&path)).await;
+    
+    // Save to settings
+    let mut settings = settings::load_settings();
+    match event_type.as_str() {
+        "start" => settings.custom_sound_start = Some(path),
+        "complete" => settings.custom_sound_complete = Some(path),
+        "error" => settings.custom_sound_error = Some(path),
+        _ => {}
+    }
+    settings::save_settings(&settings)?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_custom_sound_path(event_type: String) -> Result<(), String> {
+    let event = match event_type.as_str() {
+        "start" => audio_events::SoundEvent::DownloadStart,
+        "complete" => audio_events::SoundEvent::DownloadComplete,
+        "error" => audio_events::SoundEvent::DownloadError,
+        _ => return Err(format!("Unknown sound event: {}", event_type)),
+    };
+    
+    audio_events::AUDIO_PLAYER.clear_custom_sound(event).await;
+    
+    // Save to settings
+    let mut settings = settings::load_settings();
+    match event_type.as_str() {
+        "start" => settings.custom_sound_start = None,
+        "complete" => settings.custom_sound_complete = None,
+        "error" => settings.custom_sound_error = None,
+        _ => {}
+    }
+    settings::save_settings(&settings)?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_custom_sound_paths() -> std::collections::HashMap<String, String> {
+    audio_events::AUDIO_PLAYER.get_custom_sounds().await
+}
+
+// ============ Metadata Scrubber Commands ============
+#[tauri::command]
+fn scrub_metadata(path: String) -> Result<metadata_scrubber::ScrubResult, String> {
+    metadata_scrubber::scrub_file(&path)
+}
+
+#[tauri::command]
+fn get_file_metadata(path: String) -> Result<metadata_scrubber::MetadataInfo, String> {
+    metadata_scrubber::get_metadata_info(&path)
+}
+
+// ============ Ephemeral Web Server Commands ============
+#[tauri::command]
+async fn start_ephemeral_share(path: String, timeout_mins: Option<u64>) -> Result<ephemeral_server::EphemeralShare, String> {
+    let timeout = timeout_mins.unwrap_or(60); // Default 1 hour
+    ephemeral_server::EPHEMERAL_MANAGER.start_share(path, timeout).await
+}
+
+#[tauri::command]
+fn stop_ephemeral_share(id: String) -> Result<(), String> {
+    ephemeral_server::EPHEMERAL_MANAGER.stop_share(&id)
+}
+
+#[tauri::command]
+fn list_ephemeral_shares() -> Vec<ephemeral_server::EphemeralShare> {
+    ephemeral_server::EPHEMERAL_MANAGER.list_shares()
+}
+
+// ============ Wayback Machine Commands ============
+#[tauri::command]
+async fn check_wayback_availability(url: String) -> Result<Option<wayback::WaybackSnapshot>, String> {
+    wayback::check_wayback(&url).await
+}
+
+#[tauri::command]
+fn get_wayback_url(wayback_url: String) -> String {
+    wayback::get_wayback_download_url(&wayback_url)
+}

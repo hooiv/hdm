@@ -1,0 +1,344 @@
+warning: profile package spec `boring` in profile `dev` did not match any packages
+
+help: a package with a similar name exists: `boring2`
+warning: profile package spec `boring-sys` in profile `dev` did not match any packages
+
+help: a package with a similar name exists: `boring-sys2`
+    Checking hyperstream v0.1.0 (C:\Users\aditya\Desktop\hdm\hyperstream\src-tauri)
+warning: unused import: `tokio::sync::mpsc`
+ --> src\network\p2p.rs:6:5
+  |
+6 | use tokio::sync::mpsc;
+  |     ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `WebSocketStream`
+ --> src\network\p2p.rs:8:54
+  |
+8 | use tokio_tungstenite::{accept_async, connect_async, WebSocketStream, tungstenite::Message};
+  |                                                      ^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around block return value
+   --> src\network\chatops.rs:150:33
+    |
+150 | ...                   (d.downloaded_bytes as f64 / d.total_size as f64 * 100.0)
+    |                       ^                                                       ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+150 -                                 (d.downloaded_bytes as f64 / d.total_size as f64 * 100.0)
+150 +                                 d.downloaded_bytes as f64 / d.total_size as f64 * 100.0
+    |
+
+warning: unused import: `PathBuf`
+ --> src\archive_manager.rs:2:23
+  |
+2 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: use of deprecated function `rand::thread_rng`: Renamed to `rng`
+   --> src\network\p2p.rs:270:29
+    |
+270 |         let mut rng = rand::thread_rng();
+    |                             ^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: unused variable: `p2p_node`
+   --> src\lib.rs:293:9
+    |
+293 |     let p2p_node = state.p2p_node.clone();
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_p2p_node`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `id_clone`
+   --> src\lib.rs:294:9
+    |
+294 |     let id_clone = id.clone();
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_id_clone`
+
+warning: use of deprecated method `rand::Rng::gen_range`: Renamed to `random_range`
+   --> src\network\p2p.rs:272:32
+    |
+272 |             .map(|_| WORDS[rng.gen_range(0..WORDS.len())])
+    |                                ^^^^^^^^^
+
+warning: value assigned to `i` is never read
+  --> src\metadata_scrubber.rs:91:13
+   |
+91 |     let mut i = 0;
+   |             ^
+   |
+   = help: maybe it is overwritten before being read?
+   = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `AppState` is more private than the item `start_download_impl`
+   --> src\lib.rs:175:1
+    |
+175 | / pub async fn start_download_impl(
+176 | |     app: &tauri::AppHandle,
+177 | |     state: &AppState,
+178 | |     id: String, 
+...   |
+181 | |     _resume_override: Option<u64>
+182 | | ) -> Result<(), String> {
+    | |_______________________^ function `start_download_impl` is reachable at visibility `pub`
+    |
+note: but type `AppState` is only usable at visibility `pub(crate)`
+   --> src\lib.rs:76:1
+    |
+ 76 | pub(crate) struct AppState {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: field `chatops_manager` is never read
+  --> src\lib.rs:82:16
+   |
+76 | pub(crate) struct AppState {
+   |                   -------- field in this struct
+...
+82 |     pub(crate) chatops_manager: Arc<network::chatops::ChatOpsManager>,
+   |                ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `get_head` and `check_for_update` are never used
+   --> src\downloader\http_client.rs:140:18
+    |
+134 | impl FirstByteScout {
+    | ------------------- methods in this implementation
+...
+140 |     pub async fn get_head(&self, url: &str) -> Result<rquest::Response, rquest::Error> {
+    |                  ^^^^^^^^
+...
+144 |     pub async fn check_for_update(&self, url: &str, local_etag: Option<&str>, local_last_modified: Option<&str>, local_size: u64) -> Resu...
+    |                  ^^^^^^^^^^^^^^^^
+
+warning: struct `ChromeHeaders` is never constructed
+ --> src\network\headers.rs:8:12
+  |
+8 | pub struct ChromeHeaders;
+  |            ^^^^^^^^^^^^^
+
+warning: associated function `build` is never used
+  --> src\network\headers.rs:11:12
+   |
+10 | impl ChromeHeaders {
+   | ------------------ associated function in this implementation
+11 |     pub fn build() -> HeaderMap {
+   |            ^^^^^
+
+warning: method `get_reputation` is never used
+   --> src\network\p2p.rs:378:12
+    |
+ 76 | impl P2PNode {
+    | ------------ method in this implementation
+...
+378 |     pub fn get_reputation(&self, peer_id: &str) -> Option<PeerReputation> {
+    |            ^^^^^^^^^^^^^^
+
+warning: methods `take_pending_urls` and `notify_completion` are never used
+   --> src\network\chatops.rs:49:12
+    |
+ 39 | impl ChatOpsManager {
+    | ------------------- methods in this implementation
+...
+ 49 |     pub fn take_pending_urls(&self) -> Vec<String> {
+    |            ^^^^^^^^^^^^^^^^^
+...
+182 |     pub async fn notify_completion(&self, filename: &str) {
+    |                  ^^^^^^^^^^^^^^^^^
+
+warning: method `get_main_file_path` is never used
+  --> src\network\bittorrent\manager.rs:94:12
+   |
+24 | impl TorrentManager {
+   | ------------------- method in this implementation
+...
+94 |     pub fn get_main_file_path(&self, id: usize) -> Option<PathBuf> {
+   |            ^^^^^^^^^^^^^^^^^^
+
+warning: struct `SniFragmentedStream` is never constructed
+ --> src\network\sni_fragment.rs:9:12
+  |
+9 | pub struct SniFragmentedStream {
+  |            ^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `connect` is never used
+  --> src\network\sni_fragment.rs:15:18
+   |
+14 | impl SniFragmentedStream {
+   | ------------------------ associated function in this implementation
+15 |     pub async fn connect(addr: impl tokio::net::ToSocketAddrs) -> io::Result<Self> {
+   |                  ^^^^^^^
+
+warning: function `is_connected` is never used
+  --> src\network\sync_client.rs:69:8
+   |
+69 | pub fn is_connected() -> bool {
+   |        ^^^^^^^^^^^^
+
+warning: struct `ZsyncControl` is never constructed
+ --> src\network\differential\mod.rs:4:12
+  |
+4 | pub struct ZsyncControl {
+  |            ^^^^^^^^^^^^
+
+warning: function `parse_zsync` is never used
+  --> src\network\differential\mod.rs:14:8
+   |
+14 | pub fn parse_zsync(content: &str) -> Result<ZsyncControl, String> {
+   |        ^^^^^^^^^^^
+
+warning: struct `RollingHash` is never constructed
+  --> src\network\differential\mod.rs:40:12
+   |
+40 | pub struct RollingHash {
+   |            ^^^^^^^^^^^
+
+warning: associated items `new`, `update`, and `digest` are never used
+  --> src\network\differential\mod.rs:47:12
+   |
+46 | impl RollingHash {
+   | ---------------- associated items in this implementation
+47 |     pub fn new() -> Self {
+   |            ^^^
+...
+51 |     pub fn update(&mut self, buf: &[u8]) {
+   |            ^^^^^^
+...
+59 |     pub fn digest(&self) -> u32 {
+   |            ^^^^^^
+
+warning: function `analyze_local_file` is never used
+  --> src\network\differential\mod.rs:65:8
+   |
+65 | pub fn analyze_local_file(path: &str, _control: &ZsyncControl) -> Result<(), String> {
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: constant `EOCD_SIGNATURE` is never used
+  --> src\zip_preview.rs:10:7
+   |
+10 | const EOCD_SIGNATURE: u32 = 0x06054b50;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `CENTRAL_DIRECTORY_SIGNATURE` is never used
+  --> src\zip_preview.rs:11:7
+   |
+11 | const CENTRAL_DIRECTORY_SIGNATURE: u32 = 0x02014b50;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `LOCAL_FILE_HEADER_SIGNATURE` is never used
+  --> src\zip_preview.rs:12:7
+   |
+12 | const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extract_all` is never used
+   --> src\zip_preview.rs:299:8
+    |
+299 | pub fn extract_all(zip_path: &Path, dest_dir: &Path) -> Result<usize, String> {
+    |        ^^^^^^^^^^^
+
+warning: methods `to_reqwest_proxy` and `build_client` are never used
+   --> src\proxy.rs:67:12
+    |
+ 33 | impl ProxyConfig {
+    | ---------------- methods in this implementation
+...
+ 67 |     pub fn to_reqwest_proxy(&self) -> Option<ReqwestProxy> {
+    |            ^^^^^^^^^^^^^^^^
+...
+158 |     pub fn build_client(&self) -> Result<Client, String> {
+    |            ^^^^^^^^^^^^
+
+warning: function `broadcast_download` is never used
+   --> src\lan_api.rs:144:8
+    |
+144 | pub fn broadcast_download(url: String) {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `MediaMetadata` is never constructed
+ --> src\media_processor.rs:6:12
+  |
+6 | pub struct MediaMetadata {
+  |            ^^^^^^^^^^^^^
+
+warning: field `model` is never read
+  --> src\ai\mod.rs:25:5
+   |
+24 | pub struct AiEngine {
+   |            -------- field in this struct
+25 |     model: Option<TextEmbedding>,
+   |     ^^^^^
+
+warning: method `init` is never used
+  --> src\ai\mod.rs:42:12
+   |
+33 | impl AiEngine {
+   | ------------- method in this implementation
+...
+42 |     pub fn init(&self) -> Result<(), String> {
+   |            ^^^^
+
+warning: methods `get_configs`, `add_config`, `update_config`, and `delete_config` are never used
+  --> src\webhooks.rs:63:18
+   |
+50 | impl WebhookManager {
+   | ------------------- methods in this implementation
+...
+63 |     pub async fn get_configs(&self) -> Vec<WebhookConfig> {
+   |                  ^^^^^^^^^^^
+...
+67 |     pub async fn add_config(&self, config: WebhookConfig) {
+   |                  ^^^^^^^^^^
+...
+72 |     pub async fn update_config(&self, id: &str, updated: WebhookConfig) -> Result<(), String> {
+   |                  ^^^^^^^^^^^^^
+...
+82 |     pub async fn delete_config(&self, id: &str) -> Result<(), String> {
+   |                  ^^^^^^^^^^^^^
+
+warning: function `generate_webhook_id` is never used
+   --> src\webhooks.rs:261:8
+    |
+261 | pub fn generate_webhook_id() -> String {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ArchiveGroup` is never constructed
+  --> src\archive_manager.rs:24:12
+   |
+24 | pub struct ArchiveGroup {
+   |            ^^^^^^^^^^^^
+
+warning: constant `JPEG_APP2` is never used
+  --> src\metadata_scrubber.rs:69:7
+   |
+69 | const JPEG_APP2: u8 = 0xE2; // ICC Profile (optional strip)
+   |       ^^^^^^^^^
+
+warning: function `format_wayback_timestamp` is never used
+  --> src\wayback.rs:91:8
+   |
+91 | pub fn format_wayback_timestamp(timestamp: &str) -> String {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `hyperstream` (lib) generated 39 warnings (run `cargo fix --lib -p hyperstream` to apply 4 suggestions)
+warning: unnecessary parentheses around block return value
+  --> src\bin\generate_sounds.rs:46:13
+   |
+46 |             ((num_samples - i) as f32 / fade_samples as f32)
+   |             ^                                              ^
+   |
+   = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+   |
+46 -             ((num_samples - i) as f32 / fade_samples as f32)
+46 +             (num_samples - i) as f32 / fade_samples as f32
+   |
+
+warning: `hyperstream` (bin "generate_sounds") generated 1 warning (run `cargo fix --bin "generate_sounds"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.05s

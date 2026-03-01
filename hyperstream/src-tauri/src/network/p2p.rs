@@ -3,9 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio_tungstenite::{accept_async, connect_async, WebSocketStream, tungstenite::Message};
+use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message};
 use futures_util::{SinkExt, StreamExt};
 
 // Magic wormhole-style wordlist (abbreviated - expand to 2048 words in production)
@@ -70,16 +69,28 @@ pub struct P2PNode {
     my_files: Arc<Mutex<HashSet<String>>>,
     reputation: Arc<Mutex<HashMap<String, PeerReputation>>>,
     ws_port: u16,
+    upload_limiter: Arc<crate::speed_limiter::SpeedLimiter>,
 }
 
 impl P2PNode {
     pub async fn new(ws_port: u16) -> Result<Self, String> {
+        // Load upload limit from settings
+        let settings = crate::settings::load_settings();
+        let upload_limiter = Arc::new(crate::speed_limiter::SpeedLimiter::new());
+        if let Some(kbps) = settings.p2p_upload_limit_kbps {
+            if kbps > 0 {
+                upload_limiter.set_limit(kbps * 1024);
+                println!("[P2P] Upload speed limit set to {} KB/s", kbps);
+            }
+        }
+
         let node = Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pairing_registry: Arc::new(Mutex::new(HashMap::new())),
             my_files: Arc::new(Mutex::new(HashSet::new())),
             reputation: Arc::new(Mutex::new(HashMap::new())),
             ws_port,
+            upload_limiter,
         };
 
         // Start WebSocket server
@@ -207,6 +218,9 @@ impl P2PNode {
                                     Ok(n) => {
                                         buffer.truncate(n); // Handle partial reads (EOF)
                                         
+                                        // Apply upload speed limit (G1)
+                                        let _allowed = self.upload_limiter.acquire(buffer.len() as u64).await;
+                                        
                                         // Update bytes sent stats
                                         self.sessions.lock().unwrap()
                                             .get_mut(&session_id)
@@ -252,9 +266,9 @@ impl P2PNode {
     // Generate magic-wormhole style pairing code
     pub fn generate_pairing_code() -> String {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let words: Vec<_> = (0..3)
-            .map(|_| WORDS[rng.gen_range(0..WORDS.len())])
+            .map(|_| WORDS[rng.random_range(0..WORDS.len())])
             .collect();
         words.join("-")
     }
@@ -363,6 +377,17 @@ impl P2PNode {
     pub fn get_reputation(&self, peer_id: &str) -> Option<PeerReputation> {
         self.reputation.lock().unwrap().get(peer_id).cloned()
     }
+
+    /// Set upload speed limit in KB/s (0 = unlimited)
+    pub fn set_upload_limit(&self, kbps: u64) {
+        self.upload_limiter.set_limit(kbps * 1024);
+        println!("[P2P] Upload limit set to {} KB/s", kbps);
+    }
+
+    /// Get current upload speed limit in KB/s
+    pub fn get_upload_limit(&self) -> u64 {
+        self.upload_limiter.get_limit() / 1024
+    }
 }
 
 // Clone implementation for tokio::spawn
@@ -374,6 +399,7 @@ impl Clone for P2PNode {
             my_files: Arc::clone(&self.my_files),
             reputation: Arc::clone(&self.reputation),
             ws_port: self.ws_port,
+            upload_limiter: Arc::clone(&self.upload_limiter),
         }
     }
 }

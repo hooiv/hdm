@@ -18,7 +18,11 @@ impl Default for BrowserProfile {
 
 /// Build a client that "impersonates" a browser by setting TLS/HTTP2 params manually.
 /// (rquest v5.1.0 does not include pre-defined profiles, so we build our own "lite" version)
-pub fn build_impersonator_client(profile: BrowserProfile, proxy: Option<&crate::proxy::ProxyConfig>) -> Result<Client, String> {
+pub fn build_impersonator_client(
+    profile: BrowserProfile, 
+    proxy: Option<&crate::proxy::ProxyConfig>,
+    custom_headers: Option<std::collections::HashMap<String, String>>
+) -> Result<Client, String> {
     
     // 1. Determine User-Agent
     let user_agent = match profile {
@@ -38,11 +42,25 @@ pub fn build_impersonator_client(profile: BrowserProfile, proxy: Option<&crate::
 
         // .http2_initial_connection_window_size(15 * 1024 * 1024); // 15MB - Removed as not supported
 
-    // 3. Apply Proxy
+    // Apply Proxy
     if let Some(config) = proxy {
         if let Some(p) = config.to_rquest_proxy() {
             builder = builder.proxy(p);
         }
+    }
+
+    // Apply custom headers
+    if let Some(mut headers_map) = custom_headers {
+        let mut headers = rquest::header::HeaderMap::new();
+        for (k, v) in headers_map.drain() {
+            if let (Ok(name), Ok(val)) = (
+                rquest::header::HeaderName::from_bytes(k.as_bytes()),
+                rquest::header::HeaderValue::from_str(&v)
+            ) {
+                headers.insert(name, val);
+            }
+        }
+        builder = builder.default_headers(headers);
     }
 
     // Note: rquest 5.x uses .min_tls_version(Version method) which we handle in http_client.rs if needed.
@@ -53,6 +71,9 @@ pub fn build_impersonator_client(profile: BrowserProfile, proxy: Option<&crate::
 }
 
 /// Helper for standard client construction
-pub fn build_client(proxy: Option<&crate::proxy::ProxyConfig>) -> Result<Client, String> {
-    build_impersonator_client(BrowserProfile::default(), proxy)
+pub fn build_client(
+    proxy: Option<&crate::proxy::ProxyConfig>,
+    custom_headers: Option<std::collections::HashMap<String, String>>
+) -> Result<Client, String> {
+    build_impersonator_client(BrowserProfile::default(), proxy, custom_headers)
 }

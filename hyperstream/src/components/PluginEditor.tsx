@@ -1,8 +1,7 @@
 
 import React, { useState, useEffect } from 'react'; // Added React import
 import { invoke } from '@tauri-apps/api/core';
-import { Save, Play, Plus, Trash2, FileCode, Puzzle, Zap, RefreshCw } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { Save, Plus, Trash2, FileCode, Puzzle, Zap } from 'lucide-react';
 
 interface PluginMetadata {
     name: string;
@@ -15,7 +14,7 @@ const PluginEditor: React.FC = () => {
     const [selectedPlugin, setSelectedPlugin] = useState<string | null>(null);
     const [code, setCode] = useState<string>('');
     const [isDirty, setIsDirty] = useState(false);
-    const [isLoading, setIsLoading] = useState(false);
+    const [, setIsLoading] = useState(false);
     const [output, setOutput] = useState<string[]>([]); // Mock console
 
     useEffect(() => {
@@ -117,8 +116,8 @@ const PluginEditor: React.FC = () => {
                             key={p.name}
                             onClick={() => handleSelectPlugin(p.name)}
                             className={`p-3 rounded-xl cursor-pointer transition-all border ${selectedPlugin === p.name
-                                    ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300 shadow-lg shadow-cyan-900/20'
-                                    : 'hover:bg-white/5 border-transparent text-slate-400 hover:text-slate-200'
+                                ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300 shadow-lg shadow-cyan-900/20'
+                                : 'hover:bg-white/5 border-transparent text-slate-400 hover:text-slate-200'
                                 }`}
                         >
                             <div className="flex justify-between items-start">
@@ -164,8 +163,8 @@ const PluginEditor: React.FC = () => {
                                 onClick={handleSave}
                                 disabled={!isDirty}
                                 className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${isDirty
-                                        ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/20 hover:brightness-110'
-                                        : 'bg-white/5 text-slate-500 cursor-not-allowed'
+                                    ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/20 hover:brightness-110'
+                                    : 'bg-white/5 text-slate-500 cursor-not-allowed'
                                     }`}
                             >
                                 <Save size={14} /> Save

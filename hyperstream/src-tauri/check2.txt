@@ -1,0 +1,20 @@
+warning: profile package spec `boring` in profile `dev` did not match any packages
+
+help: a package with a similar name exists: `boring2`
+warning: profile package spec `boring-sys` in profile `dev` did not match any packages
+
+help: a package with a similar name exists: `boring-sys2`
+    Checking hyperstream v0.1.0 (C:\Users\aditya\Desktop\hdm\hyperstream\src-tauri)
+error: unexpected closing delimiter: `}`
+   --> src\lib.rs:743:1
+    |
+188 | ) -> Result<(), String> {
+    |                         - this delimiter might not be properly closed...
+...
+329 |     }
+    |     - ...as it matches this but it has different indentation
+...
+743 | }
+    | ^ unexpected closing delimiter
+
+error: could not compile `hyperstream` (lib) due to 1 previous error
