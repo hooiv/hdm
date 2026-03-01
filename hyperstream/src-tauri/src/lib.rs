@@ -2011,10 +2011,8 @@ pub fn run() {
             // =====================================
             
             // Initialize ChatOps
-            let download_manager = crate::download::manager::DownloadManager::new(app.handle().clone());
             let settings_arc = std::sync::Arc::new(std::sync::Mutex::new(crate::settings::load_settings()));
             let chatops_manager = std::sync::Arc::new(crate::network::chatops::ChatOpsManager::new(
-                download_manager.clone(),
                 settings_arc.clone(),
             ));
             chatops_manager.start();

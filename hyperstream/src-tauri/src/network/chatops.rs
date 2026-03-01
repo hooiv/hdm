@@ -1,16 +1,16 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::mpsc;
-use crate::settings::Settings;
-use crate::downloader::manager::DownloadManager;
+use crate::settings;
+use crate::persistence;
 
 #[derive(Clone)]
 pub struct ChatOpsManager {
-    download_manager: Arc<Mutex<DownloadManager>>,
-    settings: Arc<Mutex<Settings>>,
+    settings: Arc<Mutex<settings::Settings>>,
     client: reqwest::Client,
+    /// Pending URLs added via /add command, polled by frontend
+    pending_urls: Arc<Mutex<Vec<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,18 +23,11 @@ struct TelegramUpdate {
 struct TelegramMessage {
     chat: TelegramChat,
     text: Option<String>,
-    from: Option<TelegramUser>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TelegramChat {
     id: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramUser {
-    username: Option<String>,
-    first_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -44,12 +37,18 @@ struct TelegramResponse<T> {
 }
 
 impl ChatOpsManager {
-    pub fn new(download_manager: Arc<Mutex<DownloadManager>>, settings: Arc<Mutex<Settings>>) -> Self {
+    pub fn new(settings: Arc<Mutex<settings::Settings>>) -> Self {
         Self {
-            download_manager,
             settings,
             client: reqwest::Client::new(),
+            pending_urls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Take all pending URLs (called from Tauri command to drain the queue)
+    pub fn take_pending_urls(&self) -> Vec<String> {
+        let mut urls = self.pending_urls.lock().unwrap();
+        std::mem::take(&mut *urls)
     }
 
     pub fn start(&self) {
@@ -60,10 +59,10 @@ impl ChatOpsManager {
     }
 
     async fn run_loop(&self) {
-        let mut last_update_id = 0;
+        let mut last_update_id: u64 = 0;
 
         loop {
-            // check configuration
+            // Check configuration
             let (token, enabled) = {
                 let s = self.settings.lock().unwrap();
                 (s.telegram_bot_token.clone(), s.chatops_enabled)
@@ -77,7 +76,6 @@ impl ChatOpsManager {
             let token = token.unwrap();
             let url = format!("https://api.telegram.org/bot{}/getUpdates", token);
 
-            // Long polling
             let params = [
                 ("offset", last_update_id.to_string()),
                 ("timeout", "30".to_string()),
@@ -85,13 +83,13 @@ impl ChatOpsManager {
 
             match self.client.get(&url).query(&params).send().await {
                 Ok(resp) => {
-                    if let Ok(json) = resp.json::<TelegramResponse<Vec<TelegramUpdate>>>().await {
-                        if json.ok {
-                            if let Some(updates) = json.result {
+                    if let Ok(body) = resp.json::<TelegramResponse<Vec<TelegramUpdate>>>().await {
+                        if body.ok {
+                            if let Some(updates) = body.result {
                                 for update in updates {
                                     last_update_id = update.update_id + 1;
                                     if let Some(msg) = update.message {
-                                        self.handle_message(token.clone(), msg).await;
+                                        self.handle_message(&token, msg).await;
                                     }
                                 }
                             }
@@ -106,60 +104,70 @@ impl ChatOpsManager {
         }
     }
 
-    async fn handle_message(&self, token: String, msg: TelegramMessage) {
+    async fn handle_message(&self, token: &str, msg: TelegramMessage) {
         let chat_id = msg.chat.id;
         let text = msg.text.unwrap_or_default();
         
-        // Auto-save chat_id if not set (first contact)
+        // Auto-save chat_id if not set
         {
             let mut s = self.settings.lock().unwrap();
             if s.telegram_chat_id.is_none() {
                 s.telegram_chat_id = Some(chat_id.to_string());
-                let _ = s.save(); // Persist
+                // Persist via save_settings
+                let _ = settings::save_settings(&s);
                 println!("[ChatOps] Auto-detected Chat ID: {}", chat_id);
             }
         }
 
         let response = if text.starts_with("/start") || text.starts_with("/help") {
-            "👋 Welcome to HyperStream ChatOps!\n\nCommands:\n/add <url> - Start a download\n/status - Show active downloads\n/ping - Check connectivity".to_string()
+            "👋 *HyperStream ChatOps*\n\nCommands:\n/add <url> - Queue a download\n/status - Active downloads\n/ping - Check connection".to_string()
         } else if text.starts_with("/ping") {
-            "Pong! 🏓 HyperStream is online.".to_string()
+            "🏓 Pong! HyperStream is online.".to_string()
         } else if text.starts_with("/add ") {
             let url = text.strip_prefix("/add ").unwrap().trim();
             if url.is_empty() {
-                "❌ Please provide a URL.".to_string()
+                "❌ Provide a URL: /add https://example.com/file.zip".to_string()
             } else {
-                match self.download_manager.lock().unwrap().add_download(url.to_string(), None).await {
-                    Ok(id) => format!("✅ Download started!\nID: {}\nURL: {}", id, url),
-                    Err(e) => format!("❌ Failed to start download: {}", e),
-                }
+                // Queue URL for the frontend to pick up
+                self.pending_urls.lock().unwrap().push(url.to_string());
+                format!("✅ Queued for download:\n{}", url)
             }
         } else if text.starts_with("/status") {
-            let dm = self.download_manager.lock().unwrap();
-            let tasks = dm.get_tasks();
-            let active: Vec<_> = tasks.iter().filter(|t| t.status == "Downloading").collect();
-            
-            if active.is_empty() {
-                "💤 No active downloads.".to_string()
-            } else {
-                let mut status_msg = format!("🚀 Active Downloads ({}):\n\n", active.len());
-                for task in active {
-                    status_msg.push_str(&format!("📄 {}\n   Progress: {:.1}%\n   Speed: {:.2} MB/s\n\n", 
-                        task.filename, 
-                        task.progress,
-                        task.speed as f64 / 1024.0 / 1024.0
-                    ));
+            // Read current downloads from persistence
+            match persistence::load_downloads() {
+                Ok(downloads) => {
+                    let active: Vec<_> = downloads.iter()
+                        .filter(|d| d.status == "Downloading")
+                        .collect();
+                    
+                    if active.is_empty() {
+                        let done_count = downloads.iter().filter(|d| d.status == "Done").count();
+                        format!("💤 No active downloads.\n📊 {} completed total.", done_count)
+                    } else {
+                        let mut msg = format!("🚀 *Active ({})* :\n\n", active.len());
+                        for d in active.iter().take(5) {
+                            let pct = if d.total_size > 0 {
+                                (d.downloaded_bytes as f64 / d.total_size as f64 * 100.0)
+                            } else { 0.0 };
+                            msg.push_str(&format!("📄 {}\n   {:.1}% of {}\n\n",
+                                d.filename,
+                                pct,
+                                format_bytes(d.total_size),
+                            ));
+                        }
+                        msg
+                    }
                 }
-                status_msg
+                Err(_) => "⚠️ Could not read download list.".to_string()
             }
         } else {
             "❓ Unknown command. Try /help".to_string()
         };
 
-        self.send_telegram_message(&token, chat_id.to_string(), &response).await;
+        self.send_message(token, chat_id, &response).await;
     }
 
-    async fn send_telegram_message(&self, token: &str, chat_id: String, text: &str) {
+    async fn send_message(&self, token: &str, chat_id: i64, text: &str) {
         let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
         let _ = self.client.post(&url)
             .json(&json!({
@@ -170,7 +178,7 @@ impl ChatOpsManager {
             .await;
     }
 
-    // Public API to notify external events
+    /// Notify download completion via Telegram
     pub async fn notify_completion(&self, filename: &str) {
         let (token, chat_id, enabled) = {
             let s = self.settings.lock().unwrap();
@@ -179,8 +187,18 @@ impl ChatOpsManager {
 
         if enabled {
             if let (Some(t), Some(c)) = (token, chat_id) {
-                self.send_telegram_message(&t, c, &format!("🎉 Download Completed!\n\n📄 {}", filename)).await;
+                if let Ok(cid) = c.parse::<i64>() {
+                    self.send_message(&t, cid, &format!("🎉 Download Complete!\n📄 {}", filename)).await;
+                }
             }
         }
     }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes == 0 { return "0 B".to_string(); }
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let i = (bytes as f64).log(1024.0).floor() as usize;
+    let i = i.min(units.len() - 1);
+    format!("{:.1} {}", bytes as f64 / 1024_f64.powi(i as i32), units[i])
 }
