@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::AsyncReadExt;
 use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message};
 use futures_util::{SinkExt, StreamExt};
 

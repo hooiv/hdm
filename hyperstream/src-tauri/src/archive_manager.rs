@@ -20,6 +20,7 @@ pub enum ArchiveType {
     Unknown,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveGroup {
     pub id: String,
