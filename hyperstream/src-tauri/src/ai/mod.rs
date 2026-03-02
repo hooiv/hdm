@@ -24,6 +24,7 @@ struct IndexedFile {
 }
 
 pub struct AiEngine {
+    #[allow(dead_code)]
     model: Option<TextEmbedding>,
     index: Mutex<Vec<IndexedFile>>,
 }
@@ -41,6 +42,7 @@ impl AiEngine {
         }
     }
 
+    #[allow(dead_code)]
     pub fn init(&self) -> Result<(), String> {
         // Only valid if we had interior mutability for model, but TextEmbedding is expensive.
         // For now, we will re-instantiate or use a Mutex if needed.

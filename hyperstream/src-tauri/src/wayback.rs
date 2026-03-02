@@ -58,7 +58,7 @@ pub async fn check_wayback(url: &str) -> Result<Option<WaybackSnapshot>, String>
             Ok(Some(WaybackSnapshot {
                 available: true,
                 url: snapshot.url,
-                timestamp: snapshot.timestamp,
+                timestamp: format_wayback_timestamp(&snapshot.timestamp),
                 status: snapshot.status,
             }))
         }

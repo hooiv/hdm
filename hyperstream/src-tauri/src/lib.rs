@@ -1645,6 +1645,7 @@ pub fn run() {
             extract_archive,
             cleanup_archive,
             check_unrar_available,
+            extract_zip_all,
             // P2P Commands
             create_p2p_share,
             join_p2p_share,
@@ -1654,6 +1655,7 @@ pub fn run() {
             // P2P Upload Limit
             set_p2p_upload_limit,
             get_p2p_upload_limit,
+            get_p2p_peer_reputation,
             // Custom Sound Files
             set_custom_sound_path,
             clear_custom_sound_path,
@@ -1991,6 +1993,10 @@ async fn get_webhooks() -> Result<Vec<webhooks::WebhookConfig>, String> {
 async fn add_webhook(config: webhooks::WebhookConfig) -> Result<(), String> {
     let mut settings = settings::load_settings();
     let mut webhooks = settings.webhooks.unwrap_or_default();
+    let mut config = config;
+    if config.id.is_empty() {
+        config.id = webhooks::generate_webhook_id();
+    }
     webhooks.push(config);
     settings.webhooks = Some(webhooks);
     settings::save_settings(&settings)
@@ -2078,6 +2084,11 @@ fn check_unrar_available() -> bool {
     archive_manager::ArchiveManager::check_unrar_available()
 }
 
+#[tauri::command]
+fn extract_zip_all(zip_path: String, dest_dir: String) -> Result<usize, String> {
+    zip_preview::extract_all(std::path::Path::new(&zip_path), std::path::Path::new(&dest_dir))
+}
+
 // ============ P2P Commands ============
 #[tauri::command]
 async fn create_p2p_share(
@@ -2124,6 +2135,11 @@ fn set_p2p_upload_limit(kbps: u64, state: tauri::State<'_, AppState>) {
 #[tauri::command]
 fn get_p2p_upload_limit(state: tauri::State<'_, AppState>) -> u64 {
     state.p2p_node.get_upload_limit()
+}
+
+#[tauri::command]
+fn get_p2p_peer_reputation(peer_id: String, state: tauri::State<'_, AppState>) -> Option<network::p2p::PeerReputation> {
+    state.p2p_node.get_reputation(&peer_id)
 }
 
 // ============ Custom Sound File Commands (Z1) ============

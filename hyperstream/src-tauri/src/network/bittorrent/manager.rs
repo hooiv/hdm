@@ -91,6 +91,7 @@ impl TorrentManager {
     // New Plan: Store "virtual path" in map: `p2p_stream://{torrent_id}/{file_id}`.
     // http_server detects this prefix and calls `manager.create_stream`.
     
+    #[allow(dead_code)]
     pub fn get_main_file_path(&self, id: usize) -> Option<PathBuf> {
          let fid = self.get_largest_file_id(id)?;
          // Return a virtual path that http_server can parse.

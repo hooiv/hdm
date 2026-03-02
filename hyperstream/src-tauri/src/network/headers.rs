@@ -5,6 +5,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 /// but standard HashMap does not. We need to be careful.
 /// 
 /// This struct essentially builds a HeaderMap but ensures we insert key headers first.
+#[allow(dead_code)]
 pub struct ChromeHeaders;
 
 impl ChromeHeaders {
