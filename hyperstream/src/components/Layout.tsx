@@ -1,5 +1,6 @@
 import React from 'react';
 import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { TitleBar } from './TitleBar';
 import { motion } from 'framer-motion';
 
@@ -32,7 +33,7 @@ interface LayoutProps {
     globalSpeed?: number;
 }
 
-const NavItem: React.FC<{ icon: any; label: string; active: boolean; onClick: () => void; badge?: string | number }> = ({ icon: Icon, label, active, onClick, badge }) => (
+const NavItem: React.FC<{ icon: LucideIcon; label: string; active: boolean; onClick: () => void; badge?: string | number }> = ({ icon: Icon, label, active, onClick, badge }) => (
     <div
         onClick={onClick}
         className={`

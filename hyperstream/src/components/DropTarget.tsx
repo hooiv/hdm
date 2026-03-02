@@ -10,8 +10,8 @@ export const DropTarget: React.FC<DropTargetProps> = ({ onDrop }) => {
 
     useEffect(() => {
         // Listen for global drag events (if Tauri supports it, or use window events)
-        const unlisten = listen('tauri://file-drop', (event: any) => {
-            const files = event.payload as string[];
+        const unlisten = listen<string[]>('tauri://file-drop', (event) => {
+            const files = event.payload;
             if (files && files.length > 0) {
                 // Handle file drop (e.g., .torrent or .meta)
                 console.log('Dropped files:', files);

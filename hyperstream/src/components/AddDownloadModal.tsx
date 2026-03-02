@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "../contexts/ToastContext";
+import type { DockerImageInfo } from "../types";
 
 interface AddDownloadModalProps {
     isOpen: boolean;
@@ -36,7 +37,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
     const [bibtex, setBibtex] = useState("");
 
     const [isFetchingDocker, setIsFetchingDocker] = useState(false);
-    const [dockerInfo, setDockerInfo] = useState<any>(null);
+    const [dockerInfo, setDockerInfo] = useState<DockerImageInfo | null>(null);
 
     const toast = useToast();
 
@@ -80,7 +81,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                 image = image.replace("docker:", "").trim();
             }
 
-            const info = await invoke<any>("fetch_docker_manifest", { image });
+            const info = await invoke<DockerImageInfo>("fetch_docker_manifest", { image });
             setDockerInfo(info);
             setFilename(`${info.name.replace("/", "_")}_${info.tag}.tar`);
         } catch (e) {
@@ -124,7 +125,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
         e.preventDefault();
 
         if (dockerInfo) {
-            dockerInfo.layers.forEach((layer: any, idx: number) => {
+            dockerInfo.layers.forEach((layer, idx) => {
                 const layerFilename = `docker_${dockerInfo.name.replace("/", "_")}_${dockerInfo.tag}_layer${idx}.tar.gz`;
                 onStart(layer.url, layerFilename, false, layer.headers);
             });

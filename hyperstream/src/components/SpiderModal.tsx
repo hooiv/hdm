@@ -45,8 +45,8 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
             // Auto-select all by default
             const allUrls = new Set(files.map(f => f.url));
             setSelectedUrls(allUrls);
-        } catch (err: any) {
-            setError(err.toString());
+        } catch (err: unknown) {
+            setError(String(err));
         } finally {
             setIsCrawling(false);
         }
@@ -125,7 +125,7 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
                                 <label key={ext} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 cursor-pointer hover:border-slate-600 transition-colors">
                                     <input
                                         type="checkbox"
-                                        checked={(extensions as any)[ext]}
+                                        checked={extensions[ext as keyof typeof extensions]}
                                         onChange={e => setExtensions(prev => ({ ...prev, [ext]: e.target.checked }))}
                                         className="rounded border-slate-600 text-red-500 focus:ring-offset-0 focus:ring-0 bg-slate-800"
                                     />
