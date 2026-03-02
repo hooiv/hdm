@@ -142,6 +142,7 @@ function App() {
         setDownloadDir(dir);
       } catch (e) {
         console.error('Failed to load settings:', e);
+        toastRef.current?.addToast('Failed to load settings', 'error');
         setDownloadDir('C:\\Users\\user\\Desktop');
       }
       try {
@@ -161,6 +162,7 @@ function App() {
         }
       } catch (error) {
         console.error('Failed to load saved downloads:', error);
+        toastRef.current?.addToast('Failed to load saved downloads', 'error');
       }
     };
     loadInitialData();
@@ -258,6 +260,7 @@ function App() {
       });
     } catch (error) {
       console.error(error);
+      toastRef.current?.addToast(`Failed to start download: ${error}`, 'error');
       setTasks(prev => prev.map(t => t.id === downloadId ? { ...t, status: 'Error' } : t));
     }
   };
@@ -281,6 +284,7 @@ function App() {
       setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Paused', speed: 0 } : t));
     } catch (error) {
       console.error("Failed to pause:", error);
+      toastRef.current?.addToast('Failed to pause download', 'error');
     }
   }, []); // Stable!
 
@@ -296,6 +300,7 @@ function App() {
         });
       } catch (error) {
         console.error("Failed to resume:", error);
+        toastRef.current?.addToast('Failed to resume download', 'error');
         setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Error' } : t));
       }
     }
@@ -308,6 +313,7 @@ function App() {
       lastUpdate.current.delete(id);
     } catch (error) {
       console.error("Failed to delete:", error);
+      toastRef.current?.addToast('Failed to delete download', 'error');
     }
   }, []); // Stable
 
@@ -330,6 +336,7 @@ function App() {
       await invoke("move_download_item", { id, direction });
     } catch (error) {
       console.error("Failed to persist move:", error);
+      toastRef.current?.addToast('Failed to move download', 'error');
     }
   }, []); // Stable
 

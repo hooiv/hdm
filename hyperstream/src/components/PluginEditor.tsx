@@ -31,6 +31,7 @@ const PluginEditor: React.FC = () => {
       setPlugins(list);
     } catch (e) {
       console.error(e);
+      toast.error('Failed to load plugins');
     }
   };
 
