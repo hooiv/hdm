@@ -75,7 +75,6 @@ impl ClipboardMonitor {
                         .unwrap_or("download")
                         .to_string();
 
-                    println!("DEBUG: Clipboard URL detected: {}", url);
 
                     // Emit event to frontend
                     let _ = app_handle.emit("clipboard_url", serde_json::json!({

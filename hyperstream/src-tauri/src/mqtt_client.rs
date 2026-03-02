@@ -67,7 +67,6 @@ pub fn publish_event(event_type: &str, download_id: &str, filename: &str, status
         if let Ok(json_bytes) = serde_json::to_vec(&payload) {
             match client.publish(topic, QoS::AtMostOnce, false, json_bytes) {
                 Ok(_) => {
-                    println!("DEBUG: MQTT event published successfully");
                 }
                 Err(e) => {
                     eprintln!("WARNING: Failed to publish MQTT event: {}", e);

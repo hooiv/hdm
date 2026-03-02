@@ -4,7 +4,6 @@ use reqwest;
 
 /// Install or update a plugin from a URL
 pub async fn install_plugin_from_url(app_handle: &tauri::AppHandle, url: String, filename: Option<String>) -> Result<String, String> {
-    println!("DEBUG: Installing plugin from {}", url);
 
     // 1. Fetch content
     let response = reqwest::get(&url)
@@ -42,7 +41,6 @@ pub async fn install_plugin_from_url(app_handle: &tauri::AppHandle, url: String,
     let target_path = plugins_dir.join(&final_filename);
     fs::write(&target_path, content).map_err(|e| format!("Failed to write plugin file: {}", e))?;
 
-    println!("DEBUG: Plugin installed to {:?}", target_path);
     Ok(final_filename)
 }
 

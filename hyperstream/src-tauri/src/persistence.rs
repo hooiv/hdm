@@ -38,7 +38,6 @@ pub fn save_downloads(downloads: &[SavedDownload]) -> Result<(), String> {
     
     fs::write(&path, json).map_err(|e| format!("Failed to write file: {}", e))?;
     
-    println!("DEBUG: Saved {} downloads to {:?}", downloads.len(), path);
     Ok(())
 }
 
@@ -47,7 +46,6 @@ pub fn load_downloads() -> Result<Vec<SavedDownload>, String> {
     let path = get_storage_path();
     
     if !path.exists() {
-        println!("DEBUG: No saved downloads file found at {:?}", path);
         return Ok(Vec::new());
     }
     
@@ -57,7 +55,6 @@ pub fn load_downloads() -> Result<Vec<SavedDownload>, String> {
     let downloads: Vec<SavedDownload> = serde_json::from_str(&json)
         .map_err(|e| format!("Failed to deserialize: {}", e))?;
     
-    println!("DEBUG: Loaded {} downloads from {:?}", downloads.len(), path);
     Ok(downloads)
 }
 

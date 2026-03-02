@@ -137,10 +137,12 @@ impl FirstByteScout {
     }
 
     /// Probe the server with a HEAD request first, then a small Range request
+    #[allow(dead_code)]
     pub async fn get_head(&self, url: &str) -> Result<rquest::Response, rquest::Error> {
         self.client.head(url).send().await
     }
 
+    #[allow(dead_code)]
     pub async fn check_for_update(&self, url: &str, local_etag: Option<&str>, local_last_modified: Option<&str>, local_size: u64) -> Result<bool, String> {
         let response = self.client.head(url).send().await.map_err(|e| e.to_string())?;
         

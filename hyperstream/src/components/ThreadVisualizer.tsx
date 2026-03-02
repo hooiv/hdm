@@ -8,142 +8,141 @@ interface ThreadVisualizerProps {
 }
 
 export const ThreadVisualizer = React.memo<ThreadVisualizerProps>(({ segments, totalSize }) => {
-    // Determine the max end_byte to use as total size if provided totalSize is 0
     const effectiveTotal = totalSize > 0 ? totalSize : segments.reduce((acc, seg) => Math.max(acc, seg.end_byte), 0);
 
     return (
-        <div className="thread-visualizer">
-            <div className="thread-bar-container">
+        <div className="cyber-hud-container mt-2">
+
+            {/* HUD Header */}
+            <div className="flex justify-between items-end mb-1 px-1">
+                <span className="text-[9px] font-mono text-cyan-500/70 uppercase tracking-[0.2em]">
+                    SYS.ACQUISITION.THREADS // {segments.length}
+                </span>
+                <span className="text-[9px] font-mono text-fuchsia-500/50 uppercase tracking-[0.1em]">
+                    BLOCK ALLOCATION MAP
+                </span>
+            </div>
+
+            {/* The Main Visualizer Block */}
+            <div className="relative h-8 w-full bg-slate-950 border border-cyan-900/40 rounded-sm overflow-hidden 
+                            shadow-[inset_0_0_20px_rgba(0,0,0,0.8)] cyber-grid-bg">
+
+                {/* CRT Scanline Overlay */}
+                <div className="absolute inset-0 pointer-events-none crt-scanlines z-20 opacity-20" />
+
                 <AnimatePresence>
                     {segments.map((seg) => {
                         const widthPercent = ((seg.end_byte - seg.start_byte) / effectiveTotal) * 100;
                         const leftPercent = (seg.start_byte / effectiveTotal) * 100;
                         const progressPercent = ((Math.min(seg.downloaded_cursor, seg.end_byte) - seg.start_byte) / (seg.end_byte - seg.start_byte)) * 100;
 
-                        let color = '#64748b'; // Idle/Gray
+                        // Cyberpunk Color Palette
+                        let baseColor = 'rgba(15, 23, 42, 0.4)'; // Slate 900
+                        let fillColor = 'rgba(71, 85, 105, 0.5)'; // Idle Slate
                         let glow = 'none';
+                        let border = 'rgba(56, 189, 248, 0.1)';
 
                         if (seg.state === 'Downloading') {
-                            color = '#3b82f6'; // Blue
-                            glow = '0 0 10px rgba(59, 130, 246, 0.5)';
+                            fillColor = '#06b6d4'; // Cyan 500
+                            glow = '0 0 15px rgba(6, 182, 212, 0.6)';
+                            border = 'rgba(6, 182, 212, 0.8)';
+                        } else if (seg.state === 'Paused') {
+                            fillColor = '#f59e0b'; // Amber 500
+                            glow = '0 0 10px rgba(245, 158, 11, 0.4)';
+                            border = 'rgba(245, 158, 11, 0.6)';
+                        } else if (seg.state === 'Complete') {
+                            fillColor = '#10b981'; // Emerald 500
+                            glow = '0 0 8px rgba(16, 185, 129, 0.3)';
+                            border = 'rgba(16, 185, 129, 0.4)';
+                        } else if (seg.state === 'Error') {
+                            fillColor = '#f43f5e'; // Rose 500
+                            glow = '0 0 15px rgba(244, 63, 94, 0.6)';
+                            border = 'rgba(244, 63, 94, 0.8)';
                         }
-                        if (seg.state === 'Paused') color = '#f59e0b'; // Orange
-                        if (seg.state === 'Complete') {
-                            color = '#10b981'; // Green
-                            glow = '0 0 5px rgba(16, 185, 129, 0.5)';
-                        }
-                        if (seg.state === 'Error') color = '#ef4444'; // Red
 
                         return (
                             <motion.div
                                 key={seg.id}
                                 layoutId={`seg-${seg.id}`}
-                                initial={{ opacity: 0, scaleY: 0 }}
-                                animate={{
-                                    opacity: 1,
-                                    scaleY: 1,
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="absolute top-0 bottom-0 box-border group"
+                                style={{
                                     left: `${leftPercent}%`,
                                     width: `${widthPercent}%`,
-                                    backgroundColor: 'rgba(255, 255, 255, 0.05)', // base track color
-                                }}
-                                exit={{ opacity: 0, scaleY: 0 }}
-                                transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-                                className="thread-segment"
-                                title={`Segment ${seg.id}\nRange: ${seg.start_byte} - ${seg.end_byte}\nSpeed: ${(seg.speed_bps / 1024 / 1024).toFixed(2)} MB/s`}
-                                style={{
-                                    position: 'absolute',
-                                    top: 0,
-                                    bottom: 0,
-                                    borderRight: '1px solid rgba(0,0,0,0.5)',
-                                    boxSizing: 'border-box',
+                                    backgroundColor: baseColor,
+                                    borderRight: `1px solid ${border}`,
+                                    zIndex: seg.state === 'Downloading' ? 10 : 5
                                 }}
                             >
-                                {/* Progress Fill */}
+                                {/* Active Data Stream Fill */}
                                 <motion.div
-                                    className="segment-progress-fill"
                                     animate={{
                                         width: `${progressPercent}%`,
-                                        backgroundColor: color,
+                                        backgroundColor: fillColor,
                                         boxShadow: glow
                                     }}
-                                    transition={{ type: 'tween', ease: 'linear', duration: 0.2 }}
-                                    style={{
-                                        height: '100%',
-                                        position: 'absolute',
-                                        left: 0,
-                                        top: 0
-                                    }}
+                                    transition={{ type: 'tween', ease: 'linear', duration: 0.1 }}
+                                    className={`absolute left-0 top-0 bottom-0 opacity-80 mix-blend-screen
+                                                ${seg.state === 'Downloading' ? 'data-stream-anim' : ''}`}
                                 />
 
-                                {/* Speed Overlay (only if wide enough) */}
-                                {seg.state === 'Downloading' && widthPercent > 10 && (
-                                    <motion.div
-                                        initial={{ opacity: 0 }}
-                                        animate={{ opacity: 1 }}
-                                        className="segment-speed-overlay"
-                                        style={{
-                                            position: 'absolute',
-                                            top: '50%',
-                                            left: '50%',
-                                            x: '-50%',
-                                            y: '-50%',
-                                            fontSize: '9px',
-                                            color: '#fff',
-                                            textShadow: '0 1px 2px black',
-                                            pointerEvents: 'none',
-                                            fontWeight: 'bold',
-                                            whiteSpace: 'nowrap',
-                                            zIndex: 10
-                                        }}
-                                    >
-                                        {(seg.speed_bps / 1024).toFixed(0)} KB/s
-                                    </motion.div>
-                                )}
+                                {/* Glitch Overlay on Error */}
+                                {seg.state === 'Error' && <div className="absolute inset-0 bg-red-500/20 animate-pulse mix-blend-overlay" />}
+
+                                {/* HUD Readout on Hover */}
+                                <div className="absolute inset-0 opacity-0 group-hover:opacity-100 bg-black/80 transition-opacity z-30 flex flex-col justify-center items-center backdrop-blur-sm pointer-events-none p-1">
+                                    <span className="text-[8px] font-mono text-cyan-400">ID: {seg.id}</span>
+                                    {seg.state === 'Downloading' && (
+                                        <span className="text-[7px] font-mono text-white">{(seg.speed_bps / 1024 / 1024).toFixed(2)} MB/s</span>
+                                    )}
+                                </div>
                             </motion.div>
                         );
                     })}
                 </AnimatePresence>
             </div>
-            <div className="thread-legend">
-                <div className="legend-item"><span style={{ background: '#3b82f6' }}></span> Downloading</div>
-                <div className="legend-item"><span style={{ background: '#10b981' }}></span> Complete</div>
-                <div className="legend-item"><span style={{ background: '#64748b' }}></span> Idle</div>
-            </div>
 
+            {/* Local Styles for Effects */}
             <style>{`
-                .thread-visualizer {
-                    padding: 10px;
-                    background: rgba(0, 0, 0, 0.3);
-                    border-radius: 8px;
-                    border: 1px solid rgba(255, 255, 255, 0.05);
-                    margin-top: 8px;
+                .cyber-hud-container {
+                    background: linear-gradient(180deg, rgba(8, 14, 23, 0.7) 0%, rgba(3, 7, 18, 0.9) 100%);
+                    padding: 8px;
+                    border-radius: 6px;
+                    border: 1px solid rgba(6, 182, 212, 0.15);
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
                 }
-                .thread-bar-container {
-                    position: relative;
-                    height: 28px;
-                    background: rgba(0, 0, 0, 0.5);
-                    border-radius: 4px;
-                    overflow: hidden;
-                    width: 100%;
+                .cyber-grid-bg {
+                    background-image: 
+                        linear-gradient(rgba(6, 182, 212, 0.05) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(6, 182, 212, 0.05) 1px, transparent 1px);
+                    background-size: 8px 8px;
                 }
-                .thread-legend {
-                    display: flex;
-                    gap: 15px;
-                    margin-top: 8px;
-                    font-size: 0.7rem;
-                    color: #94a3b8;
-                    justify-content: flex-end;
+                .crt-scanlines {
+                    background: linear-gradient(
+                        to bottom,
+                        rgba(255,255,255,0),
+                        rgba(255,255,255,0) 50%,
+                        rgba(0,0,0,0.2) 50%,
+                        rgba(0,0,0,0.2)
+                    );
+                    background-size: 100% 4px;
                 }
-                .legend-item {
-                    display: flex;
-                    align-items: center;
-                    gap: 6px;
+                .data-stream-anim {
+                    background-image: repeating-linear-gradient(
+                        -45deg,
+                        transparent,
+                        transparent 4px,
+                        rgba(255, 255, 255, 0.15) 4px,
+                        rgba(255, 255, 255, 0.15) 8px
+                    );
+                    background-size: 16px 16px;
+                    animation: stream-pan 1s linear infinite;
                 }
-                .legend-item span {
-                    width: 8px;
-                    height: 8px;
-                    border-radius: 50%;
-                    display: inline-block;
+                @keyframes stream-pan {
+                    from { background-position: 0 0; }
+                    to { background-position: 16px 0; }
                 }
             `}</style>
         </div>

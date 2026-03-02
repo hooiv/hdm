@@ -1,4 +1,4 @@
-use reqwest::{Client, Proxy as ReqwestProxy};
+use reqwest::Proxy as ReqwestProxy;
 use rquest::{Proxy as RquestProxy};
 use serde::{Serialize, Deserialize};
 

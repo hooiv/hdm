@@ -65,7 +65,6 @@ pub fn setup_manager(
     resume_from: u64
 ) -> Arc<Mutex<DownloadManager>> {
     if let Some(saved_dl) = saved.filter(|s| s.segments.is_some()) {
-        println!("DEBUG: Resuming from saved segments");
         let segments = saved_dl.segments.as_ref().unwrap().clone();
         Arc::new(Mutex::new(DownloadManager::new_with_segments(total_size, segments)))
     } else if resume_from > 0 {

@@ -9,3 +9,5 @@ pub mod sni_fragment;
 pub mod tor;
 pub mod sync_client;
 pub mod differential;
+pub mod wfp;
+pub mod tls_ja3;

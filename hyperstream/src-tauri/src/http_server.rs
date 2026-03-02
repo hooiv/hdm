@@ -65,7 +65,6 @@ pub async fn start_server(tx: DownloadSender, file_map: FileMap, torrent_manager
 
     let routes = download_route.or(health_route).or(p2p_route).with(cors);
 
-    println!("DEBUG: HTTP server starting on http://localhost:14733");
     warp::serve(routes).run(([0, 0, 0, 0], 14733)).await; 
 }
 
@@ -175,7 +174,6 @@ async fn handle_download(
     req: DownloadRequest,
     tx: Arc<DownloadSender>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    println!("DEBUG: Received download request from extension: {}", req.url);
     
     let id = format!("ext-{}", std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

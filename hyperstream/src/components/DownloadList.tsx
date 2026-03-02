@@ -11,9 +11,10 @@ interface DownloadListProps {
     onDelete?: (id: string) => void;
     onMoveUp?: (id: string) => void;
     onMoveDown?: (id: string) => void;
+    downloadDir: string;
 }
 
-export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onResume, onDelete, onMoveUp, onMoveDown }) => {
+export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onResume, onDelete, onMoveUp, onMoveDown, downloadDir }) => {
 
     // Item renderer
     const itemContent = useMemo(() => (_index: number, task: DownloadTask) => {
@@ -26,10 +27,11 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
                     onDelete={onDelete}
                     onMoveUp={onMoveUp}
                     onMoveDown={onMoveDown}
+                    downloadDir={downloadDir}
                 />
             </div>
         );
-    }, [onPause, onResume, onDelete, onMoveUp, onMoveDown]);
+    }, [onPause, onResume, onDelete, onMoveUp, onMoveDown, downloadDir]);
 
     if (tasks.length === 0) {
         return (

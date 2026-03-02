@@ -20,7 +20,8 @@ const ScheduleModal = React.lazy(() => import("./components/ScheduleModal").then
 const SpiderModal = React.lazy(() => import("./components/SpiderModal").then(m => ({ default: m.SpiderModal })));
 const AddTorrentModal = React.lazy(() => import("./components/AddTorrentModal").then(m => ({ default: m.AddTorrentModal })));
 const PluginEditor = React.lazy(() => import("./components/PluginEditor"));
-import { DashboardStats } from './components/DashboardStats';
+
+import { GlobalTelemetry } from './components/GlobalTelemetry';
 
 // Generate unique ID for downloads
 let nextId = 1;
@@ -43,6 +44,7 @@ function App() {
   const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
   const [batchLinks, setBatchLinks] = useState<Array<{ url: string; filename: string }>>([]);
   const [activeTab, setActiveTab] = useState<'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins'>('downloads');
+  const [downloadDir, setDownloadDir] = useState<string>('');
 
   const [isOverlayVisible, setIsOverlayVisible] = useState(false);
 
@@ -129,9 +131,18 @@ function App() {
     };
   }, []);
 
-  // Load saved downloads on app start
+  // Load settings + saved downloads on app start
   useEffect(() => {
-    const loadSavedDownloads = async () => {
+    const loadInitialData = async () => {
+      try {
+        // Load download directory from settings
+        const settings: any = await invoke('get_settings');
+        const dir = settings?.download_dir || `C:\\Users\\${import.meta.env.VITE_USER || 'user'}\\Desktop`;
+        setDownloadDir(dir);
+      } catch (e) {
+        console.error('Failed to load settings:', e);
+        setDownloadDir('C:\\Users\\user\\Desktop');
+      }
       try {
         const saved: any[] = await invoke('get_downloads');
         if (saved.length > 0) {
@@ -146,13 +157,12 @@ function App() {
             status: d.status as 'Paused' | 'Done' | 'Error' | 'Downloading'
           }));
           setTasks(loadedTasks);
-          console.log('Loaded saved downloads:', loadedTasks);
         }
       } catch (error) {
         console.error('Failed to load saved downloads:', error);
       }
     };
-    loadSavedDownloads();
+    loadInitialData();
   }, []);
 
   // Listen for downloads from browser extension
@@ -241,7 +251,7 @@ function App() {
       await invoke("start_download", {
         id: downloadId,
         url,
-        path: `C:\\Users\\aditya\\Desktop\\${filename}`,
+        path: `${downloadDir}\\${filename}`,
         force,
         customHeaders: customHeaders || null
       });
@@ -281,7 +291,7 @@ function App() {
         await invoke("start_download", {
           id: task.id,
           url: task.url,
-          path: `C:\\Users\\aditya\\Desktop\\${task.filename}`
+          path: `${downloadDir}\\${task.filename}`
         });
       } catch (error) {
         console.error("Failed to resume:", error);
@@ -355,16 +365,9 @@ function App() {
     setClipboardData(null);
   };
 
-  // Calculate Dashboard Stats
   const globalSpeed = tasks
     .filter(d => d.status === 'Downloading')
     .reduce((acc, curr) => acc + (curr.speed || 0), 0);
-
-  const activeCount = tasks
-    .filter(d => ['Downloading', 'Queued'].includes(d.status)).length;
-
-  const totalDownloaded = tasks
-    .reduce((acc, curr) => acc + (curr.downloaded || 0), 0);
 
   return (
     <>
@@ -406,11 +409,7 @@ function App() {
       >
         {activeTab === 'downloads' ? (
           <div className="flex flex-col h-full">
-            <DashboardStats
-              globalSpeed={globalSpeed}
-              activeCount={activeCount}
-              totalDownloaded={totalDownloaded}
-            />
+            <GlobalTelemetry tasks={tasks} />
             {tasks.length > 0 ? (
               <DownloadList
                 tasks={tasks}
@@ -419,6 +418,7 @@ function App() {
                 onDelete={deleteDownloadMemo}
                 onMoveUp={(id) => moveTaskMemo(id, 'up')}
                 onMoveDown={(id) => moveTaskMemo(id, 'down')}
+                downloadDir={downloadDir}
               />
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center text-slate-500 opacity-60">

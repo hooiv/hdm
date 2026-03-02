@@ -66,6 +66,7 @@ pub async fn connect_to_workspace(host_ip: String) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn is_connected() -> bool {
     IS_CONNECTED.load(Ordering::Relaxed)
 }

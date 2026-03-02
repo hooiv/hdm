@@ -1,40 +1,64 @@
-import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Download, X, File, Link as LinkIcon, AlertCircle, BookOpen } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import React, { useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+    Download,
+    X,
+    File,
+    Link as LinkIcon,
+    AlertCircle,
+    BookOpen,
+} from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { useToast } from "../contexts/ToastContext";
 
 interface AddDownloadModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onStart: (url: string, filename: string, force?: boolean, customHeaders?: Record<string, string>) => void;
+    onStart: (
+        url: string,
+        filename: string,
+        force?: boolean,
+        customHeaders?: Record<string, string>,
+    ) => void;
 }
 
-export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onClose, onStart }) => {
-    const [url, setUrl] = useState('');
-    const [filename, setFilename] = useState('');
+export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
+    isOpen,
+    onClose,
+    onStart,
+}) => {
+    const [url, setUrl] = useState("");
+    const [filename, setFilename] = useState("");
     const [isForceMode, setIsForceMode] = useState(false);
     const [isWarcMode, setIsWarcMode] = useState(false);
     const [isResolving, setIsResolving] = useState(false);
-    const [bibtex, setBibtex] = useState('');
+    const [isTestingJa3, setIsTestingJa3] = useState(false);
+    const [bibtex, setBibtex] = useState("");
 
     const [isFetchingDocker, setIsFetchingDocker] = useState(false);
     const [dockerInfo, setDockerInfo] = useState<any>(null);
 
-    const isDoi = url.trim().startsWith('10.') || url.includes('doi.org/');
-    const isDocker = url.trim().startsWith('docker pull ') || url.trim().startsWith('docker:');
+    const toast = useToast();
+
+    const isDoi = url.trim().startsWith("10.") || url.includes("doi.org/");
+    const isDocker =
+        url.trim().startsWith("docker pull ") || url.trim().startsWith("docker:");
+    const isHttp = url.trim().startsWith("http");
 
     const handleResolveDoi = async () => {
         if (!url) return;
         setIsResolving(true);
-        setBibtex('');
+        setBibtex("");
         try {
-            const result = await invoke<string>('resolve_doi', { doi: url });
+            const result = await invoke<string>("resolve_doi", { doi: url });
             setBibtex(result);
 
             // Try to extract title for filename
             const titleMatch = result.match(/title\s*=\s*[{"]([^}"]+)[}"]/i);
             if (titleMatch && titleMatch[1]) {
-                const safeTitle = titleMatch[1].replace(/[^a-z0-9]/gi, '_').toLowerCase();
+                const safeTitle = titleMatch[1]
+                    .replace(/[^a-z0-9]/gi, "_")
+                    .toLowerCase();
                 setFilename(`${safeTitle}.pdf`);
             }
         } catch (e) {
@@ -50,20 +74,34 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
         setDockerInfo(null);
         try {
             let image = url.trim();
-            if (image.startsWith('docker pull ')) {
-                image = image.replace('docker pull ', '').trim();
-            } else if (image.startsWith('docker:')) {
-                image = image.replace('docker:', '').trim();
+            if (image.startsWith("docker pull ")) {
+                image = image.replace("docker pull ", "").trim();
+            } else if (image.startsWith("docker:")) {
+                image = image.replace("docker:", "").trim();
             }
 
-            const info = await invoke<any>('fetch_docker_manifest', { image });
+            const info = await invoke<any>("fetch_docker_manifest", { image });
             setDockerInfo(info);
-            setFilename(`${info.name.replace('/', '_')}_${info.tag}.tar`);
+            setFilename(`${info.name.replace("/", "_")}_${info.tag}.tar`);
         } catch (e) {
             console.error("Docker Error:", e);
-            alert("Docker pull failed: " + e);
+            toast.error("Docker pull failed: " + e);
         } finally {
             setIsFetchingDocker(false);
+        }
+    };
+
+    const handleTestJa3 = async () => {
+        if (!url) return;
+        setIsTestingJa3(true);
+        try {
+            const response = await invoke<string>("fetch_with_ja3", { url, browser: "chrome" });
+            toast.success("JA3 Spoof Success. Server responded with: " + response.substring(0, 100) + "...");
+        } catch (e) {
+            console.error("JA3 Error:", e);
+            toast.error(String(e));
+        } finally {
+            setIsTestingJa3(false);
         }
     };
 
@@ -71,12 +109,14 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
     React.useEffect(() => {
         if (url && !filename) {
             try {
-                const parts = url.split('/');
-                const last = parts[parts.length - 1].split('?')[0];
-                if (last && last.includes('.')) {
+                const parts = url.split("/");
+                const last = parts[parts.length - 1].split("?")[0];
+                if (last && last.includes(".")) {
                     setFilename(last);
                 }
-            } catch (e) { /* ignore */ }
+            } catch (e) {
+                /* ignore */
+            }
         }
     }, [url]);
 
@@ -85,11 +125,11 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
 
         if (dockerInfo) {
             dockerInfo.layers.forEach((layer: any, idx: number) => {
-                const layerFilename = `docker_${dockerInfo.name.replace('/', '_')}_${dockerInfo.tag}_layer${idx}.tar.gz`;
+                const layerFilename = `docker_${dockerInfo.name.replace("/", "_")}_${dockerInfo.tag}_layer${idx}.tar.gz`;
                 onStart(layer.url, layerFilename, false, layer.headers);
             });
-            setUrl('');
-            setFilename('');
+            setUrl("");
+            setFilename("");
             setDockerInfo(null);
             onClose();
             return;
@@ -98,18 +138,21 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
         if (url && filename) {
             if (isWarcMode) {
                 // Background task
-                invoke('download_as_warc', {
+                invoke("download_as_warc", {
                     url,
-                    savePath: `C:\\Users\\aditya\\Desktop\\${filename}${filename.endsWith('.warc') ? '' : '.warc'}`
-                }).then(() => alert(`Successfully archived to WARC: ${filename}`))
-                    .catch(e => alert(`Failed to archive WARC: ${e}`));
+                    savePath: `${filename}${filename.endsWith(".warc") ? "" : ".warc"} `,
+                })
+                    .then(() =>
+                        toast.success(`Successfully archived to WARC: ${filename} `),
+                    )
+                    .catch((e) => toast.error(`Failed to archive WARC: ${e} `));
             } else {
                 onStart(url, filename, isForceMode);
             }
-            setUrl('');
-            setFilename('');
+            setUrl("");
+            setFilename("");
             setIsForceMode(false);
-            setBibtex('');
+            setBibtex("");
             onClose();
         }
     };
@@ -141,16 +184,24 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
                                 <Download className="text-blue-500" size={24} />
                                 Add Download
                             </h2>
-                            <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors">
+                            <button
+                                onClick={onClose}
+                                className="text-slate-400 hover:text-white transition-colors"
+                            >
                                 <X size={20} />
                             </button>
                         </div>
 
                         <form onSubmit={handleSubmit} className="space-y-4">
                             <div className="space-y-1">
-                                <label className="text-xs uppercase font-semibold text-slate-500 tracking-wider ml-1">Download URL</label>
+                                <label className="text-xs uppercase font-semibold text-slate-500 tracking-wider ml-1">
+                                    Download URL
+                                </label>
                                 <div className="relative group">
-                                    <LinkIcon className="absolute left-3 top-3 text-slate-500 group-focus-within:text-blue-500 transition-colors" size={18} />
+                                    <LinkIcon
+                                        className="absolute left-3 top-3 text-slate-500 group-focus-within:text-blue-500 transition-colors"
+                                        size={18}
+                                    />
                                     <input
                                         type="text"
                                         value={url}
@@ -167,7 +218,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
                                             className="absolute right-2 top-2 bottom-2 px-3 bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded flex items-center gap-1 text-xs font-semibold transition-colors disabled:opacity-50"
                                         >
                                             <BookOpen size={14} />
-                                            {isResolving ? 'Resolving...' : 'Resolve DOI'}
+                                            {isResolving ? "Resolving..." : "Resolve DOI"}
                                         </button>
                                     )}
                                     {isDocker && !dockerInfo && (
@@ -178,16 +229,32 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
                                             className="absolute right-2 top-2 bottom-2 px-3 bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 rounded flex items-center gap-1 text-xs font-semibold transition-colors disabled:opacity-50"
                                         >
                                             <AlertCircle size={14} />
-                                            {isFetchingDocker ? 'Fetching...' : 'Fetch Manifest'}
+                                            {isFetchingDocker ? "Fetching..." : "Fetch Manifest"}
+                                        </button>
+                                    )}
+                                    {isHttp && !isDoi && !isDocker && (
+                                        <button
+                                            type="button"
+                                            onClick={handleTestJa3}
+                                            disabled={isTestingJa3}
+                                            className="absolute right-2 top-2 bottom-2 px-3 bg-fuchsia-500/20 text-fuchsia-400 hover:bg-fuchsia-500/30 rounded flex items-center gap-1 text-xs font-semibold transition-colors disabled:opacity-50"
+                                        >
+                                            <AlertCircle size={14} />
+                                            {isTestingJa3 ? "Testing..." : "Test JA3"}
                                         </button>
                                     )}
                                 </div>
                             </div>
 
                             <div className="space-y-1">
-                                <label className="text-xs uppercase font-semibold text-slate-500 tracking-wider ml-1">Filename</label>
+                                <label className="text-xs uppercase font-semibold text-slate-500 tracking-wider ml-1">
+                                    Filename
+                                </label>
                                 <div className="relative group">
-                                    <File className="absolute left-3 top-3 text-slate-500 group-focus-within:text-violet-500 transition-colors" size={18} />
+                                    <File
+                                        className="absolute left-3 top-3 text-slate-500 group-focus-within:text-violet-500 transition-colors"
+                                        size={18}
+                                    />
                                     <input
                                         type="text"
                                         value={filename}
@@ -201,7 +268,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
                             {bibtex && (
                                 <motion.div
                                     initial={{ opacity: 0, height: 0 }}
-                                    animate={{ opacity: 1, height: 'auto' }}
+                                    animate={{ opacity: 1, height: "auto" }}
                                     className="bg-slate-900/50 border border-slate-700/50 rounded-lg p-3 overflow-hidden text-xs text-slate-400 font-mono"
                                 >
                                     <pre className="whitespace-pre-wrap max-h-32 overflow-y-auto custom-scrollbar">
@@ -220,10 +287,17 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
                                         <Download size={18} />
                                         Docker Image Context
                                     </div>
-                                    <p className="text-sm font-mono"><span className="text-cyan-500">Image:</span> {dockerInfo.name}:{dockerInfo.tag}</p>
-                                    <p className="text-sm"><span className="text-cyan-500 font-mono">Layers:</span> {dockerInfo.layers?.length || 0} manifest blobs</p>
+                                    <p className="text-sm font-mono">
+                                        <span className="text-cyan-500">Image:</span>{" "}
+                                        {dockerInfo.name}:{dockerInfo.tag}
+                                    </p>
+                                    <p className="text-sm">
+                                        <span className="text-cyan-500 font-mono">Layers:</span>{" "}
+                                        {dockerInfo.layers?.length || 0} manifest blobs
+                                    </p>
                                     <p className="text-xs text-cyan-400/80 mt-2">
-                                        Submitting will enqueue all {(dockerInfo.layers?.length || 0)} layers as rapid parallel downloads.
+                                        Submitting will enqueue all {dockerInfo.layers?.length || 0}{" "}
+                                        layers as rapid parallel downloads.
                                     </p>
                                 </motion.div>
                             )}
@@ -232,30 +306,55 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
                                 <>
                                     {/* Force Download Toggle (Shift Key visualizer) */}
                                     <div
-                                        className={`flex items-center gap-3 p-3 rounded-lg border transition-all cursor-pointer ${isForceMode ? 'bg-amber-900/20 border-amber-500/30' : 'bg-slate-800/30 border-transparent hover:bg-slate-800/50'}`}
+                                        className={`flex items - center gap - 3 p - 3 rounded - lg border transition - all cursor - pointer ${isForceMode ? "bg-amber-900/20 border-amber-500/30" : "bg-slate-800/30 border-transparent hover:bg-slate-800/50"} `}
                                         onClick={() => setIsForceMode(!isForceMode)}
                                     >
-                                        <div className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${isForceMode ? 'bg-amber-500 border-amber-500' : 'border-slate-600'}`}>
-                                            {isForceMode && <div className="w-2 h-2 bg-white rounded-sm" />}
+                                        <div
+                                            className={`w - 4 h - 4 rounded border flex items - center justify - center transition - all ${isForceMode ? "bg-amber-500 border-amber-500" : "border-slate-600"} `}
+                                        >
+                                            {isForceMode && (
+                                                <div className="w-2 h-2 bg-white rounded-sm" />
+                                            )}
                                         </div>
                                         <div className="flex-1">
-                                            <p className={`text-sm font-medium ${isForceMode ? 'text-amber-400' : 'text-slate-400'}`}>Force Download Mode</p>
-                                            <p className="text-xs text-slate-500">Bypasses pre-checks. Use for problematic links.</p>
+                                            <p
+                                                className={`text - sm font - medium ${isForceMode ? "text-amber-400" : "text-slate-400"} `}
+                                            >
+                                                Force Download Mode
+                                            </p>
+                                            <p className="text-xs text-slate-500">
+                                                Bypasses pre-checks. Use for problematic links.
+                                            </p>
                                         </div>
-                                        {isForceMode && <AlertCircle size={16} className="text-amber-500" />}
+                                        {isForceMode && (
+                                            <AlertCircle size={16} className="text-amber-500" />
+                                        )}
                                     </div>
 
                                     {/* WARC Mode Toggle */}
                                     <div
-                                        className={`flex items-center gap-3 p-3 rounded-lg border transition-all cursor-pointer ${isWarcMode ? 'bg-indigo-900/20 border-indigo-500/30' : 'bg-slate-800/30 border-transparent hover:bg-slate-800/50'}`}
-                                        onClick={() => { setIsWarcMode(!isWarcMode); setIsForceMode(false); }}
+                                        className={`flex items - center gap - 3 p - 3 rounded - lg border transition - all cursor - pointer ${isWarcMode ? "bg-indigo-900/20 border-indigo-500/30" : "bg-slate-800/30 border-transparent hover:bg-slate-800/50"} `}
+                                        onClick={() => {
+                                            setIsWarcMode(!isWarcMode);
+                                            setIsForceMode(false);
+                                        }}
                                     >
-                                        <div className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${isWarcMode ? 'bg-indigo-500 border-indigo-500' : 'border-slate-600'}`}>
-                                            {isWarcMode && <div className="w-2 h-2 bg-white rounded-sm" />}
+                                        <div
+                                            className={`w - 4 h - 4 rounded border flex items - center justify - center transition - all ${isWarcMode ? "bg-indigo-500 border-indigo-500" : "border-slate-600"} `}
+                                        >
+                                            {isWarcMode && (
+                                                <div className="w-2 h-2 bg-white rounded-sm" />
+                                            )}
                                         </div>
                                         <div className="flex-1">
-                                            <p className={`text-sm font-medium ${isWarcMode ? 'text-indigo-400' : 'text-slate-400'}`}>Save as WARC Archive</p>
-                                            <p className="text-xs text-slate-500">Downloads entire page and assets into a .warc file.</p>
+                                            <p
+                                                className={`text - sm font - medium ${isWarcMode ? "text-indigo-400" : "text-slate-400"} `}
+                                            >
+                                                Save as WARC Archive
+                                            </p>
+                                            <p className="text-xs text-slate-500">
+                                                Downloads entire page and assets into a .warc file.
+                                            </p>
                                         </div>
                                     </div>
                                 </>
@@ -271,19 +370,23 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({ isOpen, onCl
                                 </button>
                                 <button
                                     type="submit"
-                                    className={`flex-1 py-2.5 rounded-lg font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 text-sm
+                                    className={`flex - 1 py - 2.5 rounded - lg font - bold text - white shadow - lg transition - all flex items - center justify - center gap - 2 text - sm
                                         ${isForceMode
-                                            ? 'bg-gradient-to-r from-amber-600 to-orange-600 shadow-amber-900/20 hover:shadow-amber-900/40'
-                                            : 'bg-gradient-to-r from-blue-600 to-violet-600 shadow-blue-900/20 hover:shadow-blue-900/40'
+                                            ? "bg-gradient-to-r from-amber-600 to-orange-600 shadow-amber-900/20 hover:shadow-amber-900/40"
+                                            : "bg-gradient-to-r from-blue-600 to-violet-600 shadow-blue-900/20 hover:shadow-blue-900/40"
                                         }
-                                    `}
+`}
                                 >
-                                    {isForceMode ? 'Force Start' : 'Start Download'}
+                                    {isForceMode ? "Force Start" : "Start Download"}
                                 </button>
                             </div>
 
                             <p className="text-center text-xs text-slate-600">
-                                Tip: Hold <kbd className="font-mono bg-slate-800 px-1 rounded text-slate-500">Shift</kbd> while clicking Start to force.
+                                Tip: Hold{" "}
+                                <kbd className="font-mono bg-slate-800 px-1 rounded text-slate-500">
+                                    Shift
+                                </kbd>{" "}
+                                while clicking Start to force.
                             </p>
                         </form>
                     </motion.div>

@@ -5,6 +5,8 @@ use serde::{Serialize, Deserialize};
 use std::path::Path;
 
 
+pub mod upscale;
+
 // Simple in-memory Index
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SearchResult {
