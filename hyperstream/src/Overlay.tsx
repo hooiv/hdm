@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { DownloadProgressPayload, SavedDownload } from "./types";
 
 interface DownloadTask {
     id: string;
@@ -11,6 +12,7 @@ interface DownloadTask {
     status: string;
     total: number;
     downloaded: number;
+    lastUpdate?: number;
 }
 
 const formatSpeed = (bytesPerSec: number) => {
@@ -26,13 +28,13 @@ export default function Overlay() {
 
     useEffect(() => {
         // Initial fetch
-        invoke('get_downloads').then((data: any) => {
+        invoke<SavedDownload[]>('get_downloads').then((data) => {
             // Basic fetch, mostly relying on events
             console.log("Overlay initialized", data);
         });
 
         // Listen for progress
-        const unlistenProgress = listen('download_progress', (event: any) => {
+        const unlistenProgress = listen<DownloadProgressPayload>('download_progress', (event) => {
             const { id, downloaded, total } = event.payload;
             setTasks(prev => {
                 // If task doesn't exist, we might need to fetch full list or ignore
@@ -40,7 +42,7 @@ export default function Overlay() {
                 return prev.map(t => {
                     if (t.id === id) {
                         const now = Date.now();
-                        const timeDiff = (now - ((t as any).lastUpdate || now)) / 1000;
+                        const timeDiff = (now - (t.lastUpdate || now)) / 1000;
                         const bytesDiff = downloaded - t.downloaded;
                         const speed = timeDiff > 0 ? bytesDiff / timeDiff : 0;
 

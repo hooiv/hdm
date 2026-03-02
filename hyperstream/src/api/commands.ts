@@ -136,14 +136,14 @@ export const api = {
     pauseDownload: (id: string) =>
         invoke<void>('pause_download', { id }),
     getDownloads: () =>
-        invoke<any[]>('get_downloads'),
+        invoke<import('../types').SavedDownload[]>('get_downloads'),
     removeDownload: (id: string) =>
         invoke<void>('remove_download_entry', { id }),
 
     // --- Settings ---
     getSettings: () =>
-        invoke<Record<string, any>>('get_settings'),
-    saveSettings: (json: Record<string, any>) =>
+        invoke<import('../types').AppSettings>('get_settings'),
+    saveSettings: (json: Record<string, unknown>) =>
         invoke<void>('save_settings', { json }),
 
     // --- File Operations ---

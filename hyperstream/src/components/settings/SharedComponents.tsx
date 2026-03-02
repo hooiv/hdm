@@ -1,4 +1,5 @@
 import React from "react";
+import type { LucideIcon } from "lucide-react";
 
 export const Toggle: React.FC<{
   checked: boolean;
@@ -24,7 +25,7 @@ export const Toggle: React.FC<{
   </div>
 );
 
-export const SectionHeader: React.FC<{ icon: any; title: string }> = ({
+export const SectionHeader: React.FC<{ icon: LucideIcon; title: string }> = ({
   icon: Icon,
   title,
 }) => (

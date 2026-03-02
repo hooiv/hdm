@@ -11,6 +11,7 @@ import { ToastManager, ToastRef } from "./components/ToastManager";
 import { TorrentList } from "./components/TorrentList";
 import { FeedsTab } from "./components/FeedsTab";
 import { SearchTab } from "./components/SearchTab";
+import type { DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings } from "./types";
 
 // Lazy load modals to improve initial render time
 const AddDownloadModal = React.lazy(() => import("./components/AddDownloadModal").then(m => ({ default: m.AddDownloadModal })));
@@ -42,7 +43,7 @@ function App() {
   const [isSpiderOpen, setIsSpiderOpen] = useState(false);
   const [isTorrentModalOpen, setIsTorrentModalOpen] = useState(false);
   const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
-  const [batchLinks, setBatchLinks] = useState<Array<{ url: string; filename: string }>>([]);
+  const [batchLinks, setBatchLinks] = useState<BatchLink[]>([]);
   const [activeTab, setActiveTab] = useState<'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins'>('downloads');
   const [downloadDir, setDownloadDir] = useState<string>('');
 
@@ -69,7 +70,7 @@ function App() {
   const completedIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    const unlistenPromise = listen('download_progress', (event: any) => {
+    const unlistenPromise = listen<DownloadProgressPayload>('download_progress', (event) => {
       const { id, downloaded, total } = event.payload;
 
       setTasks(prevTasks => {
@@ -95,7 +96,7 @@ function App() {
             }
 
             // Unpack segments from tuple format
-            const segments = event.payload.segments ? event.payload.segments.map((s: any) => ({
+            const segments = event.payload.segments ? event.payload.segments.map((s) => ({
               id: s[0],
               start_byte: s[1],
               end_byte: s[2],
@@ -136,7 +137,7 @@ function App() {
     const loadInitialData = async () => {
       try {
         // Load download directory from settings
-        const settings: any = await invoke('get_settings');
+        const settings = await invoke<AppSettings>('get_settings');
         const dir = settings?.download_dir || `C:\\Users\\${import.meta.env.VITE_USER || 'user'}\\Desktop`;
         setDownloadDir(dir);
       } catch (e) {
@@ -144,7 +145,7 @@ function App() {
         setDownloadDir('C:\\Users\\user\\Desktop');
       }
       try {
-        const saved: any[] = await invoke('get_downloads');
+        const saved = await invoke<SavedDownload[]>('get_downloads');
         if (saved.length > 0) {
           const loadedTasks: DownloadTask[] = saved.map(d => ({
             id: d.id,
@@ -167,7 +168,7 @@ function App() {
 
   // Listen for downloads from browser extension
   useEffect(() => {
-    const unlistenPromise = listen('extension_download', (event: any) => {
+    const unlistenPromise = listen<ExtensionDownloadPayload>('extension_download', (event) => {
       const { url, filename } = event.payload;
       console.log('Extension download received:', url, filename);
       const extractedFilename = filename || url.split('/').pop()?.split('?')[0] || 'download';
@@ -181,7 +182,7 @@ function App() {
 
   // Listen for clipboard URLs
   useEffect(() => {
-    const unlistenPromise = listen('clipboard_url', (event: any) => {
+    const unlistenPromise = listen<ClipboardUrlPayload>('clipboard_url', (event) => {
       const { url, filename } = event.payload;
       console.log('Clipboard URL detected:', url, filename);
       setClipboardData({ url, filename });
@@ -199,8 +200,8 @@ function App() {
 
   // Listen for batch links from browser extension
   useEffect(() => {
-    const unlistenPromise = listen('batch_links', (event: any) => {
-      const links = event.payload as Array<{ url: string; filename: string }>;
+    const unlistenPromise = listen<BatchLink[]>('batch_links', (event) => {
+      const links = event.payload;
       console.log('Batch links received:', links.length);
       setBatchLinks(links);
     });
@@ -212,7 +213,7 @@ function App() {
 
   // Listen for scheduled downloads starting
   useEffect(() => {
-    const unlistenPromise = listen('scheduled_download_start', (event: any) => {
+    const unlistenPromise = listen<ScheduledDownloadPayload>('scheduled_download_start', (event) => {
       const { url, filename } = event.payload;
       console.log('Scheduled download starting:', url, filename);
       startDownload(url, filename);
