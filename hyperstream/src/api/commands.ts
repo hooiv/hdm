@@ -143,7 +143,7 @@ export const api = {
     // --- Settings ---
     getSettings: () =>
         invoke<import('../types').AppSettings>('get_settings'),
-    saveSettings: (json: Record<string, unknown>) =>
+    saveSettings: (json: Partial<import('../types').AppSettings>) =>
         invoke<void>('save_settings', { json }),
 
     // --- File Operations ---
