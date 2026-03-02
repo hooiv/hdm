@@ -60,15 +60,18 @@ impl WebhookManager {
         *configs_lock = configs;
     }
 
+    #[allow(dead_code)]
     pub async fn get_configs(&self) -> Vec<WebhookConfig> {
         self.configs.lock().await.clone()
     }
 
+    #[allow(dead_code)]
     pub async fn add_config(&self, config: WebhookConfig) {
         let mut configs = self.configs.lock().await;
         configs.push(config);
     }
 
+    #[allow(dead_code)]
     pub async fn update_config(&self, id: &str, updated: WebhookConfig) -> Result<(), String> {
         let mut configs = self.configs.lock().await;
         if let Some(config) = configs.iter_mut().find(|c| c.id == id) {
@@ -79,6 +82,7 @@ impl WebhookManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn delete_config(&self, id: &str) -> Result<(), String> {
         let mut configs = self.configs.lock().await;
         let initial_len = configs.len();

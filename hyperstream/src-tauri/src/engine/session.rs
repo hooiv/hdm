@@ -4,7 +4,7 @@ use tokio::sync::broadcast;
 use crate::core_state::*;
 use crate::*;
 
-pub async fn start_download_impl(
+pub(crate) async fn start_download_impl(
     app: &tauri::AppHandle,
     state: &AppState,
     id: String, 
@@ -67,6 +67,9 @@ pub async fn start_download_impl(
         path.split('\\').last().unwrap_or(&path),
         "Downloading"
     );
+
+    // Broadcast to LAN devices
+    crate::lan_api::broadcast_download(url.clone());
 
     // 1. Check for saved download (Resume logic)
     let saved_downloads = persistence::load_downloads().unwrap_or_default();
@@ -242,6 +245,7 @@ pub async fn start_download_impl(
     let etag_monitor = etag.clone();
     let md5_monitor = md5.clone();
     let mut stop_rx_monitor = stop_tx.subscribe();
+    let chatops_monitor = state.chatops_manager.clone();
     
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(33)); // ~30fps
@@ -308,6 +312,15 @@ pub async fn start_download_impl(
                             path_monitor.split('\\').last().unwrap_or(&path_monitor),
                             "Complete"
                         );
+
+                        // Notify ChatOps (Telegram) on completion
+                        let chatops = chatops_monitor.clone();
+                        let filename_chatops = path_monitor.split('\\').last()
+                            .or_else(|| path_monitor.split('/').last())
+                            .unwrap_or(&path_monitor).to_string();
+                        tokio::spawn(async move {
+                            chatops.notify_completion(&filename_chatops).await;
+                        });
                         
                         // Auto-extract archives if enabled
                         let path_archive = path_monitor.clone();

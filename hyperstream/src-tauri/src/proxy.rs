@@ -64,6 +64,7 @@ impl ProxyConfig {
     }
     
     /// Build a reqwest Proxy from this config
+    #[allow(dead_code)]
     pub fn to_reqwest_proxy(&self) -> Option<ReqwestProxy> {
         if !self.enabled || self.host.is_empty() {
             return None;
@@ -155,6 +156,7 @@ impl ProxyConfig {
     }
 
     /// Build a rquest Client with this proxy config
+    #[allow(dead_code)]
     pub fn build_client(&self) -> Result<rquest::Client, String> {
         crate::network::masq::build_client(Some(self), None)
     }

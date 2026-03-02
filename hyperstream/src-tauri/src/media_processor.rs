@@ -2,6 +2,7 @@ use std::process::Command;
 use std::path::Path;
 use serde::{Serialize, Deserialize};
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MediaMetadata {
     pub duration: f64,
