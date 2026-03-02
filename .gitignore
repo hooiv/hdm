@@ -1,0 +1,12 @@
+# Build outputs and logs
+*.log
+cargo_check_output.txt
+
+# Editor/IDE
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.part
