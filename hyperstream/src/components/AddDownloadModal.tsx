@@ -64,7 +64,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
             }
         } catch (e) {
             console.error("DOI Error:", e);
-            toast.error('Failed to resolve DOI: ' + e);
+            toast.error(`Failed to resolve DOI: ${e}`);
         } finally {
             setIsResolving(false);
         }
