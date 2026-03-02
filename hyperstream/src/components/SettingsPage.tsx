@@ -97,6 +97,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       setAudioVolume(volume);
     } catch (e) {
       console.error("Failed to load settings", e);
+      toast.error('Failed to load settings');
     }
   };
 
