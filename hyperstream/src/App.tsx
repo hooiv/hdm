@@ -231,9 +231,12 @@ function App() {
     const unlistenPromise = listen<{ id: string; url: string }>('download_refreshed', (event) => {
       const { id, url } = event.payload;
       console.log('Download URL refreshed:', id, url);
-      setTasks(prev => prev.map(t =>
-        t.id === id ? { ...t, url, status: 'Paused' as const } : t
-      ));
+      setTasks(prev => prev.map(t => {
+        if (t.id !== id) return t;
+        // Only reset Error status to Paused; leave Done/Downloading/Paused as-is
+        const newStatus = t.status === 'Error' ? 'Paused' as const : t.status;
+        return { ...t, url, status: newStatus };
+      }));
       toastRef.current?.addToast('Download address refreshed — click Resume to retry', 'success');
     });
 
