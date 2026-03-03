@@ -1,13 +1,11 @@
 export interface SettingsData {
   download_dir: string;
-  max_concurrent_downloads: number;
+  segments: number;
   proxy_enabled: boolean;
-  proxy_url: string;
-  theme: string;
-  vpn_mode: boolean;
-  chaos_mode: boolean;
-  speed_limit_enabled: boolean;
-  speed_limit_rate: number;
+  proxy_type: string;
+  proxy_host: string;
+  proxy_port: number;
+  speed_limit_kbps: number;
 
   // Cloud
   cloud_enabled: boolean;
@@ -17,12 +15,21 @@ export interface SettingsData {
   cloud_access_key: string;
   cloud_secret_key: string;
 
-  // Advanced / Chaos
-  chaos_latency_ms: number;
-  chaos_error_rate: number;
-
   // Privacy
   use_tor: boolean;
+  dpi_evasion: boolean;
+  ja3_enabled: boolean;
+
+  // Threads
+  min_threads: number;
+  max_threads: number;
+
+  // Clipboard
+  clipboard_monitor: boolean;
+  auto_start_extension: boolean;
+
+  // Categories
+  use_category_folders: boolean;
 
   // Team Sync
   last_sync_host?: string;
@@ -38,7 +45,7 @@ export interface SettingsData {
 
   // VPN
   vpn_auto_connect: boolean;
-  vpn_connection_name: string;
+  vpn_connection_name?: string;
 
   // MQTT
   mqtt_enabled: boolean;
@@ -48,6 +55,16 @@ export interface SettingsData {
   // Smart Sleep
   prevent_sleep_during_download: boolean;
   pause_on_low_battery: boolean;
+
+  // P2P
+  p2p_enabled: boolean;
+  p2p_upload_limit_kbps?: number;
+
+  // Metadata
+  auto_scrub_metadata: boolean;
+
+  // Allow extra fields from Rust that aren't explicitly listed
+  [key: string]: unknown;
 }
 
 export interface WebhookConfig {

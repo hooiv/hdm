@@ -35,23 +35,26 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
 
   const [settings, setSettings] = useState<SettingsData>({
     download_dir: "",
-    max_concurrent_downloads: 3,
+    segments: 8,
     proxy_enabled: false,
-    proxy_url: "",
-    theme: "dark",
-    vpn_mode: false,
-    chaos_mode: false,
-    speed_limit_enabled: false,
-    speed_limit_rate: 1024,
+    proxy_type: "http",
+    proxy_host: "127.0.0.1",
+    proxy_port: 8080,
+    speed_limit_kbps: 0,
     cloud_enabled: false,
     cloud_endpoint: "",
     cloud_bucket: "",
     cloud_region: "us-east-1",
     cloud_access_key: "",
     cloud_secret_key: "",
-    chaos_latency_ms: 0,
-    chaos_error_rate: 0,
     use_tor: false,
+    dpi_evasion: false,
+    ja3_enabled: false,
+    min_threads: 2,
+    max_threads: 16,
+    clipboard_monitor: false,
+    auto_start_extension: true,
+    use_category_folders: true,
     last_sync_host: "",
     vpn_auto_connect: false,
     vpn_connection_name: "",
@@ -60,6 +63,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     mqtt_topic: "hyperstream/downloads",
     prevent_sleep_during_download: true,
     pause_on_low_battery: true,
+    p2p_enabled: false,
+    auto_scrub_metadata: false,
   });
 
   const [saved, setSaved] = useState(false);
@@ -86,8 +91,6 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         cloud_region: data.cloud_region || "us-east-1",
         cloud_access_key: data.cloud_access_key || "",
         cloud_secret_key: data.cloud_secret_key || "",
-        chaos_latency_ms: data.chaos_latency_ms || 0,
-        chaos_error_rate: data.chaos_error_rate || 0,
       });
 
       // Load audio settings
