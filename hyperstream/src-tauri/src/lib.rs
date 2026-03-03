@@ -1820,14 +1820,14 @@ pub fn run() {
                     Err(e) => {
                         eprintln!("Warning: P2P failed to start on port 14735: {}. Trying fallback port...", e);
                         // Try fallback port
-                        network::p2p::P2PNode::new(14736).await.unwrap_or_else(|e2| {
-                            eprintln!("Warning: P2P also failed on fallback port: {}. P2P features disabled.", e2);
-                            // Create a node that won't actually serve but won't crash
-                            tauri::async_runtime::block_on(async {
+                        match network::p2p::P2PNode::new(14736).await {
+                            Ok(node) => node,
+                            Err(e2) => {
+                                eprintln!("Warning: P2P also failed on fallback port: {}. Trying dynamic port...", e2);
                                 network::p2p::P2PNode::new(0).await
-                                    .expect("P2P node creation with port 0 should not fail")
-                            })
-                        })
+                                    .expect("P2P node creation with dynamic port should not fail")
+                            }
+                        }
                     }
                 }
             });
@@ -1840,16 +1840,17 @@ pub fn run() {
                  let mut path = std::path::PathBuf::from(&settings.download_dir);
                  path.push("Torrents");
                  std::fs::create_dir_all(&path).unwrap_or_default();
-                 network::bittorrent::manager::TorrentManager::new(path).await.unwrap_or_else(|e| {
-                     eprintln!("Warning: Torrent Manager failed to start: {}", e);
-                     // Use a fallback temp directory instead of panicking
-                     let fallback = std::env::temp_dir().join("hyperstream_torrents");
-                     std::fs::create_dir_all(&fallback).unwrap_or_default();
-                     tauri::async_runtime::block_on(async {
+                 match network::bittorrent::manager::TorrentManager::new(path).await {
+                     Ok(tm) => tm,
+                     Err(e) => {
+                         eprintln!("Warning: Torrent Manager failed to start: {}", e);
+                         // Use a fallback temp directory instead of panicking
+                         let fallback = std::env::temp_dir().join("hyperstream_torrents");
+                         std::fs::create_dir_all(&fallback).unwrap_or_default();
                          network::bittorrent::manager::TorrentManager::new(fallback).await
-                             .expect("Torrent Manager fallback also failed")
-                     })
-                 })
+                             .expect("Torrent Manager fallback with temp dir also failed")
+                     }
+                 }
             });
             let torrent_manager = Arc::new(torrent_manager);
 

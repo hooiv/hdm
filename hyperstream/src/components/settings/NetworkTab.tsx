@@ -58,7 +58,7 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
                 placeholder="8080"
                 value={settings.proxy_port}
                 onChange={(e) =>
-                  setSettings({ ...settings, proxy_port: parseInt(e.target.value) || 8080 })
+                  setSettings({ ...settings, proxy_port: parseInt(e.target.value) || settings.proxy_port })
                 }
                 className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
               />
