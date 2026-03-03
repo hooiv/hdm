@@ -1550,55 +1550,6 @@ pub fn run() {
     
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            // System Tray Setup
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let show_i = MenuItem::with_id(app, "show", "Show HyperStream", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
-
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| match event {
-                    TrayIconEvent::Click {
-                        button: tauri::tray::MouseButton::Left,
-                        ..
-                    } => {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    _ => {}
-                })
-                .build(app)?;
-
-            Ok(())
-        })
-        .on_window_event(|window, event| match event {
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                // Minimize to tray instead of closing for the main window
-                if window.label() == "main" {
-                    let _ = window.hide();
-                    api.prevent_close();
-                }
-            }
-            _ => {}
-        })
         .invoke_handler(tauri::generate_handler![
             start_download, 
             pause_download, 
@@ -1810,7 +1761,7 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                window.hide().unwrap();
+                let _ = window.hide();
                 api.prevent_close();
             }
         })
@@ -1883,12 +1834,14 @@ pub fn run() {
             });
             
             // ============ SYSTEM TRAY ============
-            let quit_i = MenuItem::with_id(app.handle(), "quit", "Quit", true, None::<&str>).unwrap();
-            let show_i = MenuItem::with_id(app.handle(), "show", "Show HyperStream", true, None::<&str>).unwrap();
-            let menu = Menu::with_items(app.handle(), &[&show_i, &quit_i]).unwrap();
+            let quit_i = MenuItem::with_id(app.handle(), "quit", "Quit", true, None::<&str>)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            let show_i = MenuItem::with_id(app.handle(), "show", "Show HyperStream", true, None::<&str>)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            let menu = Menu::with_items(app.handle(), &[&show_i, &quit_i])
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+            let mut tray_builder = TrayIconBuilder::new()
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
@@ -1918,8 +1871,12 @@ pub fn run() {
                         }
                         _ => {}
                     }
-                })
-                .build(app.handle());
+                });
+            // Set icon if available (avoid panic if window icon is missing)
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+            let _tray = tray_builder.build(app.handle());
             // =====================================
             
             // Initialize ChatOps
