@@ -362,10 +362,11 @@ function App() {
   };
 
   const handleSpeedLimitChange = (limit: number) => {
-    // TODO: Implement speed limit change
-    console.log("Speed limit changed:", limit);
-    // Invoke backend command if exists
-    // invoke("set_global_speed_limit", { limitBytes: limit });
+    const limitKbps = Math.floor(limit / 1024);
+    invoke("set_speed_limit", { limitKbps }).catch((err) => {
+      console.error("Failed to set speed limit:", err);
+      toastRef.current?.addToast("Failed to set speed limit", "error");
+    });
   };
 
   const handleClipboardDownload = (url: string, filename: string) => {
@@ -387,7 +388,10 @@ function App() {
               if (text && (text.startsWith('http') || text.startsWith('magnet:'))) {
                 console.log("Force Download Key detected. Adding:", text);
                 if (text.startsWith('magnet:')) {
-                  invoke("add_magnet_link", { magnet: text }).catch(console.error);
+                  invoke("add_magnet_link", { magnet: text }).catch((err) => {
+                    console.error("Magnet link failed:", err);
+                    toastRef.current?.addToast(`Failed to add magnet link: ${err}`, 'error');
+                  });
                 } else {
                   const filename = text.split('/').pop()?.split('?')[0] || 'clipboard_download';
                   startDownload(text, filename);
@@ -462,7 +466,10 @@ function App() {
             onClose={() => setIsTorrentModalOpen(false)}
             onAdd={(magnet) => {
               console.log("Adding magnet:", magnet);
-              invoke("add_magnet_link", { magnet }).catch(console.error);
+              invoke("add_magnet_link", { magnet }).catch((err) => {
+                console.error("Magnet link failed:", err);
+                toastRef.current?.addToast(`Failed to add magnet: ${err}`, 'error');
+              });
             }}
           />
         )}

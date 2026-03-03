@@ -109,7 +109,14 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
             onChange={async (val) => {
               setSettings({ ...settings, use_tor: val });
               if (val) {
-                invoke("init_tor_network").catch(console.error);
+                try {
+                  await invoke("init_tor_network");
+                  toast.success("Tor network initialized");
+                } catch (err) {
+                  console.error("Tor init failed:", err);
+                  toast.error(`Failed to initialize Tor: ${err}`);
+                  setSettings({ ...settings, use_tor: false });
+                }
               }
             }}
           />
