@@ -119,11 +119,10 @@ export const FeedsTab: React.FC = () => {
             const filename = title.replace(/[^a-zA-Z0-9.-]/g, "_");
             const settings = await invoke<AppSettings>('get_settings');
             const downloadId = `feed_${Date.now()}_${feedNextId++}`;
-            const sep = settings.download_dir.includes('/') ? '/' : '\\';
             await invoke('start_download', {
                 id: downloadId,
                 url,
-                path: `${settings.download_dir}${sep}${filename}`,
+                path: `${settings.download_dir}/${filename}`,
             });
         } catch (e) {
             console.error("Failed to start download", e);
