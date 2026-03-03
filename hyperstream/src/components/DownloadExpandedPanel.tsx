@@ -113,7 +113,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
               try {
                 toast.info("Upload started... please wait.");
                 const result = await invoke("upload_to_cloud", {
-                  path: task.filename,
+                  path: filePath,
                   targetName: null,
                 });
                 toast.success("Success: " + result);
@@ -134,7 +134,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
                 try {
                   toast.info("Generating Preview (WebP)...");
                   await invoke("process_media", {
-                    path: task.filename,
+                    path: filePath,
                     action: "preview",
                   });
                   toast.success("Preview Generated!");

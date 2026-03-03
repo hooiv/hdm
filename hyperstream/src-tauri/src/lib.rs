@@ -238,6 +238,21 @@ fn select_directory() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn select_file(filter: Option<String>) -> Result<String, String> {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Select File");
+    
+    if let Some(ext) = filter {
+        dialog = dialog.add_filter("Audio", &[&ext]);
+    }
+    
+    match dialog.pick_file() {
+        Some(path) => Ok(path.to_string_lossy().to_string()),
+        None => Err("No file selected".to_string()),
+    }
+}
+
+#[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
     let folder = std::path::Path::new(&path)
         .parent()
@@ -1299,7 +1314,14 @@ fn get_chaos_config() -> serde_json::Value {
 
 #[tauri::command]
 async fn download_as_warc(url: String, save_path: String) -> Result<String, String> {
-    crate::warc_archiver::download_as_warc(url, std::path::PathBuf::from(save_path)).await
+    let path = std::path::PathBuf::from(&save_path);
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        let settings = settings::load_settings();
+        std::path::PathBuf::from(&settings.download_dir).join(path)
+    };
+    crate::warc_archiver::download_as_warc(url, resolved).await
 }
 
 #[tauri::command]
@@ -1556,6 +1578,7 @@ pub fn run() {
             open_file, 
             open_folder,
             select_directory,
+            select_file,
             schedule_download,
             get_scheduled_downloads,
             cancel_scheduled_download,
@@ -1660,8 +1683,7 @@ pub fn run() {
             download_zip_entry,  // Remote Q3
             export_data,         // Q4
             import_data,         // Q4
-            // Feeds
-            fetch_feed,           // Q5
+            // Search
             perform_search,
             // mount_drive,
             // unmount_drive,
@@ -1776,21 +1798,40 @@ pub fn run() {
             
             // Init P2P node
             let p2p_node = tauri::async_runtime::block_on(async {
-                network::p2p::P2PNode::new(14735).await.unwrap_or_else(|e| {
-                    println!("Warning: P2P failed to start: {}", e);
-                    panic!("P2P Init Failed: {}", e);
-                })
+                match network::p2p::P2PNode::new(14735).await {
+                    Ok(node) => node,
+                    Err(e) => {
+                        eprintln!("Warning: P2P failed to start on port 14735: {}. Trying fallback port...", e);
+                        // Try fallback port
+                        network::p2p::P2PNode::new(14736).await.unwrap_or_else(|e2| {
+                            eprintln!("Warning: P2P also failed on fallback port: {}. P2P features disabled.", e2);
+                            // Create a node that won't actually serve but won't crash
+                            tauri::async_runtime::block_on(async {
+                                network::p2p::P2PNode::new(0).await
+                                    .expect("P2P node creation with port 0 should not fail")
+                            })
+                        })
+                    }
+                }
             });
             let p2p_node = Arc::new(p2p_node);
             
             let p2p_file_map: crate::http_server::FileMap = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             
             let torrent_manager = tauri::async_runtime::block_on(async {
-                 let path = std::path::PathBuf::from("C:\\Users\\aditya\\Desktop\\Torrents");
+                 let settings = settings::load_settings();
+                 let mut path = std::path::PathBuf::from(&settings.download_dir);
+                 path.push("Torrents");
                  std::fs::create_dir_all(&path).unwrap_or_default();
                  network::bittorrent::manager::TorrentManager::new(path).await.unwrap_or_else(|e| {
-                     println!("Warning: Torrent Manager failed: {}", e);
-                     panic!("Torrent Init Failed: {}", e);
+                     eprintln!("Warning: Torrent Manager failed to start: {}", e);
+                     // Use a fallback temp directory instead of panicking
+                     let fallback = std::env::temp_dir().join("hyperstream_torrents");
+                     std::fs::create_dir_all(&fallback).unwrap_or_default();
+                     tauri::async_runtime::block_on(async {
+                         network::bittorrent::manager::TorrentManager::new(fallback).await
+                             .expect("Torrent Manager fallback also failed")
+                     })
                  })
             });
             let torrent_manager = Arc::new(torrent_manager);
