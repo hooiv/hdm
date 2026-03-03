@@ -98,7 +98,7 @@ pub async fn fuzz_url(url: String) -> Result<FuzzResult, String> {
     // Get baseline
     let baseline_start = Instant::now();
     let baseline = client.get(&url).send().await.map_err(|e| format!("Baseline failed: {}", e))?;
-    let baseline_elapsed = baseline_start.elapsed().as_millis() as u64;
+    let _baseline_elapsed = baseline_start.elapsed().as_millis() as u64;
     let baseline_status = baseline.status().as_u16();
     let baseline_size = baseline.bytes().await.map_err(|e| e.to_string())?.len();
 

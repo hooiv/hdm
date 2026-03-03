@@ -254,7 +254,7 @@ function App() {
       await invoke("start_download", {
         id: downloadId,
         url,
-        path: `${downloadDir}\\${filename}`,
+        path: `${downloadDir}/${filename}`,
         force,
         customHeaders: customHeaders || null
       });
@@ -296,7 +296,7 @@ function App() {
         await invoke("start_download", {
           id: task.id,
           url: task.url,
-          path: `${downloadDir}\\${task.filename}`
+          path: `${downloadDir}/${task.filename}`
         });
       } catch (error) {
         console.error("Failed to resume:", error);

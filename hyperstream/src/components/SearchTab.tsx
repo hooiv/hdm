@@ -3,6 +3,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
 import { Search, Download, Database, Loader2, HardDrive, ArrowDown, ArrowUp, Brain } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
+import { AppSettings } from '../types';
+
+let searchNextId = 0;
 
 interface SearchResult {
     title: string;
@@ -44,7 +47,14 @@ export const SearchTab: React.FC = () => {
         try {
             // Basic filename sanitization
             const filename = title.replace(/[^a-zA-Z0-9.-]/g, "_") + ".iso";
-            await invoke('start_download', { url, filename });
+            const settings = await invoke<AppSettings>('get_settings');
+            const downloadId = `search_${Date.now()}_${searchNextId++}`;
+            const sep = settings.download_dir.includes('/') ? '/' : '\\';
+            await invoke('start_download', {
+                id: downloadId,
+                url,
+                path: `${settings.download_dir}${sep}${filename}`,
+            });
         } catch (e) {
             console.error("Failed to start download", e);
             toast.error("Failed to start download");

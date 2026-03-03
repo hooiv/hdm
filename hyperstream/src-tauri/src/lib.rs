@@ -1,7 +1,7 @@
 pub mod core_state;
 pub use core_state::*;
 pub mod engine;
-pub use engine::session::*;
+use engine::session::*;
 use tauri::{Emitter, State, Manager};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::menu::{Menu, MenuItem};
@@ -1872,11 +1872,10 @@ pub fn run() {
                         if let Some(pct) = crate::power_manager::get_battery_percentage() {
                             if pct <= 15 && active_count > 0 {
                                 println!("🔋 Battery critical ({}%). Pausing all downloads.", pct);
-                                let mut to_pause = Vec::new();
-                                {
+                                let to_pause = {
                                     let downloads = state.downloads.lock().unwrap();
-                                    to_pause = downloads.keys().cloned().collect();
-                                }
+                                    downloads.keys().cloned().collect::<Vec<_>>()
+                                };
                                 
                                 let mut saved_downloads = crate::persistence::load_downloads().unwrap_or_default();
                                 let mut did_pause = false;
