@@ -124,7 +124,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
         try {
             await invoke('open_folder', { path: filePath });
         } catch (err) {
-            console.error('Failed to open folder:', err);
+            console.error('Failed to open folder:', filePath, err);
         }
     }, [filePath]);
 
