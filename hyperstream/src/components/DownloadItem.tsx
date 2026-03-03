@@ -121,7 +121,11 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
     // --- derived state for expanded panel passed via props or contained inside it ---
 
     const handleOpenFolder = React.useCallback(async () => {
-        await invoke('open_folder', { path: filePath });
+        try {
+            await invoke('open_folder', { path: filePath });
+        } catch (err) {
+            console.error('Failed to open folder:', err);
+        }
     }, [filePath]);
 
     return (
