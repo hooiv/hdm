@@ -203,7 +203,7 @@ export const Layout: React.FC<LayoutProps> = ({
                                     onChange={(e) => onSpeedLimitChange(parseInt(e.target.value))}
                                 >
                                     <option value="0">Unlimited Speed</option>
-                                    <option value="512">Limit: 500 KB/s</option>
+                                    <option value="512">Limit: 512 KB/s</option>
                                     <option value="1024">Limit: 1 MB/s</option>
                                     <option value="5120">Limit: 5 MB/s</option>
                                     <option value="10240">Limit: 10 MB/s</option>

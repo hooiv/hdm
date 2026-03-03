@@ -1254,11 +1254,19 @@ pub async fn reload_plugins(
     pm.load_plugins().await.map_err(|e| e.to_string())
 }
 
+/// Validate plugin filename to prevent path traversal attacks.
+fn validate_plugin_filename(filename: &str) -> Result<(), String> {
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") || filename.is_empty() {
+        return Err("Invalid plugin filename".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_plugin_source(filename: String) -> Result<String, String> {
-    let mut path = std::env::current_dir().unwrap_or_default().join("plugins");
-    path.push(format!("{}.lua", filename)); // Append extension if missing? Assuming filename is without ext?
-    // Start with safe check
+    validate_plugin_filename(&filename)?;
+    let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
+    let path = plugins_dir.join(format!("{}.lua", filename));
     if !path.exists() {
         return Err("Plugin file not found".to_string());
     }
@@ -1267,18 +1275,20 @@ pub async fn get_plugin_source(filename: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn save_plugin_source(filename: String, content: String) -> Result<(), String> {
-    let mut path = std::env::current_dir().unwrap_or_default().join("plugins");
-    if !path.exists() {
-        std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    validate_plugin_filename(&filename)?;
+    let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
+    if !plugins_dir.exists() {
+        std::fs::create_dir_all(&plugins_dir).map_err(|e| e.to_string())?;
     }
-    path.push(format!("{}.lua", filename));
+    let path = plugins_dir.join(format!("{}.lua", filename));
     std::fs::write(path, content).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_plugin(filename: String) -> Result<(), String> {
-    let mut path = std::env::current_dir().unwrap_or_default().join("plugins");
-    path.push(format!("{}.lua", filename));
+    validate_plugin_filename(&filename)?;
+    let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
+    let path = plugins_dir.join(format!("{}.lua", filename));
     if path.exists() {
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
