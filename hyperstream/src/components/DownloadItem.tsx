@@ -122,7 +122,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
 
     const handleOpenFolder = React.useCallback(async () => {
         await invoke('open_folder', { path: filePath });
-    }, [task.filename]);
+    }, [filePath]);
 
     return (
         <motion.div

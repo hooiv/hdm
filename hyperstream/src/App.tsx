@@ -266,10 +266,7 @@ function App() {
   };
 
 
-
-  // Wait, I can't change the component signature easily right now without breaking `DownloadList`.
-  // Let's implement the ref pattern for `tasks` to break the dependency cycle.
-
+  // Stable ref for tasks to avoid dependency cycles in memoized callbacks
   const tasksRef = useRef(tasks);
   useEffect(() => { tasksRef.current = tasks; }, [tasks]);
 
