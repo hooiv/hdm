@@ -47,11 +47,10 @@ impl LanApiServer {
         use rand::Rng;
         let mut rng = rand::rng();
         let code = format!("{:06}", rng.random_range(0..1000000));
-        // Store the code for verification
-        let code_clone = code.clone();
-        tokio::spawn(async move {
-            *CURRENT_PAIRING_CODE.write().await = Some(code_clone);
-        });
+        // Store the code synchronously for immediate availability
+        if let Ok(mut guard) = CURRENT_PAIRING_CODE.write() {
+            *guard = Some(code.clone());
+        }
         code
     }
 
@@ -145,7 +144,7 @@ impl LanApiServer {
 use lazy_static::lazy_static;
 lazy_static! {
     pub static ref BROADCAST_TX: tokio::sync::RwLock<Option<std::sync::Arc<tokio::sync::broadcast::Sender<String>>>> = tokio::sync::RwLock::new(None);
-    pub static ref CURRENT_PAIRING_CODE: tokio::sync::RwLock<Option<String>> = tokio::sync::RwLock::new(None);
+    pub static ref CURRENT_PAIRING_CODE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 }
 
 pub fn broadcast_download(url: String) {
@@ -196,23 +195,26 @@ async fn handle_pair(
     devices: Arc<RwLock<Vec<PairedDevice>>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     // Verify pairing code
-    let valid_code = CURRENT_PAIRING_CODE.read().await;
-    match valid_code.as_deref() {
-        Some(expected) if expected == req.code => {
-            // Code matches — proceed
-        }
-        _ => {
-            return Ok(warp::reply::json(&ApiResponse::<PairedDevice> {
-                success: false,
-                data: None,
-                error: Some("Invalid pairing code".to_string()),
-            }));
+    {
+        let valid_code = CURRENT_PAIRING_CODE.read().unwrap();
+        match valid_code.as_deref() {
+            Some(expected) if expected == req.code => {
+                // Code matches — proceed
+            }
+            _ => {
+                return Ok(warp::reply::json(&ApiResponse::<PairedDevice> {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid pairing code".to_string()),
+                }));
+            }
         }
     }
-    drop(valid_code);
 
     // Invalidate the code after successful pairing
-    *CURRENT_PAIRING_CODE.write().await = None;
+    if let Ok(mut guard) = CURRENT_PAIRING_CODE.write() {
+        *guard = None;
+    }
 
     let device = PairedDevice {
         id: uuid::Uuid::new_v4().to_string(),
