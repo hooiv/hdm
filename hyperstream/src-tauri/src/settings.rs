@@ -134,10 +134,16 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        // Get user's Desktop path
-        let desktop = std::env::var("USERPROFILE")
-            .map(|p| format!("{}\\Desktop", p))
-            .unwrap_or_else(|_| "C:\\Downloads".to_string());
+        // Get user's Desktop/Downloads path cross-platform
+        let desktop = dirs::download_dir()
+            .or_else(|| dirs::desktop_dir())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                std::env::var("USERPROFILE")
+                    .map(|p| format!("{}/Desktop", p))
+                    .or_else(|_| std::env::var("HOME").map(|p| format!("{}/Downloads", p)))
+                    .unwrap_or_else(|_| "Downloads".to_string())
+            });
         
         Self {
             download_dir: desktop,
@@ -204,7 +210,12 @@ impl Default for Settings {
 }
 
 fn get_settings_path() -> PathBuf {
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string());
+    if let Some(config_dir) = dirs::config_dir() {
+        return config_dir.join("hyperstream").join("settings.json");
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".hyperstream").join("settings.json")
 }
 

@@ -208,8 +208,8 @@ fn get_settings() -> serde_json::Value {
 }
 
 #[tauri::command]
-fn save_settings(json: serde_json::Value) -> Result<(), String> {
-    let new_settings: settings::Settings = serde_json::from_value(json).map_err(|e| e.to_string())?;
+fn save_settings(settings: serde_json::Value) -> Result<(), String> {
+    let new_settings: settings::Settings = serde_json::from_value(settings).map_err(|e| e.to_string())?;
     // Update speed limiter when settings change
     speed_limiter::GLOBAL_LIMITER.set_limit(new_settings.speed_limit_kbps * 1024);
     // Update clipboard monitor
@@ -219,10 +219,27 @@ fn save_settings(json: serde_json::Value) -> Result<(), String> {
 
 #[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
-    std::process::Command::new("cmd")
-        .args(["/c", "start", "", &path])
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
