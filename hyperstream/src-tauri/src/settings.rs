@@ -134,19 +134,19 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        // Get user's Desktop/Downloads path cross-platform
-        let desktop = dirs::download_dir()
+        // Get user's Downloads path cross-platform
+        let download_dir = dirs::download_dir()
             .or_else(|| dirs::desktop_dir())
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| {
-                std::env::var("USERPROFILE")
-                    .map(|p| format!("{}/Desktop", p))
-                    .or_else(|_| std::env::var("HOME").map(|p| format!("{}/Downloads", p)))
+                std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .map(|p| format!("{}/Downloads", p))
                     .unwrap_or_else(|_| "Downloads".to_string())
             });
         
         Self {
-            download_dir: desktop,
+            download_dir: download_dir,
             segments: 8,
             speed_limit_kbps: 0, // Unlimited
             clipboard_monitor: false,
