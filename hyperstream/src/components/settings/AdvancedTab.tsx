@@ -26,7 +26,10 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
   const toast = useToast();
 
   useEffect(() => {
-    invoke<ChaosConfig>("get_chaos_config").then(setChaos).catch(console.error);
+    invoke<ChaosConfig>("get_chaos_config").then(setChaos).catch((err) => {
+      console.error("Failed to load chaos config:", err);
+      toast.error("Failed to load chaos config");
+    });
   }, []);
 
   const updateChaos = async (update: Partial<ChaosConfig>) => {
