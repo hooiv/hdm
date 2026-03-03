@@ -247,8 +247,9 @@ fn save_settings(settings: serde_json::Value) -> Result<(), String> {
 fn open_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &path])
+        // Use explorer.exe directly instead of cmd /c start to avoid command injection
+        std::process::Command::new("explorer")
+            .arg(&path)
             .spawn()
             .map_err(|e| e.to_string())?;
     }

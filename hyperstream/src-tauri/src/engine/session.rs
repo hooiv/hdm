@@ -5,6 +5,7 @@ use crate::core_state::*;
 use crate::*;
 
 /// Extract filename from a path string, handling both Unix and Windows separators.
+/// Falls back to the full path string if no filename component can be extracted.
 fn extract_filename(path: &str) -> &str {
     std::path::Path::new(path)
         .file_name()
