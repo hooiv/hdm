@@ -308,11 +308,11 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                 <>
                                     {/* Force Download Toggle (Shift Key visualizer) */}
                                     <div
-                                        className={`flex items - center gap - 3 p - 3 rounded - lg border transition - all cursor - pointer ${isForceMode ? "bg-amber-900/20 border-amber-500/30" : "bg-slate-800/30 border-transparent hover:bg-slate-800/50"} `}
+                                        className={`flex items-center gap-3 p-3 rounded-lg border transition-all cursor-pointer ${isForceMode ? "bg-amber-900/20 border-amber-500/30" : "bg-slate-800/30 border-transparent hover:bg-slate-800/50"}`}
                                         onClick={() => setIsForceMode(!isForceMode)}
                                     >
                                         <div
-                                            className={`w - 4 h - 4 rounded border flex items - center justify - center transition - all ${isForceMode ? "bg-amber-500 border-amber-500" : "border-slate-600"} `}
+                                            className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${isForceMode ? "bg-amber-500 border-amber-500" : "border-slate-600"}`}
                                         >
                                             {isForceMode && (
                                                 <div className="w-2 h-2 bg-white rounded-sm" />
@@ -320,7 +320,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                         </div>
                                         <div className="flex-1">
                                             <p
-                                                className={`text - sm font - medium ${isForceMode ? "text-amber-400" : "text-slate-400"} `}
+                                                className={`text-sm font-medium ${isForceMode ? "text-amber-400" : "text-slate-400"}`}
                                             >
                                                 Force Download Mode
                                             </p>
@@ -335,14 +335,14 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
 
                                     {/* WARC Mode Toggle */}
                                     <div
-                                        className={`flex items - center gap - 3 p - 3 rounded - lg border transition - all cursor - pointer ${isWarcMode ? "bg-indigo-900/20 border-indigo-500/30" : "bg-slate-800/30 border-transparent hover:bg-slate-800/50"} `}
+                                        className={`flex items-center gap-3 p-3 rounded-lg border transition-all cursor-pointer ${isWarcMode ? "bg-indigo-900/20 border-indigo-500/30" : "bg-slate-800/30 border-transparent hover:bg-slate-800/50"}`}
                                         onClick={() => {
                                             setIsWarcMode(!isWarcMode);
                                             setIsForceMode(false);
                                         }}
                                     >
                                         <div
-                                            className={`w - 4 h - 4 rounded border flex items - center justify - center transition - all ${isWarcMode ? "bg-indigo-500 border-indigo-500" : "border-slate-600"} `}
+                                            className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${isWarcMode ? "bg-indigo-500 border-indigo-500" : "border-slate-600"}`}
                                         >
                                             {isWarcMode && (
                                                 <div className="w-2 h-2 bg-white rounded-sm" />
@@ -350,7 +350,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                         </div>
                                         <div className="flex-1">
                                             <p
-                                                className={`text - sm font - medium ${isWarcMode ? "text-indigo-400" : "text-slate-400"} `}
+                                                className={`text-sm font-medium ${isWarcMode ? "text-indigo-400" : "text-slate-400"}`}
                                             >
                                                 Save as WARC Archive
                                             </p>
@@ -372,12 +372,10 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                 </button>
                                 <button
                                     type="submit"
-                                    className={`flex - 1 py - 2.5 rounded - lg font - bold text - white shadow - lg transition - all flex items - center justify - center gap - 2 text - sm
-                                        ${isForceMode
+                                    className={`flex-1 py-2.5 rounded-lg font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 text-sm ${isForceMode
                                             ? "bg-gradient-to-r from-amber-600 to-orange-600 shadow-amber-900/20 hover:shadow-amber-900/40"
                                             : "bg-gradient-to-r from-blue-600 to-violet-600 shadow-blue-900/20 hover:shadow-blue-900/40"
-                                        }
-`}
+                                        }`}
                                 >
                                     {isForceMode ? "Force Start" : "Start Download"}
                                 </button>

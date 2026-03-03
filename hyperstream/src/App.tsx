@@ -184,18 +184,22 @@ function App() {
 
   // Listen for clipboard URLs
   useEffect(() => {
+    let dismissTimer: ReturnType<typeof setTimeout> | null = null;
     const unlistenPromise = listen<ClipboardUrlPayload>('clipboard_url', (event) => {
       const { url, filename } = event.payload;
       console.log('Clipboard URL detected:', url, filename);
       setClipboardData({ url, filename });
 
+      // Clear previous timer to avoid stale dismissals
+      if (dismissTimer) clearTimeout(dismissTimer);
       // Auto-dismiss after 10 seconds
-      setTimeout(() => {
+      dismissTimer = setTimeout(() => {
         setClipboardData(prev => prev?.url === url ? null : prev);
       }, 10000);
     });
 
     return () => {
+      if (dismissTimer) clearTimeout(dismissTimer);
       unlistenPromise.then(unlisten => unlisten());
     };
   }, []);
@@ -289,6 +293,10 @@ function App() {
   const tasksRef = useRef(tasks);
   useEffect(() => { tasksRef.current = tasks; }, [tasks]);
 
+  // Stable ref for downloadDir to avoid stale closures in memoized callbacks
+  const downloadDirRef = useRef(downloadDir);
+  useEffect(() => { downloadDirRef.current = downloadDir; }, [downloadDir]);
+
   const pauseDownloadMemo = React.useCallback(async (id: string) => {
     const task = tasksRef.current.find(t => t.id === id);
     if (!task) return;
@@ -312,7 +320,7 @@ function App() {
         await invoke("start_download", {
           id: task.id,
           url: task.url,
-          path: `${downloadDir}/${task.filename}`
+          path: `${downloadDirRef.current}/${task.filename}`
         });
       } catch (error) {
         console.error("Failed to resume:", error);
@@ -378,8 +386,8 @@ function App() {
   };
 
   const handleSpeedLimitChange = (limit: number) => {
-    const limitKbps = Math.floor(limit / 1024);
-    invoke("set_speed_limit", { limitKbps }).catch((err) => {
+    // Layout sends values in KB/s (512, 1024, 5120, 10240), backend expects KB/s
+    invoke("set_speed_limit", { limitKbps: limit }).catch((err) => {
       console.error("Failed to set speed limit:", err);
       toastRef.current?.addToast("Failed to set speed limit", "error");
     });

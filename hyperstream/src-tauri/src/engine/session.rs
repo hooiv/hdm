@@ -420,6 +420,7 @@ pub(crate) async fn start_download_impl(
         let path_worker = path.clone();
         let url_worker = url.clone(); // Alias for error handler
         let app_handle_clone = app.clone(); // Capture app handle for emitting events
+        let total_size_worker = total_size; // u64 is Copy
 
         let handle = tokio::spawn(async move {
             let (start, end) = {
@@ -515,14 +516,11 @@ pub(crate) async fn start_download_impl(
                          url: url_worker.clone(),
                          path: path_worker.clone(),
                          filename: filename_s,
-                         total_size: 0, // Should be passed but not captured? total_size is u64 Copy.
+                         total_size: total_size_worker,
                          downloaded_bytes: total_downloaded,
                          status: "WaitingForRefresh".to_string(),
                          segments: Some(segments),
                      };
-                     // We need total_size in worker? It's captured if Copy.
-                     // But we need to make sure `saved.total_size` is correct.
-                     // `total_size` is available in `start_download` scope.
                      
                      let _ = persistence::upsert_download(saved);
                      
@@ -601,7 +599,10 @@ pub(crate) async fn start_download_impl(
                             match item {
                                 Some(Ok(chunk)) => {
                                     let len = chunk.len() as u64;
-                                    tx_clone.send(WriteRequest { offset: current_pos, data: chunk.to_vec(), segment_id: i as u32 }).unwrap();
+                                    if tx_clone.send(WriteRequest { offset: current_pos, data: chunk.to_vec(), segment_id: i as u32 }).is_err() {
+                                        eprintln!("Thread {}: Disk writer channel closed, stopping segment.", i);
+                                        return; // Exit worker gracefully instead of panicking
+                                    }
                                     current_pos += len;
                                     
                                     // Update global progress ATOMICALLY (Lock-Free)
