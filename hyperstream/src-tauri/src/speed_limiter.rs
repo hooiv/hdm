@@ -48,7 +48,6 @@ impl SpeedLimiter {
     }
 
     /// Get current limit
-    #[allow(dead_code)]
     pub fn get_limit(&self) -> u64 {
         self.limit_bytes_per_sec.load(Ordering::SeqCst)
     }

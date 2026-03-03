@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { RefreshCw, Plus, Trash2, Download, Rss, ExternalLink } from 'lucide-react';
+import { useToast } from '../contexts/ToastContext';
 
 interface FeedConfig {
     id: string;
@@ -22,6 +23,7 @@ interface FeedItem {
 }
 
 export const FeedsTab: React.FC = () => {
+    const toast = useToast();
     const [feeds, setFeeds] = useState<FeedConfig[]>([]);
     const [selectedFeedId, setSelectedFeedId] = useState<string | null>(null);
     const [items, setItems] = useState<FeedItem[]>([]);
@@ -56,6 +58,7 @@ export const FeedsTab: React.FC = () => {
             }
         } catch (e) {
             console.error("Failed to load feeds", e);
+            toast.error("Failed to load feeds");
         }
     };
 
@@ -66,6 +69,7 @@ export const FeedsTab: React.FC = () => {
             setItems(fetchedItems);
         } catch (e) {
             console.error("Failed to fetch feed items", e);
+            toast.error("Failed to fetch feed items");
         }
         setLoading(false);
     };
@@ -90,6 +94,7 @@ export const FeedsTab: React.FC = () => {
             loadFeeds();
         } catch (e) {
             console.error("Failed to add feed", e);
+            toast.error("Failed to add feed");
         }
     };
 
@@ -102,6 +107,7 @@ export const FeedsTab: React.FC = () => {
             loadFeeds();
         } catch (err) {
             console.error("Failed to remove feed", err);
+            toast.error("Failed to remove feed");
         }
     };
 
@@ -110,6 +116,7 @@ export const FeedsTab: React.FC = () => {
             await invoke('start_download', { url, filename: title.replace(/[^a-zA-Z0-9.-]/g, "_") });
         } catch (e) {
             console.error("Failed to start download", e);
+            toast.error("Failed to start download");
         }
     };
 

@@ -46,7 +46,6 @@ impl ChatOpsManager {
     }
 
     /// Take all pending URLs (called from Tauri command to drain the queue)
-    #[allow(dead_code)]
     pub fn take_pending_urls(&self) -> Vec<String> {
         let mut urls = self.pending_urls.lock().unwrap();
         std::mem::take(&mut *urls)

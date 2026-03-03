@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Share2, Users, Upload, Download, Copy, Check, Wifi, AlertCircle } from 'lucide-react';
+import { useToast } from '../contexts/ToastContext';
 
 interface P2PShareSession {
     id: string;
@@ -22,6 +23,7 @@ interface P2PShareModalProps {
 }
 
 export default function P2PShareModal({ isOpen, onClose, downloadId, downloadName }: P2PShareModalProps) {
+    const toast = useToast();
     const [session, setSession] = useState<P2PShareSession | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -82,6 +84,7 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
                 onClose();
             } catch (e) {
                 console.error('Failed to close session:', e);
+                toast.error("Failed to close P2P session");
                 onClose();
             }
         } else {
