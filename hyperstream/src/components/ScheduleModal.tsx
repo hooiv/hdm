@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useToast } from '../contexts/ToastContext';
 
 interface ScheduleModalProps {
     isOpen: boolean;
@@ -24,6 +25,7 @@ interface TimeInfo {
 const generateId = () => `sched_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
 export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose }) => {
+    const toast = useToast();
     const [activeTab, setActiveTab] = useState<'list' | 'add'>('list');
     const [downloads, setDownloads] = useState<ScheduledDownload[]>([]);
     const [timeInfo, setTimeInfo] = useState<TimeInfo | null>(null);
@@ -97,6 +99,7 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose })
             await refreshData();
         } catch (err) {
             console.error('Failed to force start:', err);
+            toast.error("Failed to force start download");
         }
     };
 
@@ -106,6 +109,7 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose })
             await refreshData();
         } catch (err) {
             console.error('Failed to remove schedule:', err);
+            toast.error("Failed to remove scheduled download");
         }
     };
 

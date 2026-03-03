@@ -4,6 +4,7 @@ import { Folder, Activity } from "lucide-react";
 import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { motion } from "framer-motion";
+import { useToast } from "../../contexts/ToastContext";
 
 interface GeneralTabProps {
   settings: SettingsData;
@@ -14,6 +15,8 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
   settings,
   setSettings,
 }) => {
+  const toast = useToast();
+
   const handleSelectDir = async () => {
     try {
       const selected = await invoke<string>("select_directory");
@@ -22,6 +25,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
       }
     } catch (e) {
       console.error("Failed to select directory", e);
+      toast.error("Failed to select directory");
     }
   };
 

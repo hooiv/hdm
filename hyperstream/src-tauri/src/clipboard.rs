@@ -28,7 +28,6 @@ impl ClipboardMonitor {
         self.enabled.store(enabled, Ordering::SeqCst);
     }
 
-    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
     }

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
 import { Search, Download, Database, Loader2, HardDrive, ArrowDown, ArrowUp, Brain } from 'lucide-react';
+import { useToast } from '../contexts/ToastContext';
 
 interface SearchResult {
     title: string;
@@ -13,6 +14,7 @@ interface SearchResult {
 }
 
 export const SearchTab: React.FC = () => {
+    const toast = useToast();
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<SearchResult[]>([]);
     const [loading, setLoading] = useState(false);
@@ -33,6 +35,7 @@ export const SearchTab: React.FC = () => {
             setResults(data);
         } catch (err) {
             console.error("Search failed", err);
+            toast.error("Search failed");
         }
         setLoading(false);
     };
@@ -44,6 +47,7 @@ export const SearchTab: React.FC = () => {
             await invoke('start_download', { url, filename });
         } catch (e) {
             console.error("Failed to start download", e);
+            toast.error("Failed to start download");
         }
     };
 

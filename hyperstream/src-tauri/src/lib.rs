@@ -655,6 +655,20 @@ fn get_speed_limit() -> u64 {
     speed_limiter::GLOBAL_LIMITER.get_limit() / 1024
 }
 
+// ============ ChatOps Commands ============
+
+#[tauri::command]
+fn get_chatops_pending_urls(state: State<'_, AppState>) -> Vec<String> {
+    state.chatops_manager.take_pending_urls()
+}
+
+// ============ Clipboard Commands ============
+
+#[tauri::command]
+fn get_clipboard_monitor_enabled() -> bool {
+    clipboard::CLIPBOARD_MONITOR.is_enabled()
+}
+
 // ============ LAN API Commands ============
 
 #[tauri::command]
@@ -1526,6 +1540,10 @@ pub fn run() {
             acquire_bandwidth,
             set_speed_limit,
             get_speed_limit,
+            // ChatOps Commands
+            get_chatops_pending_urls,
+            // Clipboard Commands
+            get_clipboard_monitor_enabled,
             // Plugin Commands
             get_all_plugins,
             reload_plugins,
