@@ -227,16 +227,44 @@ fn open_file(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn select_directory() -> Result<String, String> {
+    let dialog = rfd::FileDialog::new()
+        .set_title("Select Download Directory");
+    
+    match dialog.pick_folder() {
+        Some(path) => Ok(path.to_string_lossy().to_string()),
+        None => Err("No directory selected".to_string()),
+    }
+}
+
+#[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
     let folder = std::path::Path::new(&path)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| path.clone());
     
-    std::process::Command::new("explorer")
-        .arg(&folder)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -506,7 +534,7 @@ async fn upload_to_cloud(app_handle: tauri::AppHandle, path: String, target_name
          p
     };
 
-    cloud_bridge::CloudBridge::upload_file(&settings, final_path.to_str().unwrap(), &key).await
+    cloud_bridge::CloudBridge::upload_file(&settings, final_path.to_str().ok_or_else(|| "Invalid path encoding".to_string())?, &key).await
 }
 
 // ============ Media Commands ============
@@ -540,16 +568,16 @@ async fn process_media(app_handle: tauri::AppHandle, path: String, action: Strin
          p
     };
     
-    let input_str = final_path.to_str().unwrap();
+    let input_str = final_path.to_str().ok_or_else(|| "Invalid path encoding".to_string())?;
 
     match action.as_str() {
         "preview" => {
             let output_path = final_path.with_extension("webp");
-            media_processor::MediaProcessor::generate_preview(input_str, output_path.to_str().unwrap())
+            media_processor::MediaProcessor::generate_preview(input_str, output_path.to_str().ok_or_else(|| "Invalid output path encoding".to_string())?)
         },
         "audio" => {
             let output_path = final_path.with_extension("mp3");
-            media_processor::MediaProcessor::extract_audio(input_str, output_path.to_str().unwrap())
+            media_processor::MediaProcessor::extract_audio(input_str, output_path.to_str().ok_or_else(|| "Invalid output path encoding".to_string())?)
         },
         _ => Err("Unknown action".to_string())
     }
@@ -1527,6 +1555,7 @@ pub fn run() {
             save_settings, 
             open_file, 
             open_folder,
+            select_directory,
             schedule_download,
             get_scheduled_downloads,
             cancel_scheduled_download,
