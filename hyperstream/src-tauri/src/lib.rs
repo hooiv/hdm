@@ -76,6 +76,32 @@ mod geofence;
 use persistence::SavedDownload;
 use settings::Settings;
 
+/// Resolve a file path that may be relative (just a filename) to an absolute path.
+/// Tries: 1) already absolute 2) download_dir/path 3) desktop/path
+pub fn resolve_download_path(path: &str, download_dir: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    let full_path = if p.is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        std::path::PathBuf::from(download_dir).join(path)
+    };
+    
+    if full_path.exists() {
+        return Ok(full_path);
+    }
+
+    // Fallback: try desktop
+    if let Some(desktop) = dirs::desktop_dir() {
+        let desktop_path = desktop.join(path);
+        if desktop_path.exists() {
+            return Ok(desktop_path);
+        }
+    }
+
+    // Return the download_dir-based path even if it doesn't exist yet
+    Ok(full_path)
+}
+
 // (id, start, end, cursor, state, speed)
 
 #[tauri::command]
@@ -584,21 +610,7 @@ async fn process_media(app_handle: tauri::AppHandle, path: String, action: Strin
     let settings_state = app_handle.state::<std::sync::Arc<tokio::sync::Mutex<Settings>>>();
     let settings = settings_state.lock().await;
 
-    // Resolve path (reusing logic from upload because it's robust-ish)
-    // TODO: move path resolution to helper
-    let full_path = if std::path::Path::new(&path).is_absolute() {
-        std::path::PathBuf::from(&path)
-    } else {
-         std::path::PathBuf::from(&settings.download_dir).join(&path)
-    };
-    
-    let final_path = if full_path.exists() {
-        full_path
-    } else {
-         let mut p = dirs::desktop_dir().ok_or("No desktop")?;
-         p.push(&path);
-         p
-    };
+    let final_path = resolve_download_path(&path, &settings.download_dir)?;
     
     let input_str = final_path.to_str().ok_or_else(|| "Invalid path encoding".to_string())?;
 
@@ -1533,6 +1545,8 @@ pub fn run() {
 
     // Create channel for HTTP server to send download requests
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<http_server::DownloadRequest>();
+    // Create channel for batch link requests from browser extension
+    let (batch_tx, mut batch_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<http_server::BatchLink>>();
     
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1856,10 +1870,11 @@ pub fn run() {
 
             // Spawn HTTP server
             let tx_clone = tx.clone();
+            let batch_tx_clone = batch_tx.clone();
             let map_clone = p2p_file_map.clone();
             let tm_clone = torrent_manager.clone();
             tauri::async_runtime::spawn(async move {
-                crate::http_server::start_server(tx_clone, map_clone, tm_clone).await;
+                crate::http_server::start_server(tx_clone, batch_tx_clone, map_clone, tm_clone).await;
             });
 
             // Spawn Game Mode Monitor
@@ -1995,6 +2010,15 @@ pub fn run() {
                         "url": req.url,
                         "filename": req.filename
                     }));
+                }
+            });
+
+            // Handle batch link requests from browser extension
+            let batch_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(links) = batch_rx.recv().await {
+                    println!("DEBUG: Batch links received from extension: {} links", links.len());
+                    let _ = batch_handle.emit("batch_links", &links);
                 }
             });
             

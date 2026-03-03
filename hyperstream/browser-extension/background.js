@@ -148,9 +148,18 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
                     const links = results[0].result;
                     console.log(`Found ${links.length} downloadable links`);
 
-                    // Send all links to HyperStream
-                    for (const link of links) {
-                        await sendToHyperStream(link.url, link.filename);
+                    // Send all links as batch to HyperStream for user review
+                    try {
+                        await fetch(`${HYPERSTREAM_URL}/batch`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(links.map(l => ({
+                                url: l.url,
+                                filename: l.filename
+                            })))
+                        });
+                    } catch (e) {
+                        console.error('Failed to send batch to HyperStream:', e);
                     }
 
                     showBadge(links.length.toString());

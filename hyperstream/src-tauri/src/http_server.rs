@@ -24,6 +24,12 @@ pub struct DownloadRequest {
     pub filename: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BatchLink {
+    pub url: String,
+    pub filename: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct DownloadResponse {
     pub success: bool,
@@ -32,10 +38,12 @@ pub struct DownloadResponse {
 }
 
 pub type DownloadSender = mpsc::UnboundedSender<DownloadRequest>;
+pub type BatchSender = mpsc::UnboundedSender<Vec<BatchLink>>;
 pub type FileMap = Arc<std::sync::Mutex<HashMap<String, StreamingSource>>>;
 
-pub async fn start_server(tx: DownloadSender, file_map: FileMap, torrent_manager: Arc<TorrentManager>) {
+pub async fn start_server(tx: DownloadSender, batch_tx: BatchSender, file_map: FileMap, torrent_manager: Arc<TorrentManager>) {
     let tx = Arc::new(tx);
+    let batch_tx = Arc::new(batch_tx);
     let torrent_manager = torrent_manager.clone();
     
     let cors = warp::cors()
@@ -48,6 +56,13 @@ pub async fn start_server(tx: DownloadSender, file_map: FileMap, torrent_manager
         .and(warp::body::json())
         .and(with_sender(tx.clone()))
         .and_then(handle_download);
+
+    let batch_tx_filter = warp::any().map(move || batch_tx.clone());
+    let batch_route = warp::path("batch")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(batch_tx_filter)
+        .and_then(handle_batch);
 
     let health_route = warp::path("health")
         .and(warp::get())
@@ -63,7 +78,7 @@ pub async fn start_server(tx: DownloadSender, file_map: FileMap, torrent_manager
         .and(tm_filter)
         .and_then(handle_p2p_request);
 
-    let routes = download_route.or(health_route).or(p2p_route).with(cors);
+    let routes = download_route.or(batch_route).or(health_route).or(p2p_route).with(cors);
 
     warp::serve(routes).run(([0, 0, 0, 0], 14733)).await; 
 }
@@ -193,6 +208,31 @@ async fn handle_download(
             let response = DownloadResponse {
                 success: false,
                 message: format!("Failed to start download: {}", e),
+                id: None,
+            };
+            Ok(warp::reply::json(&response))
+        }
+    }
+}
+
+async fn handle_batch(
+    links: Vec<BatchLink>,
+    batch_tx: Arc<BatchSender>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let count = links.len();
+    match batch_tx.send(links) {
+        Ok(_) => {
+            let response = DownloadResponse {
+                success: true,
+                message: format!("{} links queued for review", count),
+                id: None,
+            };
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let response = DownloadResponse {
+                success: false,
+                message: format!("Failed to queue batch: {}", e),
                 id: None,
             };
             Ok(warp::reply::json(&response))

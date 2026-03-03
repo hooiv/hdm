@@ -485,32 +485,18 @@ pub async fn process_media(app_handle: tauri::AppHandle, path: String, action: S
     let settings_state = app_handle.state::<std::sync::Arc<tokio::sync::Mutex<Settings>>>();
     let settings = settings_state.lock().await;
 
-    // Resolve path (reusing logic from upload because it's robust-ish)
-    // TODO: move path resolution to helper
-    let full_path = if std::path::Path::new(&path).is_absolute() {
-        std::path::PathBuf::from(&path)
-    } else {
-         std::path::PathBuf::from(&settings.download_dir).join(&path)
-    };
+    let final_path = crate::resolve_download_path(&path, &settings.download_dir)?;
     
-    let final_path = if full_path.exists() {
-        full_path
-    } else {
-         let mut p = dirs::desktop_dir().ok_or("No desktop")?;
-         p.push(&path);
-         p
-    };
-    
-    let input_str = final_path.to_str().unwrap();
+    let input_str = final_path.to_str().ok_or_else(|| "Invalid path encoding".to_string())?;
 
     match action.as_str() {
         "preview" => {
             let output_path = final_path.with_extension("webp");
-            media_processor::MediaProcessor::generate_preview(input_str, output_path.to_str().unwrap())
+            media_processor::MediaProcessor::generate_preview(input_str, output_path.to_str().ok_or_else(|| "Invalid output path encoding".to_string())?)
         },
         "audio" => {
             let output_path = final_path.with_extension("mp3");
-            media_processor::MediaProcessor::extract_audio(input_str, output_path.to_str().unwrap())
+            media_processor::MediaProcessor::extract_audio(input_str, output_path.to_str().ok_or_else(|| "Invalid output path encoding".to_string())?)
         },
         _ => Err("Unknown action".to_string())
     }
