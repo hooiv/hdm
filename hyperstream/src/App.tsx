@@ -107,11 +107,11 @@ function App() {
 
             const newTask: DownloadTask = {
               ...task,
-              progress: Math.min((downloaded / total) * 100, 100),
+              progress: total > 0 ? Math.min((downloaded / total) * 100, 100) : 0,
               downloaded,
               total,
               speed,
-              status: downloaded >= total ? 'Done' : 'Downloading',
+              status: total > 0 && downloaded >= total ? 'Done' : 'Downloading',
               segments
             };
 
@@ -152,7 +152,7 @@ function App() {
             id: d.id,
             filename: d.filename,
             url: d.url,
-            progress: (d.downloaded_bytes / d.total_size) * 100,
+            progress: d.total_size > 0 ? (d.downloaded_bytes / d.total_size) * 100 : 0,
             downloaded: d.downloaded_bytes,
             total: d.total_size,
             speed: 0,
@@ -219,6 +219,22 @@ function App() {
       const { url, filename } = event.payload;
       console.log('Scheduled download starting:', url, filename);
       startDownload(url, filename);
+    });
+
+    return () => {
+      unlistenPromise.then(unlisten => unlisten());
+    };
+  }, []);
+
+  // Listen for URL refresh events (update task URL when address is hot-swapped)
+  useEffect(() => {
+    const unlistenPromise = listen<{ id: string; url: string }>('download_refreshed', (event) => {
+      const { id, url } = event.payload;
+      console.log('Download URL refreshed:', id, url);
+      setTasks(prev => prev.map(t =>
+        t.id === id ? { ...t, url, status: 'Paused' as const } : t
+      ));
+      toastRef.current?.addToast('Download address refreshed — click Resume to retry', 'success');
     });
 
     return () => {
