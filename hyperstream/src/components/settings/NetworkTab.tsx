@@ -33,30 +33,40 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
-            className="pt-2"
+            className="pt-2 space-y-3"
           >
-            <label className="text-sm font-medium text-slate-400 mb-2 block">
-              Proxy URL
-            </label>
-            <input
-              type="text"
-              placeholder="http://127.0.0.1:8080"
-              value={settings.proxy_url}
-              onChange={(e) =>
-                setSettings({ ...settings, proxy_url: e.target.value })
-              }
-              className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
-            />
+            <div>
+              <label className="text-sm font-medium text-slate-400 mb-2 block">
+                Proxy Host
+              </label>
+              <input
+                type="text"
+                placeholder="127.0.0.1"
+                value={settings.proxy_host}
+                onChange={(e) =>
+                  setSettings({ ...settings, proxy_host: e.target.value })
+                }
+                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-400 mb-2 block">
+                Proxy Port
+              </label>
+              <input
+                type="number"
+                placeholder="8080"
+                value={settings.proxy_port}
+                onChange={(e) =>
+                  setSettings({ ...settings, proxy_port: parseInt(e.target.value) || 8080 })
+                }
+                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
+              />
+            </div>
           </motion.div>
         )}
 
         <div className="h-px bg-slate-700/50 my-2" />
-
-        <Toggle
-          label="VPN Mode"
-          checked={settings.vpn_mode}
-          onChange={(val) => setSettings({ ...settings, vpn_mode: val })}
-        />
 
         <div className="mt-4 pt-4 border-t border-slate-700/30">
           <h4 className="text-slate-200 font-medium mb-2">VPN Auto-Connect</h4>

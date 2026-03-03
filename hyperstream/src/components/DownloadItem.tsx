@@ -108,7 +108,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
     const [showP2PShare, setShowP2PShare] = useState(false);
 
     // Compute full file path from settings-based download directory
-    const filePath = `${downloadDir}\\${task.filename}`;
+    const filePath = `${downloadDir}/${task.filename}`;
 
     // Derived values
     const remainingBytes = task.total - task.downloaded;

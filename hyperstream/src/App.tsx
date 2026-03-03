@@ -138,12 +138,12 @@ function App() {
       try {
         // Load download directory from settings
         const settings = await invoke<AppSettings>('get_settings');
-        const dir = settings?.download_dir || `C:\\Users\\${import.meta.env.VITE_USER || 'user'}\\Desktop`;
+        const dir = settings?.download_dir || 'Downloads';
         setDownloadDir(dir);
       } catch (e) {
         console.error('Failed to load settings:', e);
         toastRef.current?.addToast('Failed to load settings', 'error');
-        setDownloadDir('C:\\Users\\user\\Desktop');
+        setDownloadDir('Downloads');
       }
       try {
         const saved = await invoke<SavedDownload[]>('get_downloads');
