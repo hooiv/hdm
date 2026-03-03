@@ -244,6 +244,6 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
     
     fs::write(&path, json).map_err(|e| e.to_string())?;
     
-    println!("DEBUG: Settings saved to {:?}", path);
+    eprintln!("[settings] Saved to {:?}", path);
     Ok(())
 }

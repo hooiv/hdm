@@ -22,7 +22,7 @@ impl PluginManager {
     pub fn get_plugins_dir(&self) -> PathBuf {
         // Use local 'plugins' folder for development ease, or app_data
         // For now, let's look in "plugins" relative to CWD
-        std::env::current_dir().unwrap().join("plugins")
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("plugins")
     }
 
     pub async fn load_plugins(&self) -> Result<(), String> {
@@ -41,7 +41,10 @@ impl PluginManager {
             if let Ok(entry) = entry {
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("lua") {
-                    let filename = path.file_stem().unwrap().to_string_lossy().to_string();
+                    let filename = match path.file_stem() {
+                        Some(stem) => stem.to_string_lossy().to_string(),
+                        None => continue, // Skip files with no stem
+                    };
                     
                     // Create Host
                     let client = rquest::Client::new();

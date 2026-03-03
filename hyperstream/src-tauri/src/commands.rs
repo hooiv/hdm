@@ -107,7 +107,7 @@ pub async fn export_data(path: String) -> Result<(), String> {
     
     let data = crate::import_export::ExportData {
         version: "1.0".to_string(),
-        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
         settings,
         downloads,
     };
@@ -503,7 +503,8 @@ pub async fn upload_to_cloud(app_handle: tauri::AppHandle, path: String, target_
          p
     };
 
-    cloud_bridge::CloudBridge::upload_file(&settings, final_path.to_str().unwrap(), &key).await
+    let path_str = final_path.to_str().ok_or("Path contains invalid UTF-8")?;
+    cloud_bridge::CloudBridge::upload_file(&settings, path_str, &key).await
 }
 
 #[tauri::command]
