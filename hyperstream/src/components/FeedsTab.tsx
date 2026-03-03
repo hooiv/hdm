@@ -3,6 +3,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { RefreshCw, Plus, Trash2, Download, Rss, ExternalLink } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
+import { AppSettings } from '../types';
+
+let feedNextId = 0;
 
 interface FeedConfig {
     id: string;
@@ -113,7 +116,15 @@ export const FeedsTab: React.FC = () => {
 
     const handleDownload = async (url: string, title: string) => {
         try {
-            await invoke('start_download', { url, filename: title.replace(/[^a-zA-Z0-9.-]/g, "_") });
+            const filename = title.replace(/[^a-zA-Z0-9.-]/g, "_");
+            const settings = await invoke<AppSettings>('get_settings');
+            const downloadId = `feed_${Date.now()}_${feedNextId++}`;
+            const sep = settings.download_dir.includes('/') ? '/' : '\\';
+            await invoke('start_download', {
+                id: downloadId,
+                url,
+                path: `${settings.download_dir}${sep}${filename}`,
+            });
         } catch (e) {
             console.error("Failed to start download", e);
             toast.error("Failed to start download");

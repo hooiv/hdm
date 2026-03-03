@@ -142,7 +142,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                 // Background task
                 invoke("download_as_warc", {
                     url,
-                    savePath: `${filename}${filename.endsWith(".warc") ? "" : ".warc"} `,
+                    savePath: `${filename}${filename.endsWith(".warc") ? "" : ".warc"}`,
                 })
                     .then(() =>
                         toast.success(`Successfully archived to WARC: ${filename} `),
