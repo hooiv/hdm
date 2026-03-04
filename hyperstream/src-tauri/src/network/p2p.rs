@@ -141,8 +141,9 @@ impl P2PNode {
                 Ok(Message::Text(text)) => {
                     if let Ok(p2p_msg) = serde_json::from_str::<P2PMessage>(&text) {
                         if let Some(response) = self.handle_message(p2p_msg).await {
-                            if let Ok(response_text) = serde_json::to_string(&response) {
-                                let _ = write.send(Message::Text(response_text)).await;
+                            match serde_json::to_string(&response) {
+                                Ok(response_text) => { let _ = write.send(Message::Text(response_text)).await; }
+                                Err(e) => eprintln!("[P2P] Failed to serialize response: {}", e),
                             }
                         }
                     }
