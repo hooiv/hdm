@@ -1,6 +1,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 import { Zap, Activity, HardDrive } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
 interface DashboardStatsProps {
     globalSpeed: number; // bytes per second
@@ -9,10 +10,10 @@ interface DashboardStatsProps {
 }
 
 const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes <= 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
@@ -44,7 +45,7 @@ export const DashboardStats: React.FC<DashboardStatsProps> = ({ globalSpeed, act
     );
 };
 
-const StatCard: React.FC<{ label: string; value: string; icon: any; color: 'cyan' | 'violet' | 'emerald'; trend: string }> = ({ label, value, icon: Icon, color, trend }) => {
+const StatCard: React.FC<{ label: string; value: string; icon: LucideIcon; color: 'cyan' | 'violet' | 'emerald'; trend: string }> = ({ label, value, icon: Icon, color, trend }) => {
     const colorClasses = {
         cyan: 'from-cyan-500/20 to-blue-500/5 border-cyan-500/30 text-cyan-400',
         violet: 'from-violet-500/20 to-fuchsia-500/5 border-violet-500/30 text-violet-400',

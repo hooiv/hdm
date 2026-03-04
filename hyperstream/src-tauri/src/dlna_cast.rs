@@ -78,7 +78,7 @@ pub async fn cast_to_dlna(file_path: String, device_location: String) -> Result<
         .unwrap_or("mp4")
         .to_lowercase();
 
-    let mime_type = match ext.as_str() {
+    let _mime_type = match ext.as_str() {
         "mp4" => "video/mp4",
         "mkv" => "video/x-matroska",
         "avi" => "video/x-msvideo",

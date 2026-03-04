@@ -7,8 +7,11 @@ use serde::{Serialize, Deserialize};
 use zip::ZipArchive;
 
 // Constants
+#[allow(dead_code)]
 const EOCD_SIGNATURE: u32 = 0x06054b50;
+#[allow(dead_code)]
 const CENTRAL_DIRECTORY_SIGNATURE: u32 = 0x02014b50;
+#[allow(dead_code)]
 const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;
 
 /// Information about a file in a ZIP archive

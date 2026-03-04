@@ -124,7 +124,7 @@ impl ChatOpsManager {
         } else if text.starts_with("/ping") {
             "🏓 Pong! HyperStream is online.".to_string()
         } else if text.starts_with("/add ") {
-            let url = text.strip_prefix("/add ").unwrap().trim();
+            let url = text.strip_prefix("/add ").unwrap_or("").trim();
             if url.is_empty() {
                 "❌ Provide a URL: /add https://example.com/file.zip".to_string()
             } else {

@@ -14,7 +14,7 @@ impl DiskMaterializer {
 
     /// Evaluates if the Swarm has successfully placed all blocks for an intent's target_hash
     /// into the local cache. If so, it materializes the final file instantly.
-    pub fn probe_and_manifest(&self, intent: &AcquisitionIntent) -> Result<bool, String> {
+    pub fn probe_and_manifest(&self, _intent: &AcquisitionIntent) -> Result<bool, String> {
         // Implementation logic:
         // 1. Check `cas_manager` or `cache_root` for presence of `intent.target_hash` fragments.
         // 2. If 100% fragments present:

@@ -42,11 +42,16 @@ impl LanApiServer {
         }
     }
 
-    /// Generate a pairing code (6 digits)
+    /// Generate a pairing code (6 digits) and store it for verification
     pub fn generate_pairing_code() -> String {
         use rand::Rng;
         let mut rng = rand::rng();
-        format!("{:06}", rng.random_range(0..1000000))
+        let code = format!("{:06}", rng.random_range(0..1000000));
+        // Store the code synchronously for immediate availability
+        if let Ok(mut guard) = CURRENT_PAIRING_CODE.write() {
+            *guard = Some(code.clone());
+        }
+        code
     }
 
     /// Generate QR code data for pairing
@@ -139,6 +144,7 @@ impl LanApiServer {
 use lazy_static::lazy_static;
 lazy_static! {
     pub static ref BROADCAST_TX: tokio::sync::RwLock<Option<std::sync::Arc<tokio::sync::broadcast::Sender<String>>>> = tokio::sync::RwLock::new(None);
+    pub static ref CURRENT_PAIRING_CODE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 }
 
 pub fn broadcast_download(url: String) {
@@ -188,7 +194,28 @@ async fn handle_pair(
     req: PairRequest,
     devices: Arc<RwLock<Vec<PairedDevice>>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    // TODO: Verify pairing code
+    // Verify pairing code
+    {
+        let valid_code = CURRENT_PAIRING_CODE.read().unwrap();
+        match valid_code.as_deref() {
+            Some(expected) if expected == req.code => {
+                // Code matches — proceed
+            }
+            _ => {
+                return Ok(warp::reply::json(&ApiResponse::<PairedDevice> {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid pairing code".to_string()),
+                }));
+            }
+        }
+    }
+
+    // Invalidate the code after successful pairing
+    if let Ok(mut guard) = CURRENT_PAIRING_CODE.write() {
+        *guard = None;
+    }
+
     let device = PairedDevice {
         id: uuid::Uuid::new_v4().to_string(),
         name: req.device_name,

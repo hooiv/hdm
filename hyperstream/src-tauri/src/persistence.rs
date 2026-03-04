@@ -19,8 +19,12 @@ pub struct SavedDownload {
 
 /// Get the path to the downloads.json file
 fn get_storage_path() -> PathBuf {
-    // Use a simple path in user's home directory for now
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string());
+    if let Some(config_dir) = dirs::config_dir() {
+        return config_dir.join("hyperstream").join("downloads.json");
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".hyperstream").join("downloads.json")
 }
 

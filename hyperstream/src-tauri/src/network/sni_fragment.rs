@@ -6,6 +6,7 @@ use tokio::net::TcpStream;
 
 /// A wrapper around TcpStream that fragments the initial TLS ClientHello packet.
 /// This is used to evade Deep Packet Inspection (DPI) that blocks sites based on SNI.
+#[allow(dead_code)]
 pub struct SniFragmentedStream {
     stream: TcpStream,
     fragmented: bool,

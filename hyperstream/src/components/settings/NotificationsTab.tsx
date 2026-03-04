@@ -51,6 +51,7 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
       setWebhooks(hooks);
     } catch (e) {
       console.error("Failed to load webhooks", e);
+      toast.error("Failed to load webhooks");
     }
   };
 
@@ -89,6 +90,7 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
       await invoke("play_test_sound", { soundType });
     } catch (e) {
       console.error("Failed to play test sound", e);
+      toast.error("Failed to play test sound");
     }
   };
 
@@ -201,6 +203,7 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                           }
                         } catch (e) {
                           console.error(e);
+                          toast.error("Failed to set custom sound");
                         }
                       }}
                       className="px-3 py-1.5 bg-blue-500/20 text-blue-400 border border-blue-500/20 hover:bg-blue-500/30 rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
@@ -219,6 +222,7 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                           if (input) input.value = "";
                         } catch (e) {
                           console.error(e);
+                          toast.error("Failed to clear custom sound");
                         }
                       }}
                       className="px-2 py-1.5 bg-slate-700/50 text-slate-400 hover:bg-slate-700 hover:text-slate-200 rounded-lg text-xs transition-colors"
@@ -484,6 +488,7 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                         await loadWebhooks();
                       } catch (e) {
                         console.error("Failed to add webhook", e);
+                        toast.error("Failed to add webhook");
                       }
                     }}
                     className="flex-1 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"

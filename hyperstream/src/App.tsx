@@ -11,6 +11,7 @@ import { ToastManager, ToastRef } from "./components/ToastManager";
 import { TorrentList } from "./components/TorrentList";
 import { FeedsTab } from "./components/FeedsTab";
 import { SearchTab } from "./components/SearchTab";
+import type { DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings } from "./types";
 
 // Lazy load modals to improve initial render time
 const AddDownloadModal = React.lazy(() => import("./components/AddDownloadModal").then(m => ({ default: m.AddDownloadModal })));
@@ -42,7 +43,7 @@ function App() {
   const [isSpiderOpen, setIsSpiderOpen] = useState(false);
   const [isTorrentModalOpen, setIsTorrentModalOpen] = useState(false);
   const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
-  const [batchLinks, setBatchLinks] = useState<Array<{ url: string; filename: string }>>([]);
+  const [batchLinks, setBatchLinks] = useState<BatchLink[]>([]);
   const [activeTab, setActiveTab] = useState<'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins'>('downloads');
   const [downloadDir, setDownloadDir] = useState<string>('');
 
@@ -69,7 +70,7 @@ function App() {
   const completedIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    const unlistenPromise = listen('download_progress', (event: any) => {
+    const unlistenPromise = listen<DownloadProgressPayload>('download_progress', (event) => {
       const { id, downloaded, total } = event.payload;
 
       setTasks(prevTasks => {
@@ -95,7 +96,7 @@ function App() {
             }
 
             // Unpack segments from tuple format
-            const segments = event.payload.segments ? event.payload.segments.map((s: any) => ({
+            const segments = event.payload.segments ? event.payload.segments.map((s) => ({
               id: s[0],
               start_byte: s[1],
               end_byte: s[2],
@@ -106,11 +107,11 @@ function App() {
 
             const newTask: DownloadTask = {
               ...task,
-              progress: Math.min((downloaded / total) * 100, 100),
+              progress: total > 0 ? Math.min((downloaded / total) * 100, 100) : 0,
               downloaded,
               total,
               speed,
-              status: downloaded >= total ? 'Done' : 'Downloading',
+              status: total > 0 && downloaded >= total ? 'Done' : 'Downloading',
               segments
             };
 
@@ -136,21 +137,22 @@ function App() {
     const loadInitialData = async () => {
       try {
         // Load download directory from settings
-        const settings: any = await invoke('get_settings');
-        const dir = settings?.download_dir || `C:\\Users\\${import.meta.env.VITE_USER || 'user'}\\Desktop`;
+        const settings = await invoke<AppSettings>('get_settings');
+        const dir = settings?.download_dir || 'Downloads';
         setDownloadDir(dir);
       } catch (e) {
         console.error('Failed to load settings:', e);
-        setDownloadDir('C:\\Users\\user\\Desktop');
+        toastRef.current?.addToast('Failed to load settings', 'error');
+        setDownloadDir('Downloads');
       }
       try {
-        const saved: any[] = await invoke('get_downloads');
+        const saved = await invoke<SavedDownload[]>('get_downloads');
         if (saved.length > 0) {
           const loadedTasks: DownloadTask[] = saved.map(d => ({
             id: d.id,
             filename: d.filename,
             url: d.url,
-            progress: (d.downloaded_bytes / d.total_size) * 100,
+            progress: d.total_size > 0 ? (d.downloaded_bytes / d.total_size) * 100 : 0,
             downloaded: d.downloaded_bytes,
             total: d.total_size,
             speed: 0,
@@ -160,6 +162,7 @@ function App() {
         }
       } catch (error) {
         console.error('Failed to load saved downloads:', error);
+        toastRef.current?.addToast('Failed to load saved downloads', 'error');
       }
     };
     loadInitialData();
@@ -167,7 +170,7 @@ function App() {
 
   // Listen for downloads from browser extension
   useEffect(() => {
-    const unlistenPromise = listen('extension_download', (event: any) => {
+    const unlistenPromise = listen<ExtensionDownloadPayload>('extension_download', (event) => {
       const { url, filename } = event.payload;
       console.log('Extension download received:', url, filename);
       const extractedFilename = filename || url.split('/').pop()?.split('?')[0] || 'download';
@@ -181,26 +184,30 @@ function App() {
 
   // Listen for clipboard URLs
   useEffect(() => {
-    const unlistenPromise = listen('clipboard_url', (event: any) => {
+    let dismissTimer: ReturnType<typeof setTimeout> | null = null;
+    const unlistenPromise = listen<ClipboardUrlPayload>('clipboard_url', (event) => {
       const { url, filename } = event.payload;
       console.log('Clipboard URL detected:', url, filename);
       setClipboardData({ url, filename });
 
+      // Clear previous timer to avoid stale dismissals
+      if (dismissTimer) clearTimeout(dismissTimer);
       // Auto-dismiss after 10 seconds
-      setTimeout(() => {
+      dismissTimer = setTimeout(() => {
         setClipboardData(prev => prev?.url === url ? null : prev);
       }, 10000);
     });
 
     return () => {
+      if (dismissTimer) clearTimeout(dismissTimer);
       unlistenPromise.then(unlisten => unlisten());
     };
   }, []);
 
   // Listen for batch links from browser extension
   useEffect(() => {
-    const unlistenPromise = listen('batch_links', (event: any) => {
-      const links = event.payload as Array<{ url: string; filename: string }>;
+    const unlistenPromise = listen<BatchLink[]>('batch_links', (event) => {
+      const links = event.payload;
       console.log('Batch links received:', links.length);
       setBatchLinks(links);
     });
@@ -212,10 +219,29 @@ function App() {
 
   // Listen for scheduled downloads starting
   useEffect(() => {
-    const unlistenPromise = listen('scheduled_download_start', (event: any) => {
+    const unlistenPromise = listen<ScheduledDownloadPayload>('scheduled_download_start', (event) => {
       const { url, filename } = event.payload;
       console.log('Scheduled download starting:', url, filename);
       startDownload(url, filename);
+    });
+
+    return () => {
+      unlistenPromise.then(unlisten => unlisten());
+    };
+  }, []);
+
+  // Listen for URL refresh events (update task URL when address is hot-swapped)
+  useEffect(() => {
+    const unlistenPromise = listen<{ id: string; url: string }>('download_refreshed', (event) => {
+      const { id, url } = event.payload;
+      console.log('Download URL refreshed:', id, url);
+      setTasks(prev => prev.map(t => {
+        if (t.id !== id) return t;
+        // Only reset Error status to Paused; leave Done/Downloading/Paused as-is
+        const newStatus = t.status === 'Error' ? 'Paused' as const : t.status;
+        return { ...t, url, status: newStatus };
+      }));
+      toastRef.current?.addToast('Download address refreshed — click Resume to retry', 'success');
     });
 
     return () => {
@@ -251,23 +277,25 @@ function App() {
       await invoke("start_download", {
         id: downloadId,
         url,
-        path: `${downloadDir}\\${filename}`,
+        path: `${downloadDir}/${filename}`,
         force,
         customHeaders: customHeaders || null
       });
     } catch (error) {
       console.error(error);
+      toastRef.current?.addToast(`Failed to start download: ${error}`, 'error');
       setTasks(prev => prev.map(t => t.id === downloadId ? { ...t, status: 'Error' } : t));
     }
   };
 
 
-
-  // Wait, I can't change the component signature easily right now without breaking `DownloadList`.
-  // Let's implement the ref pattern for `tasks` to break the dependency cycle.
-
+  // Stable ref for tasks to avoid dependency cycles in memoized callbacks
   const tasksRef = useRef(tasks);
   useEffect(() => { tasksRef.current = tasks; }, [tasks]);
+
+  // Stable ref for downloadDir to avoid stale closures in memoized callbacks
+  const downloadDirRef = useRef(downloadDir);
+  useEffect(() => { downloadDirRef.current = downloadDir; }, [downloadDir]);
 
   const pauseDownloadMemo = React.useCallback(async (id: string) => {
     const task = tasksRef.current.find(t => t.id === id);
@@ -280,6 +308,7 @@ function App() {
       setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Paused', speed: 0 } : t));
     } catch (error) {
       console.error("Failed to pause:", error);
+      toastRef.current?.addToast('Failed to pause download', 'error');
     }
   }, []); // Stable!
 
@@ -291,10 +320,11 @@ function App() {
         await invoke("start_download", {
           id: task.id,
           url: task.url,
-          path: `${downloadDir}\\${task.filename}`
+          path: `${downloadDirRef.current}/${task.filename}`
         });
       } catch (error) {
         console.error("Failed to resume:", error);
+        toastRef.current?.addToast('Failed to resume download', 'error');
         setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Error' } : t));
       }
     }
@@ -307,6 +337,7 @@ function App() {
       lastUpdate.current.delete(id);
     } catch (error) {
       console.error("Failed to delete:", error);
+      toastRef.current?.addToast('Failed to delete download', 'error');
     }
   }, []); // Stable
 
@@ -329,6 +360,7 @@ function App() {
       await invoke("move_download_item", { id, direction });
     } catch (error) {
       console.error("Failed to persist move:", error);
+      toastRef.current?.addToast('Failed to move download', 'error');
     }
   }, []); // Stable
 
@@ -354,10 +386,11 @@ function App() {
   };
 
   const handleSpeedLimitChange = (limit: number) => {
-    // TODO: Implement speed limit change
-    console.log("Speed limit changed:", limit);
-    // Invoke backend command if exists
-    // invoke("set_global_speed_limit", { limitBytes: limit });
+    // Layout sends values in KB/s (512, 1024, 5120, 10240), backend expects KB/s
+    invoke("set_speed_limit", { limitKbps: limit }).catch((err) => {
+      console.error("Failed to set speed limit:", err);
+      toastRef.current?.addToast("Failed to set speed limit", "error");
+    });
   };
 
   const handleClipboardDownload = (url: string, filename: string) => {
@@ -379,7 +412,10 @@ function App() {
               if (text && (text.startsWith('http') || text.startsWith('magnet:'))) {
                 console.log("Force Download Key detected. Adding:", text);
                 if (text.startsWith('magnet:')) {
-                  invoke("add_magnet_link", { magnet: text }).catch(console.error);
+                  invoke("add_magnet_link", { magnet: text }).catch((err) => {
+                    console.error("Magnet link failed:", err);
+                    toastRef.current?.addToast(`Failed to add magnet link: ${err}`, 'error');
+                  });
                 } else {
                   const filename = text.split('/').pop()?.split('?')[0] || 'clipboard_download';
                   startDownload(text, filename);
@@ -454,7 +490,10 @@ function App() {
             onClose={() => setIsTorrentModalOpen(false)}
             onAdd={(magnet) => {
               console.log("Adding magnet:", magnet);
-              invoke("add_magnet_link", { magnet }).catch(console.error);
+              invoke("add_magnet_link", { magnet }).catch((err) => {
+                console.error("Magnet link failed:", err);
+                toastRef.current?.addToast(`Failed to add magnet: ${err}`, 'error');
+              });
             }}
           />
         )}

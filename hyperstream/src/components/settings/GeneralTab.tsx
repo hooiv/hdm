@@ -4,6 +4,7 @@ import { Folder, Activity } from "lucide-react";
 import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { motion } from "framer-motion";
+import { useToast } from "../../contexts/ToastContext";
 
 interface GeneralTabProps {
   settings: SettingsData;
@@ -14,6 +15,8 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
   settings,
   setSettings,
 }) => {
+  const toast = useToast();
+
   const handleSelectDir = async () => {
     try {
       const selected = await invoke<string>("select_directory");
@@ -22,6 +25,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
       }
     } catch (e) {
       console.error("Failed to select directory", e);
+      toast.error("Failed to select directory");
     }
   };
 
@@ -54,17 +58,17 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
 
           <div className="space-y-2">
             <label className="text-sm font-medium text-slate-400">
-              Concurrent Downloads
+              Concurrent Segments
             </label>
             <input
               type="number"
               min="1"
-              max="10"
-              value={settings.max_concurrent_downloads}
+              max="32"
+              value={settings.segments}
               onChange={(e) =>
                 setSettings({
                   ...settings,
-                  max_concurrent_downloads: parseInt(e.target.value) || 1,
+                  segments: parseInt(e.target.value) || 1,
                 })
               }
               className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-blue-500/50"
@@ -77,23 +81,23 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 Speed Limit (KB/s)
               </label>
               <Toggle
-                checked={settings.speed_limit_enabled}
+                checked={settings.speed_limit_kbps > 0}
                 onChange={(val) =>
-                  setSettings({ ...settings, speed_limit_enabled: val })
+                  setSettings({ ...settings, speed_limit_kbps: val ? 1024 : 0 })
                 }
               />
             </div>
             <input
               type="number"
-              disabled={!settings.speed_limit_enabled}
-              value={settings.speed_limit_rate}
+              disabled={settings.speed_limit_kbps === 0}
+              value={settings.speed_limit_kbps}
               onChange={(e) =>
                 setSettings({
                   ...settings,
-                  speed_limit_rate: parseInt(e.target.value) || 0,
+                  speed_limit_kbps: parseInt(e.target.value) || 0,
                 })
               }
-              className={`w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-blue-500/50 transition-opacity ${!settings.speed_limit_enabled ? "opacity-50" : ""}`}
+              className={`w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-blue-500/50 transition-opacity ${settings.speed_limit_kbps === 0 ? "opacity-50" : ""}`}
             />
           </div>
         </div>

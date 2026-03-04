@@ -120,6 +120,9 @@ impl DownloadManager {
 
     /// Get total download progress (0.0 - 100.0)
     pub fn total_progress(&self) -> f64 {
+        if self.file_size == 0 {
+            return 0.0;
+        }
         if let Ok(segments) = self.segments.read() {
             let total_downloaded: u64 = segments.iter()
                 .map(|s| s.downloaded_cursor - s.start_byte)

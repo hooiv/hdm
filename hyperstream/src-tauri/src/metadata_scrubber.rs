@@ -73,8 +73,8 @@ const JPEG_APP14: u8 = 0xEE;
 const JPEG_COM: u8 = 0xFE;   // Comment
 
 fn is_metadata_marker(marker: u8) -> bool {
-    // APP1 (EXIF), APP2 (ICC), APP12-APP14, COM
-    marker == JPEG_APP1 || marker == JPEG_APP13 || marker == JPEG_COM
+    // APP1 (EXIF), APP2 (ICC Profile), APP12-APP14, COM
+    marker == JPEG_APP1 || marker == JPEG_APP2 || marker == JPEG_APP13 || marker == JPEG_COM
         || (marker >= JPEG_APP12 && marker <= JPEG_APP14)
 }
 
@@ -130,6 +130,7 @@ fn scrub_jpeg(path: &str) -> Result<ScrubResult, String> {
             // Strip this segment
             let name = match marker {
                 JPEG_APP1 => "EXIF/XMP",
+                JPEG_APP2 => "ICC Profile",
                 JPEG_APP13 => "IPTC",
                 JPEG_COM => "Comment",
                 _ => "AppData",
@@ -184,6 +185,7 @@ fn get_jpeg_metadata_info(path: &str) -> Result<MetadataInfo, String> {
         if is_metadata_marker(marker) {
             let name = match marker {
                 JPEG_APP1 => "EXIF/XMP",
+                JPEG_APP2 => "ICC Profile",
                 JPEG_APP13 => "IPTC",
                 JPEG_COM => "Comment",
                 _ => "AppData",

@@ -1,8 +1,15 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Activity, ShieldAlert } from "lucide-react";
 import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { useToast } from "../../contexts/ToastContext";
+
+interface ChaosConfig {
+  enabled: boolean;
+  latency_ms: number;
+  error_rate: number;
+}
 
 interface AdvancedTabProps {
   settings: SettingsData;
@@ -10,12 +17,34 @@ interface AdvancedTabProps {
 }
 
 export const AdvancedTab: React.FC<AdvancedTabProps> = ({
-  settings,
-  setSettings,
+  settings: _settings,
+  setSettings: _setSettings,
 }) => {
   const [wfpAppPath, setWfpAppPath] = useState("");
   const [isWfpProcessing, setIsWfpProcessing] = useState(false);
+  const [chaos, setChaos] = useState<ChaosConfig>({ enabled: false, latency_ms: 0, error_rate: 0 });
   const toast = useToast();
+
+  useEffect(() => {
+    invoke<ChaosConfig>("get_chaos_config").then(setChaos).catch((err) => {
+      console.error("Failed to load chaos config:", err);
+      toast.error("Failed to load chaos config");
+    });
+  }, []);
+
+  const updateChaos = async (update: Partial<ChaosConfig>) => {
+    const newChaos = { ...chaos, ...update };
+    setChaos(newChaos);
+    try {
+      await invoke("set_chaos_config", {
+        latencyMs: newChaos.latency_ms,
+        errorRate: newChaos.error_rate,
+        enabled: newChaos.enabled,
+      });
+    } catch (e) {
+      toast.error("Failed to update chaos config: " + e);
+    }
+  };
 
   const handleWfpChange = async (blocked: boolean) => {
     if (!wfpAppPath) {
@@ -41,31 +70,28 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
     <div className="space-y-8 animate-in fade-in duration-300">
       <SectionHeader icon={Activity} title="Advanced" />
       <div
-        className={`p-5 rounded-xl border transition-all ${settings.chaos_mode ? "bg-red-500/10 border-red-500/30" : "bg-slate-800/20 border-slate-700/30"}`}
+        className={`p-5 rounded-xl border transition-all ${chaos.enabled ? "bg-red-500/10 border-red-500/30" : "bg-slate-800/20 border-slate-700/30"}`}
       >
         <Toggle
           label="Chaos Mode (Experimental)"
-          checked={settings.chaos_mode}
-          onChange={(val) => setSettings({ ...settings, chaos_mode: val })}
+          checked={chaos.enabled}
+          onChange={(val) => updateChaos({ enabled: val })}
         />
         <p className="text-xs text-slate-500 mt-2 leading-relaxed">
           Enables experimental parallel fetching algorithms. May use significant
           bandwidth and CPU. Use with caution.
         </p>
 
-        {settings.chaos_mode && (
+        {chaos.enabled && (
           <div className="mt-4 grid gap-4 grid-cols-2">
             <div className="space-y-1">
               <label className="text-xs text-red-400">Latency (ms)</label>
               <input
                 type="number"
                 className="w-full bg-slate-900 border border-red-900/30 rounded px-2 py-1 text-red-200 text-sm"
-                value={settings.chaos_latency_ms}
+                value={chaos.latency_ms}
                 onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    chaos_latency_ms: parseInt(e.target.value) || 0,
-                  })
+                  updateChaos({ latency_ms: parseInt(e.target.value) || 0 })
                 }
               />
             </div>
@@ -74,12 +100,9 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
               <input
                 type="number"
                 className="w-full bg-slate-900 border border-red-900/30 rounded px-2 py-1 text-red-200 text-sm"
-                value={settings.chaos_error_rate}
+                value={chaos.error_rate}
                 onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    chaos_error_rate: parseInt(e.target.value) || 0,
-                  })
+                  updateChaos({ error_rate: parseInt(e.target.value) || 0 })
                 }
               />
             </div>

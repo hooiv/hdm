@@ -30,10 +30,10 @@ interface DownloadItemProps {
 }
 
 const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes <= 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
@@ -108,7 +108,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
     const [showP2PShare, setShowP2PShare] = useState(false);
 
     // Compute full file path from settings-based download directory
-    const filePath = `${downloadDir}\\${task.filename}`;
+    const filePath = `${downloadDir}/${task.filename}`;
 
     // Derived values
     const remainingBytes = task.total - task.downloaded;
@@ -121,8 +121,12 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
     // --- derived state for expanded panel passed via props or contained inside it ---
 
     const handleOpenFolder = React.useCallback(async () => {
-        await invoke('open_folder', { path: filePath });
-    }, [task.filename]);
+        try {
+            await invoke('open_folder', { path: filePath });
+        } catch (err) {
+            console.error('Failed to open folder:', filePath, err);
+        }
+    }, [filePath]);
 
     return (
         <motion.div

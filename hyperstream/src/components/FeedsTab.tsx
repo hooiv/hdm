@@ -2,6 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { RefreshCw, Plus, Trash2, Download, Rss, ExternalLink } from 'lucide-react';
+import { useToast } from '../contexts/ToastContext';
+import { AppSettings } from '../types';
+
+let feedNextId = 0;
 
 interface FeedConfig {
     id: string;
@@ -22,6 +26,7 @@ interface FeedItem {
 }
 
 export const FeedsTab: React.FC = () => {
+    const toast = useToast();
     const [feeds, setFeeds] = useState<FeedConfig[]>([]);
     const [selectedFeedId, setSelectedFeedId] = useState<string | null>(null);
     const [items, setItems] = useState<FeedItem[]>([]);
@@ -56,6 +61,7 @@ export const FeedsTab: React.FC = () => {
             }
         } catch (e) {
             console.error("Failed to load feeds", e);
+            toast.error("Failed to load feeds");
         }
     };
 
@@ -66,6 +72,7 @@ export const FeedsTab: React.FC = () => {
             setItems(fetchedItems);
         } catch (e) {
             console.error("Failed to fetch feed items", e);
+            toast.error("Failed to fetch feed items");
         }
         setLoading(false);
     };
@@ -90,6 +97,7 @@ export const FeedsTab: React.FC = () => {
             loadFeeds();
         } catch (e) {
             console.error("Failed to add feed", e);
+            toast.error("Failed to add feed");
         }
     };
 
@@ -102,14 +110,23 @@ export const FeedsTab: React.FC = () => {
             loadFeeds();
         } catch (err) {
             console.error("Failed to remove feed", err);
+            toast.error("Failed to remove feed");
         }
     };
 
     const handleDownload = async (url: string, title: string) => {
         try {
-            await invoke('start_download', { url, filename: title.replace(/[^a-zA-Z0-9.-]/g, "_") });
+            const filename = title.replace(/[^a-zA-Z0-9.-]/g, "_");
+            const settings = await invoke<AppSettings>('get_settings');
+            const downloadId = `feed_${Date.now()}_${feedNextId++}`;
+            await invoke('start_download', {
+                id: downloadId,
+                url,
+                path: `${settings.download_dir}/${filename}`,
+            });
         } catch (e) {
             console.error("Failed to start download", e);
+            toast.error("Failed to start download");
         }
     };
 

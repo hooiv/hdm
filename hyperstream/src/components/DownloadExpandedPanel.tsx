@@ -89,8 +89,8 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
                 e.stopPropagation();
                 try {
                   const port = await invoke("mount_drive", {
-                    id: task.id,
-                    path: task.filename,
+                    path: filePath,
+                    letter: "Z",
                   });
                   toast.success(
                     `Mounted on WebDAV Port: ${port}.\n\nUse 'Map Network Drive' to http://127.0.0.1:${port}`,
@@ -113,7 +113,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
               try {
                 toast.info("Upload started... please wait.");
                 const result = await invoke("upload_to_cloud", {
-                  path: task.filename,
+                  path: filePath,
                   targetName: null,
                 });
                 toast.success("Success: " + result);
@@ -134,7 +134,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
                 try {
                   toast.info("Generating Preview (WebP)...");
                   await invoke("process_media", {
-                    path: task.filename,
+                    path: filePath,
                     action: "preview",
                   });
                   toast.success("Preview Generated!");
@@ -248,7 +248,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
               }}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20"
             >
-              <Shield size={14} /> Valiate C2PA
+              <Shield size={14} /> Validate C2PA
             </button>
           )}
 

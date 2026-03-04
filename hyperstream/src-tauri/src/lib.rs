@@ -1,7 +1,7 @@
 pub mod core_state;
 pub use core_state::*;
 pub mod engine;
-pub use engine::session::*;
+use engine::session::*;
 use tauri::{Emitter, State, Manager};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::menu::{Menu, MenuItem};
@@ -75,6 +75,32 @@ mod geofence;
 
 use persistence::SavedDownload;
 use settings::Settings;
+
+/// Resolve a file path that may be relative (just a filename) to an absolute path.
+/// Tries: 1) already absolute 2) download_dir/path 3) desktop/path
+pub fn resolve_download_path(path: &str, download_dir: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    let full_path = if p.is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        std::path::PathBuf::from(download_dir).join(path)
+    };
+    
+    if full_path.exists() {
+        return Ok(full_path);
+    }
+
+    // Fallback: try desktop
+    if let Some(desktop) = dirs::desktop_dir() {
+        let desktop_path = desktop.join(path);
+        if desktop_path.exists() {
+            return Ok(desktop_path);
+        }
+    }
+
+    // Return the download_dir-based path even if it doesn't exist yet
+    Ok(full_path)
+}
 
 // (id, start, end, cursor, state, speed)
 
@@ -208,8 +234,8 @@ fn get_settings() -> serde_json::Value {
 }
 
 #[tauri::command]
-fn save_settings(json: serde_json::Value) -> Result<(), String> {
-    let new_settings: settings::Settings = serde_json::from_value(json).map_err(|e| e.to_string())?;
+fn save_settings(settings: serde_json::Value) -> Result<(), String> {
+    let new_settings: settings::Settings = serde_json::from_value(settings).map_err(|e| e.to_string())?;
     // Update speed limiter when settings change
     speed_limiter::GLOBAL_LIMITER.set_limit(new_settings.speed_limit_kbps * 1024);
     // Update clipboard monitor
@@ -219,11 +245,55 @@ fn save_settings(json: serde_json::Value) -> Result<(), String> {
 
 #[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
-    std::process::Command::new("cmd")
-        .args(["/c", "start", "", &path])
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        // Use explorer.exe directly instead of cmd /c start to avoid command injection
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
+}
+
+#[tauri::command]
+fn select_directory() -> Result<String, String> {
+    let dialog = rfd::FileDialog::new()
+        .set_title("Select Download Directory");
+    
+    match dialog.pick_folder() {
+        Some(path) => Ok(path.to_string_lossy().to_string()),
+        None => Err("No directory selected".to_string()),
+    }
+}
+
+#[tauri::command]
+fn select_file(filter: Option<String>) -> Result<String, String> {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Select File");
+    
+    if let Some(ext) = filter {
+        dialog = dialog.add_filter("Audio", &[&ext]);
+    }
+    
+    match dialog.pick_file() {
+        Some(path) => Ok(path.to_string_lossy().to_string()),
+        None => Err("No file selected".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -233,10 +303,27 @@ fn open_folder(path: String) -> Result<(), String> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| path.clone());
     
-    std::process::Command::new("explorer")
-        .arg(&folder)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -506,7 +593,7 @@ async fn upload_to_cloud(app_handle: tauri::AppHandle, path: String, target_name
          p
     };
 
-    cloud_bridge::CloudBridge::upload_file(&settings, final_path.to_str().unwrap(), &key).await
+    cloud_bridge::CloudBridge::upload_file(&settings, final_path.to_str().ok_or_else(|| "Invalid path encoding".to_string())?, &key).await
 }
 
 // ============ Media Commands ============
@@ -524,32 +611,18 @@ async fn process_media(app_handle: tauri::AppHandle, path: String, action: Strin
     let settings_state = app_handle.state::<std::sync::Arc<tokio::sync::Mutex<Settings>>>();
     let settings = settings_state.lock().await;
 
-    // Resolve path (reusing logic from upload because it's robust-ish)
-    // TODO: move path resolution to helper
-    let full_path = if std::path::Path::new(&path).is_absolute() {
-        std::path::PathBuf::from(&path)
-    } else {
-         std::path::PathBuf::from(&settings.download_dir).join(&path)
-    };
+    let final_path = resolve_download_path(&path, &settings.download_dir)?;
     
-    let final_path = if full_path.exists() {
-        full_path
-    } else {
-         let mut p = dirs::desktop_dir().ok_or("No desktop")?;
-         p.push(&path);
-         p
-    };
-    
-    let input_str = final_path.to_str().unwrap();
+    let input_str = final_path.to_str().ok_or_else(|| "Invalid path encoding".to_string())?;
 
     match action.as_str() {
         "preview" => {
             let output_path = final_path.with_extension("webp");
-            media_processor::MediaProcessor::generate_preview(input_str, output_path.to_str().unwrap())
+            media_processor::MediaProcessor::generate_preview(input_str, output_path.to_str().ok_or_else(|| "Invalid output path encoding".to_string())?)
         },
         "audio" => {
             let output_path = final_path.with_extension("mp3");
-            media_processor::MediaProcessor::extract_audio(input_str, output_path.to_str().unwrap())
+            media_processor::MediaProcessor::extract_audio(input_str, output_path.to_str().ok_or_else(|| "Invalid output path encoding".to_string())?)
         },
         _ => Err("Unknown action".to_string())
     }
@@ -653,6 +726,20 @@ fn set_speed_limit(limit_kbps: u64) {
 #[tauri::command]
 fn get_speed_limit() -> u64 {
     speed_limiter::GLOBAL_LIMITER.get_limit() / 1024
+}
+
+// ============ ChatOps Commands ============
+
+#[tauri::command]
+fn get_chatops_pending_urls(state: State<'_, AppState>) -> Vec<String> {
+    state.chatops_manager.take_pending_urls()
+}
+
+// ============ Clipboard Commands ============
+
+#[tauri::command]
+fn get_clipboard_monitor_enabled() -> bool {
+    clipboard::CLIPBOARD_MONITOR.is_enabled()
 }
 
 // ============ LAN API Commands ============
@@ -1257,7 +1344,14 @@ fn get_chaos_config() -> serde_json::Value {
 
 #[tauri::command]
 async fn download_as_warc(url: String, save_path: String) -> Result<String, String> {
-    crate::warc_archiver::download_as_warc(url, std::path::PathBuf::from(save_path)).await
+    let path = std::path::PathBuf::from(&save_path);
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        let settings = settings::load_settings();
+        std::path::PathBuf::from(&settings.download_dir).join(path)
+    };
+    crate::warc_archiver::download_as_warc(url, resolved).await
 }
 
 #[tauri::command]
@@ -1452,58 +1546,11 @@ pub fn run() {
 
     // Create channel for HTTP server to send download requests
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<http_server::DownloadRequest>();
+    // Create channel for batch link requests from browser extension
+    let (batch_tx, mut batch_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<http_server::BatchLink>>();
     
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            // System Tray Setup
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let show_i = MenuItem::with_id(app, "show", "Show HyperStream", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
-
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| match event {
-                    TrayIconEvent::Click {
-                        button: tauri::tray::MouseButton::Left,
-                        ..
-                    } => {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    _ => {}
-                })
-                .build(app)?;
-
-            Ok(())
-        })
-        .on_window_event(|window, event| match event {
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                // Minimize to tray instead of closing for the main window
-                if window.label() == "main" {
-                    let _ = window.hide();
-                    api.prevent_close();
-                }
-            }
-            _ => {}
-        })
         .invoke_handler(tauri::generate_handler![
             start_download, 
             pause_download, 
@@ -1513,6 +1560,8 @@ pub fn run() {
             save_settings, 
             open_file, 
             open_folder,
+            select_directory,
+            select_file,
             schedule_download,
             get_scheduled_downloads,
             cancel_scheduled_download,
@@ -1526,6 +1575,10 @@ pub fn run() {
             acquire_bandwidth,
             set_speed_limit,
             get_speed_limit,
+            // ChatOps Commands
+            get_chatops_pending_urls,
+            // Clipboard Commands
+            get_clipboard_monitor_enabled,
             // Plugin Commands
             get_all_plugins,
             reload_plugins,
@@ -1613,8 +1666,7 @@ pub fn run() {
             download_zip_entry,  // Remote Q3
             export_data,         // Q4
             import_data,         // Q4
-            // Feeds
-            fetch_feed,           // Q5
+            // Search
             perform_search,
             // mount_drive,
             // unmount_drive,
@@ -1645,6 +1697,7 @@ pub fn run() {
             extract_archive,
             cleanup_archive,
             check_unrar_available,
+            extract_zip_all,
             // P2P Commands
             create_p2p_share,
             join_p2p_share,
@@ -1654,6 +1707,7 @@ pub fn run() {
             // P2P Upload Limit
             set_p2p_upload_limit,
             get_p2p_upload_limit,
+            get_p2p_peer_reputation,
             // Custom Sound Files
             set_custom_sound_path,
             clear_custom_sound_path,
@@ -1708,7 +1762,7 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                window.hide().unwrap();
+                let _ = window.hide();
                 api.prevent_close();
             }
         })
@@ -1727,31 +1781,52 @@ pub fn run() {
             
             // Init P2P node
             let p2p_node = tauri::async_runtime::block_on(async {
-                network::p2p::P2PNode::new(14735).await.unwrap_or_else(|e| {
-                    println!("Warning: P2P failed to start: {}", e);
-                    panic!("P2P Init Failed: {}", e);
-                })
+                match network::p2p::P2PNode::new(14735).await {
+                    Ok(node) => node,
+                    Err(e) => {
+                        eprintln!("Warning: P2P failed to start on port 14735: {}. Trying fallback port...", e);
+                        // Try fallback port
+                        match network::p2p::P2PNode::new(14736).await {
+                            Ok(node) => node,
+                            Err(e2) => {
+                                eprintln!("Warning: P2P also failed on fallback port: {}. Trying dynamic port...", e2);
+                                network::p2p::P2PNode::new(0).await
+                                    .expect("P2P node creation with dynamic port should not fail")
+                            }
+                        }
+                    }
+                }
             });
             let p2p_node = Arc::new(p2p_node);
             
             let p2p_file_map: crate::http_server::FileMap = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             
             let torrent_manager = tauri::async_runtime::block_on(async {
-                 let path = std::path::PathBuf::from("C:\\Users\\aditya\\Desktop\\Torrents");
+                 let settings = settings::load_settings();
+                 let mut path = std::path::PathBuf::from(&settings.download_dir);
+                 path.push("Torrents");
                  std::fs::create_dir_all(&path).unwrap_or_default();
-                 network::bittorrent::manager::TorrentManager::new(path).await.unwrap_or_else(|e| {
-                     println!("Warning: Torrent Manager failed: {}", e);
-                     panic!("Torrent Init Failed: {}", e);
-                 })
+                 match network::bittorrent::manager::TorrentManager::new(path).await {
+                     Ok(tm) => tm,
+                     Err(e) => {
+                         eprintln!("Warning: Torrent Manager failed to start: {}", e);
+                         // Use a fallback temp directory instead of panicking
+                         let fallback = std::env::temp_dir().join("hyperstream_torrents");
+                         std::fs::create_dir_all(&fallback).unwrap_or_default();
+                         network::bittorrent::manager::TorrentManager::new(fallback).await
+                             .expect("Torrent Manager fallback with temp dir also failed")
+                     }
+                 }
             });
             let torrent_manager = Arc::new(torrent_manager);
 
             // Spawn HTTP server
             let tx_clone = tx.clone();
+            let batch_tx_clone = batch_tx.clone();
             let map_clone = p2p_file_map.clone();
             let tm_clone = torrent_manager.clone();
             tauri::async_runtime::spawn(async move {
-                crate::http_server::start_server(tx_clone, map_clone, tm_clone).await;
+                crate::http_server::start_server(tx_clone, batch_tx_clone, map_clone, tm_clone).await;
             });
 
             // Spawn Game Mode Monitor
@@ -1760,12 +1835,14 @@ pub fn run() {
             });
             
             // ============ SYSTEM TRAY ============
-            let quit_i = MenuItem::with_id(app.handle(), "quit", "Quit", true, None::<&str>).unwrap();
-            let show_i = MenuItem::with_id(app.handle(), "show", "Show HyperStream", true, None::<&str>).unwrap();
-            let menu = Menu::with_items(app.handle(), &[&show_i, &quit_i]).unwrap();
+            let quit_i = MenuItem::with_id(app.handle(), "quit", "Quit", true, None::<&str>)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            let show_i = MenuItem::with_id(app.handle(), "show", "Show HyperStream", true, None::<&str>)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            let menu = Menu::with_items(app.handle(), &[&show_i, &quit_i])
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+            let mut tray_builder = TrayIconBuilder::new()
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
@@ -1795,8 +1872,12 @@ pub fn run() {
                         }
                         _ => {}
                     }
-                })
-                .build(app.handle());
+                });
+            // Set icon if available (avoid panic if window icon is missing)
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+            let _tray = tray_builder.build(app.handle());
             // =====================================
             
             // Initialize ChatOps
@@ -1852,11 +1933,10 @@ pub fn run() {
                         if let Some(pct) = crate::power_manager::get_battery_percentage() {
                             if pct <= 15 && active_count > 0 {
                                 println!("🔋 Battery critical ({}%). Pausing all downloads.", pct);
-                                let mut to_pause = Vec::new();
-                                {
+                                let to_pause = {
                                     let downloads = state.downloads.lock().unwrap();
-                                    to_pause = downloads.keys().cloned().collect();
-                                }
+                                    downloads.keys().cloned().collect::<Vec<_>>()
+                                };
                                 
                                 let mut saved_downloads = crate::persistence::load_downloads().unwrap_or_default();
                                 let mut did_pause = false;
@@ -1890,6 +1970,15 @@ pub fn run() {
                     }));
                 }
             });
+
+            // Handle batch link requests from browser extension
+            let batch_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(links) = batch_rx.recv().await {
+                    println!("DEBUG: Batch links received from extension: {} links", links.len());
+                    let _ = batch_handle.emit("batch_links", &links);
+                }
+            });
             
             Ok(())
         })
@@ -1913,11 +2002,19 @@ async fn reload_plugins(
     pm.load_plugins().await.map_err(|e| e.to_string())
 }
 
+/// Validate plugin filename to prevent path traversal attacks.
+fn validate_plugin_filename(filename: &str) -> Result<(), String> {
+    if filename.is_empty() || filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err("Invalid plugin filename".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_plugin_source(filename: String) -> Result<String, String> {
-    let mut path = std::env::current_dir().unwrap_or_default().join("plugins");
-    path.push(format!("{}.lua", filename)); // Append extension if missing? Assuming filename is without ext?
-    // Start with safe check
+    validate_plugin_filename(&filename)?;
+    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let path = cwd.join("plugins").join(format!("{}.lua", filename));
     if !path.exists() {
         return Err("Plugin file not found".to_string());
     }
@@ -1926,18 +2023,21 @@ async fn get_plugin_source(filename: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn save_plugin_source(filename: String, content: String) -> Result<(), String> {
-    let mut path = std::env::current_dir().unwrap_or_default().join("plugins");
-    if !path.exists() {
-        std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    validate_plugin_filename(&filename)?;
+    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let plugins_dir = cwd.join("plugins");
+    if !plugins_dir.exists() {
+        std::fs::create_dir_all(&plugins_dir).map_err(|e| e.to_string())?;
     }
-    path.push(format!("{}.lua", filename));
+    let path = plugins_dir.join(format!("{}.lua", filename));
     std::fs::write(path, content).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn delete_plugin(filename: String) -> Result<(), String> {
-    let mut path = std::env::current_dir().unwrap_or_default().join("plugins");
-    path.push(format!("{}.lua", filename));
+    validate_plugin_filename(&filename)?;
+    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let path = cwd.join("plugins").join(format!("{}.lua", filename));
     if path.exists() {
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
@@ -1991,6 +2091,10 @@ async fn get_webhooks() -> Result<Vec<webhooks::WebhookConfig>, String> {
 async fn add_webhook(config: webhooks::WebhookConfig) -> Result<(), String> {
     let mut settings = settings::load_settings();
     let mut webhooks = settings.webhooks.unwrap_or_default();
+    let mut config = config;
+    if config.id.is_empty() {
+        config.id = webhooks::generate_webhook_id();
+    }
     webhooks.push(config);
     settings.webhooks = Some(webhooks);
     settings::save_settings(&settings)
@@ -2078,6 +2182,11 @@ fn check_unrar_available() -> bool {
     archive_manager::ArchiveManager::check_unrar_available()
 }
 
+#[tauri::command]
+fn extract_zip_all(zip_path: String, dest_dir: String) -> Result<usize, String> {
+    zip_preview::extract_all(std::path::Path::new(&zip_path), std::path::Path::new(&dest_dir))
+}
+
 // ============ P2P Commands ============
 #[tauri::command]
 async fn create_p2p_share(
@@ -2124,6 +2233,11 @@ fn set_p2p_upload_limit(kbps: u64, state: tauri::State<'_, AppState>) {
 #[tauri::command]
 fn get_p2p_upload_limit(state: tauri::State<'_, AppState>) -> u64 {
     state.p2p_node.get_upload_limit()
+}
+
+#[tauri::command]
+fn get_p2p_peer_reputation(peer_id: String, state: tauri::State<'_, AppState>) -> Option<network::p2p::PeerReputation> {
+    state.p2p_node.get_reputation(&peer_id)
 }
 
 // ============ Custom Sound File Commands (Z1) ============

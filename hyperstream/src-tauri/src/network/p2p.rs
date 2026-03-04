@@ -141,8 +141,10 @@ impl P2PNode {
                 Ok(Message::Text(text)) => {
                     if let Ok(p2p_msg) = serde_json::from_str::<P2PMessage>(&text) {
                         if let Some(response) = self.handle_message(p2p_msg).await {
-                            let response_text = serde_json::to_string(&response).unwrap();
-                            let _ = write.send(Message::Text(response_text)).await;
+                            match serde_json::to_string(&response) {
+                                Ok(response_text) => { let _ = write.send(Message::Text(response_text)).await; }
+                                Err(e) => eprintln!("[P2P] Failed to serialize response: {}", e),
+                            }
                         }
                     }
                 }
@@ -312,7 +314,8 @@ impl P2PNode {
 
         // Send Join message
         let join_msg = P2PMessage::Join { pairing_code: code.clone() };
-        let join_text = serde_json::to_string(&join_msg).unwrap();
+        let join_text = serde_json::to_string(&join_msg)
+            .map_err(|e| format!("Failed to serialize join message: {}", e))?;
         write.send(Message::Text(join_text)).await
             .map_err(|e| format!("Failed to send join: {}", e))?;
 
@@ -326,7 +329,7 @@ impl P2PNode {
                     peers: vec![peer_addr],
                     bytes_sent: 0,
                     bytes_received: 0,
-                    created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                    created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
                     is_host: false,
                 };
                 

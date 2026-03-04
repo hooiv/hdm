@@ -1,14 +1,15 @@
 import React from 'react';
 import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { TitleBar } from './TitleBar';
 import { motion } from 'framer-motion';
 
 const formatBytes = (bytes: number, decimals = 2) => {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes <= 0) return '0 B';
     const k = 1024;
     const dm = decimals < 0 ? 0 : decimals;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 };
 
@@ -32,7 +33,7 @@ interface LayoutProps {
     globalSpeed?: number;
 }
 
-const NavItem: React.FC<{ icon: any; label: string; active: boolean; onClick: () => void; badge?: string | number }> = ({ icon: Icon, label, active, onClick, badge }) => (
+const NavItem: React.FC<{ icon: LucideIcon; label: string; active: boolean; onClick: () => void; badge?: string | number }> = ({ icon: Icon, label, active, onClick, badge }) => (
     <div
         onClick={onClick}
         className={`
@@ -202,7 +203,7 @@ export const Layout: React.FC<LayoutProps> = ({
                                     onChange={(e) => onSpeedLimitChange(parseInt(e.target.value))}
                                 >
                                     <option value="0">Unlimited Speed</option>
-                                    <option value="512">Limit: 500 KB/s</option>
+                                    <option value="512">Limit: 512 KB/s</option>
                                     <option value="1024">Limit: 1 MB/s</option>
                                     <option value="5120">Limit: 5 MB/s</option>
                                     <option value="10240">Limit: 10 MB/s</option>

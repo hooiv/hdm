@@ -4,7 +4,16 @@ use tokio::sync::broadcast;
 use crate::core_state::*;
 use crate::*;
 
-pub async fn start_download_impl(
+/// Extract filename from a path string, handling both Unix and Windows separators.
+/// Falls back to the full path string if no filename component can be extracted.
+fn extract_filename(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(path)
+}
+
+pub(crate) async fn start_download_impl(
     app: &tauri::AppHandle,
     state: &AppState,
     id: String, 
@@ -25,15 +34,44 @@ pub async fn start_download_impl(
             if let Some(ref vpn_name) = settings.vpn_connection_name {
                 if !vpn_name.trim().is_empty() {
                     println!("DEBUG: Auto-connecting to VPN: {}", vpn_name);
-                    let status = std::process::Command::new("rasdial")
-                        .arg(vpn_name)
-                        .status()
-                        .map_err(|e| format!("Failed to execute rasdial: {}", e))?;
-                    
-                    if !status.success() {
-                        eprintln!("WARNING: VPN auto-connect to '{}' failed with status: {:?}", vpn_name, status);
-                    } else {
-                        println!("DEBUG: Successfully connected to VPN: {}", vpn_name);
+                    #[cfg(target_os = "windows")]
+                    {
+                        let status = std::process::Command::new("rasdial")
+                            .arg(vpn_name)
+                            .status()
+                            .map_err(|e| format!("Failed to execute rasdial: {}", e))?;
+                        
+                        if !status.success() {
+                            eprintln!("WARNING: VPN auto-connect to '{}' failed with status: {:?}", vpn_name, status);
+                        } else {
+                            println!("DEBUG: Successfully connected to VPN: {}", vpn_name);
+                        }
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        let status = std::process::Command::new("nmcli")
+                            .args(["connection", "up", vpn_name])
+                            .status()
+                            .map_err(|e| format!("Failed to execute nmcli: {}", e))?;
+                        
+                        if !status.success() {
+                            eprintln!("WARNING: VPN auto-connect to '{}' failed with status: {:?}", vpn_name, status);
+                        } else {
+                            println!("DEBUG: Successfully connected to VPN: {}", vpn_name);
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        let status = std::process::Command::new("networksetup")
+                            .args(["-connectpppoeservice", vpn_name])
+                            .status()
+                            .map_err(|e| format!("Failed to execute networksetup: {}", e))?;
+                        
+                        if !status.success() {
+                            eprintln!("WARNING: VPN auto-connect to '{}' failed with status: {:?}", vpn_name, status);
+                        } else {
+                            println!("DEBUG: Successfully connected to VPN: {}", vpn_name);
+                        }
                     }
                 }
             }
@@ -49,7 +87,7 @@ pub async fn start_download_impl(
             let payload = webhooks::WebhookPayload {
                 event: "DownloadStart".to_string(),
                 download_id: id.clone(),
-                filename: path.split('\\').last().unwrap_or(&path).to_string(),
+                filename: extract_filename(&path).to_string(),
                 url: url.clone(),
                 size: 0,
                 speed: 0,
@@ -64,9 +102,12 @@ pub async fn start_download_impl(
     crate::mqtt_client::publish_event(
         "DownloadStart",
         &id,
-        path.split('\\').last().unwrap_or(&path),
+        extract_filename(&path),
         "Downloading"
     );
+
+    // Broadcast to LAN devices
+    crate::lan_api::broadcast_download(url.clone());
 
     // 1. Check for saved download (Resume logic)
     let saved_downloads = persistence::load_downloads().unwrap_or_default();
@@ -242,6 +283,7 @@ pub async fn start_download_impl(
     let etag_monitor = etag.clone();
     let md5_monitor = md5.clone();
     let mut stop_rx_monitor = stop_tx.subscribe();
+    let chatops_monitor = state.chatops_manager.clone();
     
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(33)); // ~30fps
@@ -290,7 +332,7 @@ pub async fn start_download_impl(
                                 let payload = webhooks::WebhookPayload {
                                     event: "DownloadComplete".to_string(),
                                     download_id: id_webhook.clone(),
-                                    filename: path_webhook.split('\\').last().unwrap_or(&path_webhook).to_string(),
+                                    filename: extract_filename(&path_webhook).to_string(),
                                     url: url_webhook.clone(),
                                     size: size_webhook,
                                     speed: 0,
@@ -305,9 +347,16 @@ pub async fn start_download_impl(
                         crate::mqtt_client::publish_event(
                             "DownloadComplete",
                             &id_monitor,
-                            path_monitor.split('\\').last().unwrap_or(&path_monitor),
+                            extract_filename(&path_monitor),
                             "Complete"
                         );
+
+                        // Notify ChatOps (Telegram) on completion
+                        let chatops = chatops_monitor.clone();
+                        let filename_chatops = extract_filename(&path_monitor).to_string();
+                        tokio::spawn(async move {
+                            chatops.notify_completion(&filename_chatops).await;
+                        });
                         
                         // Auto-extract archives if enabled
                         let path_archive = path_monitor.clone();
@@ -371,6 +420,7 @@ pub async fn start_download_impl(
         let path_worker = path.clone();
         let url_worker = url.clone(); // Alias for error handler
         let app_handle_clone = app.clone(); // Capture app handle for emitting events
+        let total_size_worker = total_size; // u64 is Copy
 
         let handle = tokio::spawn(async move {
             let (start, end) = {
@@ -466,14 +516,11 @@ pub async fn start_download_impl(
                          url: url_worker.clone(),
                          path: path_worker.clone(),
                          filename: filename_s,
-                         total_size: 0, // Should be passed but not captured? total_size is u64 Copy.
+                         total_size: total_size_worker,
                          downloaded_bytes: total_downloaded,
                          status: "WaitingForRefresh".to_string(),
                          segments: Some(segments),
                      };
-                     // We need total_size in worker? It's captured if Copy.
-                     // But we need to make sure `saved.total_size` is correct.
-                     // `total_size` is available in `start_download` scope.
                      
                      let _ = persistence::upsert_download(saved);
                      
@@ -499,7 +546,7 @@ pub async fn start_download_impl(
                              let payload = webhooks::WebhookPayload {
                                  event: "DownloadError".to_string(),
                                  download_id: id_error.clone(),
-                                 filename: path_error.split('\\').last().unwrap_or(&path_error).to_string(),
+                                 filename: extract_filename(&path_error).to_string(),
                                  url: url_error.clone(),
                                  size: 0,
                                  speed: 0,
@@ -514,7 +561,7 @@ pub async fn start_download_impl(
                      crate::mqtt_client::publish_event(
                          "DownloadError",
                          &id_worker,
-                         path_worker.split('\\').last().unwrap_or(&path_worker),
+                         extract_filename(&path_worker),
                          "WaitingForRefresh"
                      );
                      
@@ -552,7 +599,10 @@ pub async fn start_download_impl(
                             match item {
                                 Some(Ok(chunk)) => {
                                     let len = chunk.len() as u64;
-                                    tx_clone.send(WriteRequest { offset: current_pos, data: chunk.to_vec(), segment_id: i as u32 }).unwrap();
+                                    if tx_clone.send(WriteRequest { offset: current_pos, data: chunk.to_vec(), segment_id: i as u32 }).is_err() {
+                                        eprintln!("Thread {}: Disk writer channel closed, stopping segment.", i);
+                                        return; // Exit worker gracefully instead of panicking
+                                    }
                                     current_pos += len;
                                     
                                     // Update global progress ATOMICALLY (Lock-Free)

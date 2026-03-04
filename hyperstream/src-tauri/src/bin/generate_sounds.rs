@@ -43,7 +43,7 @@ fn generate_simple_wav(frequency: f32, duration_ms: u32) -> Vec<u8> {
         // Fade out at the end
         let fade_samples = sample_rate / 10; // 100ms fade
         let fade_factor = if i > num_samples - fade_samples {
-            ((num_samples - i) as f32 / fade_samples as f32)
+            (num_samples - i) as f32 / fade_samples as f32
         } else {
             1.0
         };
