@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::downloader::structures::Segment;
+
+/// Serialize all persistence read-modify-write operations to prevent data races
+static PERSISTENCE_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 /// Represents a saved download that can be resumed
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +32,7 @@ fn get_storage_path() -> PathBuf {
     PathBuf::from(home).join(".hyperstream").join("downloads.json")
 }
 
-/// Save downloads to disk
+/// Save downloads to disk atomically (write to temp file, then rename)
 pub fn save_downloads(downloads: &[SavedDownload]) -> Result<(), String> {
     let path = get_storage_path();
     
@@ -40,7 +44,15 @@ pub fn save_downloads(downloads: &[SavedDownload]) -> Result<(), String> {
     let json = serde_json::to_string_pretty(downloads)
         .map_err(|e| format!("Failed to serialize: {}", e))?;
     
-    fs::write(&path, json).map_err(|e| format!("Failed to write file: {}", e))?;
+    // Write to temp file first, then rename for crash-safe atomicity
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    if let Err(_rename_err) = fs::rename(&tmp_path, &path) {
+        // Rename failed — try direct write as fallback (cross-device rename)
+        fs::write(&path, &json).map_err(|e| format!("Failed to write file: {}", e))?;
+        // Clean up orphaned temp file
+        let _ = fs::remove_file(&tmp_path);
+    }
     
     Ok(())
 }
@@ -49,22 +61,27 @@ pub fn save_downloads(downloads: &[SavedDownload]) -> Result<(), String> {
 pub fn load_downloads() -> Result<Vec<SavedDownload>, String> {
     let path = get_storage_path();
     
-    if !path.exists() {
-        return Ok(Vec::new());
+    match fs::read_to_string(&path) {
+        Ok(json) => {
+            let downloads: Vec<SavedDownload> = serde_json::from_str(&json)
+                .map_err(|e| format!("Failed to deserialize: {}", e))?;
+            Ok(downloads)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("Failed to read file: {}", e)),
     }
-    
-    let json = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-    
-    let downloads: Vec<SavedDownload> = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to deserialize: {}", e))?;
-    
-    Ok(downloads)
 }
 
 /// Add or update a download in the saved list
 pub fn upsert_download(download: SavedDownload) -> Result<(), String> {
-    let mut downloads = load_downloads().unwrap_or_default();
+    let _lock = PERSISTENCE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut downloads = match load_downloads() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("WARNING: Could not load downloads for upsert, starting fresh: {}", e);
+            Vec::new()
+        }
+    };
     
     // Find and update, or insert new
     if let Some(existing) = downloads.iter_mut().find(|d| d.id == download.id) {
@@ -78,13 +95,27 @@ pub fn upsert_download(download: SavedDownload) -> Result<(), String> {
 
 /// Remove a download from the saved list
 pub fn remove_download(id: &str) -> Result<(), String> {
-    let mut downloads = load_downloads().unwrap_or_default();
+    let _lock = PERSISTENCE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut downloads = match load_downloads() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("WARNING: Could not load downloads for remove, starting fresh: {}", e);
+            Vec::new()
+        }
+    };
     downloads.retain(|d| d.id != id);
     save_downloads(&downloads)
 }
 /// Move a download up or down in the list
 pub fn move_download(id: &str, direction: &str) -> Result<(), String> {
-    let mut downloads = load_downloads().unwrap_or_default();
+    let _lock = PERSISTENCE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut downloads = match load_downloads() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("WARNING: Could not load downloads for move: {}", e);
+            return Err(format!("Could not load download list: {}", e));
+        }
+    };
     
     if let Some(index) = downloads.iter().position(|d| d.id == id) {
         if direction == "up" && index > 0 {

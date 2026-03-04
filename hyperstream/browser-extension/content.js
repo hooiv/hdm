@@ -120,7 +120,7 @@
                 filename = decodeURIComponent(lastPart.split('?')[0]);
             }
         } catch (e) {
-            console.log('Could not parse URL for filename');
+            // ignore filename parsing errors
         }
 
         try {

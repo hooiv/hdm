@@ -79,10 +79,16 @@ impl SpeedLimiter {
                      if elapsed >= Duration::from_millis(50) {
                          let refill_amount = (limit as f64 * elapsed.as_secs_f64()) as u64;
                          if refill_amount > 0 {
-                             let current = self.tokens.load(Ordering::Acquire);
-                             // Cap at 1.0 seconds worth to prevent huge bursts after idle
-                             let new_tokens = (current + refill_amount).min(limit); 
-                             self.tokens.store(new_tokens, Ordering::Release);
+                             // CAS loop to safely add tokens without overwriting concurrent consumption
+                             loop {
+                                 let current = self.tokens.load(Ordering::Acquire);
+                                 let new_tokens = (current + refill_amount).min(limit);
+                                 if self.tokens.compare_exchange(
+                                     current, new_tokens, Ordering::SeqCst, Ordering::Relaxed
+                                 ).is_ok() {
+                                     break;
+                                 }
+                             }
                              *last = now_instant;
                              
                              // Update next hint (current time + 50ms)

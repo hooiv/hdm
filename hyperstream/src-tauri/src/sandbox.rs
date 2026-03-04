@@ -1,4 +1,4 @@
-use std::path::Path;
+use dunce;
 
 /// Default sandbox folder path inside Windows Sandbox (WDAGUtilityAccount is the standard sandbox user).
 #[cfg(target_os = "windows")]
@@ -9,7 +9,10 @@ const SANDBOX_MAPPED_FOLDER: &str = r"C:\Users\WDAGUtilityAccount\Desktop\Downlo
 /// auto-executes the specified file on startup.
 #[cfg(target_os = "windows")]
 pub fn run_in_sandbox(executable_path: String) -> Result<String, String> {
-    let exe_path = Path::new(&executable_path);
+    // Canonicalize first to resolve any '..' traversal and symlinks,
+    // preventing an attacker from mapping arbitrary host directories into the sandbox.
+    let exe_path = dunce::canonicalize(&executable_path)
+        .map_err(|e| format!("Cannot resolve path '{}': {}", executable_path, e))?;
 
     if !exe_path.exists() {
         return Err(format!("File not found: {}", executable_path));
@@ -25,7 +28,16 @@ pub fn run_in_sandbox(executable_path: String) -> Result<String, String> {
         return Err("Only .exe and .msi files can be run in Windows Sandbox.".to_string());
     }
 
-    // Get the parent directory to map as a shared folder
+    // Restrict to files within the user's download directory to prevent
+    // mapping sensitive host directories (e.g. System32) into the sandbox.
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    if !exe_path.starts_with(&download_dir) {
+        return Err("File must be within the download directory to run in sandbox.".to_string());
+    }
+
+    // Get the parent directory to map as a shared folder (already canonical)
     let host_folder = exe_path
         .parent()
         .ok_or("Cannot determine parent directory")?
@@ -46,6 +58,18 @@ pub fn run_in_sandbox(executable_path: String) -> Result<String, String> {
         format!("\"{}\"", sandbox_path)
     };
 
+    // XML-escape interpolated values to prevent injection
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+         .replace('<', "&lt;")
+         .replace('>', "&gt;")
+         .replace('"', "&quot;")
+         .replace('\'', "&apos;")
+    }
+
+    let host_folder_escaped = xml_escape(&host_folder);
+    let logon_command_escaped = xml_escape(&logon_command);
+
     // Build the .wsb XML configuration
     let wsb_content = format!(
         r#"<Configuration>
@@ -63,7 +87,7 @@ pub fn run_in_sandbox(executable_path: String) -> Result<String, String> {
   <vGPU>Enable</vGPU>
   <MemoryInMB>4096</MemoryInMB>
 </Configuration>"#,
-        host_folder, SANDBOX_MAPPED_FOLDER, logon_command
+        host_folder_escaped, SANDBOX_MAPPED_FOLDER, logon_command_escaped
     );
 
     // Write to a temp .wsb file

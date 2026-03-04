@@ -46,6 +46,15 @@ impl CloudBridge {
         let bucket = Bucket::new(bucket_name, region, credentials)
              .map_err(|e| e.to_string())?;
 
+        // Path validation: ensure file is within the download directory
+        let download_dir = dunce::canonicalize(&settings.download_dir)
+            .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+        let canon = dunce::canonicalize(file_path)
+            .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+        if !canon.starts_with(&download_dir) {
+            return Err("File must be within the download directory".to_string());
+        }
+
         // Read file (Streaming would be better for large files, but for MVP load into memory or use s3 stream methods)
         // rust-s3 has put_object_stream.
         let path = Path::new(file_path);
@@ -88,16 +97,27 @@ impl CloudBridge {
         // Read file to vec (MVP). If > 1GB, might crash.
         // But `rust-s3` has `put_object_stream_with_content_type`.
         
-        // Let's use `put_object` for now.
+        // Read file with OOM protection — reject files > 512MB for in-memory upload
+        let metadata = tokio::fs::metadata(file_path).await.map_err(|e| e.to_string())?;
+        const MAX_UPLOAD_SIZE: u64 = 512 * 1024 * 1024; // 512 MB
+        if metadata.len() > MAX_UPLOAD_SIZE {
+            return Err(format!(
+                "File too large for upload ({:.1} MB). Maximum is {} MB. Use rclone for larger files.",
+                metadata.len() as f64 / (1024.0 * 1024.0),
+                MAX_UPLOAD_SIZE / (1024 * 1024)
+            ));
+        }
+        
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).await.map_err(|e| e.to_string())?;
         
         let response = bucket.put_object(target_key, &buffer).await.map_err(|e| e.to_string())?;
         
-        if response.status_code() == 200 {
+        let status = response.status_code();
+        if (200..300).contains(&status) {
             Ok(format!("Uploaded to {}/{}", bucket_name, target_key))
         } else {
-             Err(format!("Upload failed: Status {}", response.status_code()))
+             Err(format!("Upload failed: Status {}", status))
         }
     }
 }

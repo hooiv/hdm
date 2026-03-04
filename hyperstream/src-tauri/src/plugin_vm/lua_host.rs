@@ -30,7 +30,8 @@ pub struct LuaPluginHost {
 
 impl LuaPluginHost {
     pub fn new(client: Client, app: AppHandle) -> Self {
-        let lua = Lua::new();
+        // Restrict Lua stdlib to safe subset — no os/io/debug/package modules
+        let lua = Lua::new_with(mlua::StdLib::TABLE | mlua::StdLib::STRING | mlua::StdLib::MATH | mlua::StdLib::COROUTINE, mlua::LuaOptions::default()).unwrap_or_else(|_| Lua::new());
         Self {
             lua: Arc::new(Mutex::new(lua)),
             client,
@@ -50,6 +51,10 @@ impl LuaPluginHost {
         host.set("http_get", lua.create_async_function(move |_, (url, headers): (String, Option<std::collections::HashMap<String, String>>)| {
             let client = client.clone();
             async move {
+                // SSRF protection: block requests to private/loopback addresses
+                crate::api_replay::validate_url_not_private(&url)
+                    .map_err(|e| mlua::Error::RuntimeError(e))?;
+
                 let mut req = client.get(&url);
                 if let Some(h) = headers {
                     for (k, v) in h {
@@ -59,10 +64,28 @@ impl LuaPluginHost {
                 
                 match req.send().await {
                     Ok(resp) => {
-                        match resp.text().await {
-                            Ok(text) => Ok(text),
-                            Err(e) => Err(mlua::Error::RuntimeError(format!("Failed to read body: {}", e)))
+                        // Check Content-Length header first to reject obviously oversized responses
+                        if let Some(cl) = resp.content_length() {
+                            if cl > 10 * 1024 * 1024 {
+                                return Err(mlua::Error::RuntimeError(
+                                    format!("Response too large: {} bytes (max 10 MB)", cl)
+                                ));
+                            }
                         }
+                        // Stream body with size cap to prevent OOM from chunked/unbounded responses
+                        let mut body = Vec::new();
+                        let mut stream = resp.bytes_stream();
+                        use futures_util::StreamExt;
+                        while let Some(chunk) = stream.next().await {
+                            let chunk = chunk.map_err(|e| mlua::Error::RuntimeError(format!("Read error: {}", e)))?;
+                            body.extend_from_slice(&chunk);
+                            if body.len() > 10 * 1024 * 1024 {
+                                return Err(mlua::Error::RuntimeError(
+                                    format!("Response exceeded 10 MB limit at {} bytes", body.len())
+                                ));
+                            }
+                        }
+                        Ok(String::from_utf8_lossy(&body).into_owned())
                     },
                     Err(e) => Err(mlua::Error::RuntimeError(format!("Request failed: {}", e)))
                 }
@@ -89,6 +112,10 @@ impl LuaPluginHost {
 
         // host.regex_find(pattern, text)
         host.set("regex_find", lua.create_function(|_, (pattern, text): (String, String)| {
+            // Limit pattern length to prevent excessive compile time
+            if pattern.len() > 1024 {
+                return Err(mlua::Error::RuntimeError("Regex pattern too long (max 1024 chars)".to_string()));
+            }
             if let Ok(re) = Regex::new(&pattern) {
                 if let Some(caps) = re.captures(&text) {
                     if let Some(m) = caps.get(1) {
@@ -153,36 +180,64 @@ impl LuaPluginHost {
         // host.fs.write(subpath, content)
         let dd_write = data_dir.clone();
         fs.set("write", lua.create_function(move |_, (subpath, content): (String, String)| {
-             let target = dd_write.join(&subpath);
-             // Sandbox check
-             if !target.starts_with(&dd_write) {
-                 return Err(mlua::Error::RuntimeError("Path traversal detected".to_string()));
+             // Reject obvious traversal attempts before joining
+             let sub = std::path::Path::new(&subpath);
+             for comp in sub.components() {
+                 match comp {
+                     std::path::Component::Normal(_) => {},
+                     _ => return Err(mlua::Error::RuntimeError("Path traversal detected".to_string())),
+                 }
              }
+             let target = dd_write.join(&subpath);
+             // Canonicalize both paths and verify containment
+             let canon_base = dunce::canonicalize(&dd_write).unwrap_or_else(|_| dd_write.clone());
              if let Some(p) = target.parent() {
                  let _ = std::fs::create_dir_all(p);
              }
-             std::fs::write(target, content).map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+             let canon_target = dunce::canonicalize(&target).unwrap_or_else(|_| target.clone());
+             if !canon_target.starts_with(&canon_base) {
+                 return Err(mlua::Error::RuntimeError("Path traversal detected".to_string()));
+             }
+             std::fs::write(&canon_target, content).map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
              Ok(())
         })?)?;
 
         // host.fs.exists(subpath)
         let dd_exists = data_dir.clone();
         fs.set("exists", lua.create_function(move |_, subpath: String| {
+             let sub = std::path::Path::new(&subpath);
+             for comp in sub.components() {
+                 match comp {
+                     std::path::Component::Normal(_) => {},
+                     _ => return Ok(false),
+                 }
+             }
              let target = dd_exists.join(&subpath);
-             if !target.starts_with(&dd_exists) {
+             let canon_base = dunce::canonicalize(&dd_exists).unwrap_or_else(|_| dd_exists.clone());
+             let canon_target = dunce::canonicalize(&target).unwrap_or_else(|_| target);
+             if !canon_target.starts_with(&canon_base) {
                  return Ok(false);
              }
-             Ok(target.exists())
+             Ok(canon_target.exists())
         })?)?;
 
         // host.fs.read(subpath)
         let dd_read = data_dir.clone();
         fs.set("read", lua.create_function(move |_, subpath: String| {
+             let sub = std::path::Path::new(&subpath);
+             for comp in sub.components() {
+                 match comp {
+                     std::path::Component::Normal(_) => {},
+                     _ => return Err(mlua::Error::RuntimeError("Path traversal detected".to_string())),
+                 }
+             }
              let target = dd_read.join(&subpath);
-             if !target.starts_with(&dd_read) {
+             let canon_base = dunce::canonicalize(&dd_read).unwrap_or_else(|_| dd_read.clone());
+             let canon_target = dunce::canonicalize(&target).unwrap_or_else(|_| target);
+             if !canon_target.starts_with(&canon_base) {
                  return Err(mlua::Error::RuntimeError("Path traversal detected".to_string()));
              }
-             match std::fs::read_to_string(target) {
+             match std::fs::read_to_string(canon_target) {
                  Ok(s) => Ok(Some(s)),
                  Err(_) => Ok(None)
              }

@@ -38,6 +38,9 @@ pub struct ZipPreview {
 
 /// Preview ZIP from a remote URL
 pub async fn preview_zip_remote(url: String, client: Client) -> Result<ZipPreview, String> {
+    // SSRF protection: block requests to private/loopback addresses
+    crate::api_replay::validate_url_not_private(&url)?;
+
     // 1. Get Content-Length via HEAD
     let head = client.head(&url).send().await.map_err(|e| e.to_string())?;
     let content_length = head.content_length().ok_or("No Content-Length header")?;
@@ -82,6 +85,9 @@ pub async fn preview_zip_remote(url: String, client: Client) -> Result<ZipPrevie
 
 /// Download a specific entry from remote ZIP
 pub async fn download_entry_remote(url: String, entry_name: String, client: Client) -> Result<Vec<u8>, String> {
+    // SSRF protection: block requests to private/loopback addresses
+    crate::api_replay::validate_url_not_private(&url)?;
+
     let head = client.head(&url).send().await.map_err(|e| e.to_string())?;
     let content_length = head.content_length().ok_or("No Content-Length")?;
     
@@ -283,6 +289,24 @@ pub fn preview_zip_partial(data: &[u8]) -> Result<ZipPreview, String> {
 
 /// Extract a single file from a LOCAL ZIP archive
 pub fn extract_file(zip_path: &Path, entry_name: &str, dest_path: &Path) -> Result<(), String> {
+    // Validate entry_name doesn't contain path traversal sequences
+    if entry_name.contains("..") {
+        return Err("Entry name contains path traversal sequence".to_string());
+    }
+
+    // Validate dest_path stays within its intended parent directory
+    if let Some(parent) = dest_path.parent() {
+        let canonical_parent = dunce::canonicalize(parent)
+            .unwrap_or_else(|_| parent.to_path_buf());
+        // Resolve dest_path relative to parent — since file doesn't exist yet, join the file_name
+        let resolved_dest = canonical_parent.join(
+            dest_path.file_name().ok_or("Invalid destination filename")?
+        );
+        if !resolved_dest.starts_with(&canonical_parent) {
+            return Err("Destination path escapes parent directory".to_string());
+        }
+    }
+    
     let file = File::open(zip_path).map_err(|e| format!("Failed to open ZIP: {}", e))?;
     let mut archive = ZipArchive::new(file).map_err(|e| format!("Invalid ZIP file: {}", e))?;
     
@@ -298,16 +322,51 @@ pub fn extract_file(zip_path: &Path, entry_name: &str, dest_path: &Path) -> Resu
     Ok(())
 }
 
+/// Sanitize a zip entry name to prevent path traversal (Zip Slip).
+fn sanitize_zip_entry(name: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let path = std::path::Path::new(name);
+    let mut clean = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(c) => clean.push(c),
+            Component::CurDir => {} // skip "."
+            // Reject "..", root, and prefix components
+            _ => return None,
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return None;
+    }
+    Some(clean)
+}
+
 /// Extract all files from a LOCAL ZIP archive
 pub fn extract_all(zip_path: &Path, dest_dir: &Path) -> Result<usize, String> {
     let file = File::open(zip_path).map_err(|e| format!("Failed to open ZIP: {}", e))?;
     let mut archive = ZipArchive::new(file).map_err(|e| format!("Invalid ZIP file: {}", e))?;
     
+    let canonical_dest = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.to_path_buf());
     let mut extracted = 0;
     
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| format!("Failed to read entry: {}", e))?;
-        let outpath = dest_dir.join(file.name());
+        
+        let sanitized = match sanitize_zip_entry(file.name()) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping unsafe zip entry: {}", file.name());
+                continue;
+            }
+        };
+        let outpath = dest_dir.join(&sanitized);
+        
+        // Double-check: resolved path must be inside dest_dir
+        let canonical_out = outpath.canonicalize().unwrap_or_else(|_| outpath.clone());
+        if !canonical_out.starts_with(&canonical_dest) && !outpath.starts_with(dest_dir) {
+            eprintln!("Zip entry escapes destination, skipping: {}", file.name());
+            continue;
+        }
         
         if file.is_dir() {
             std::fs::create_dir_all(&outpath).ok();
@@ -328,6 +387,21 @@ pub fn extract_all(zip_path: &Path, dest_dir: &Path) -> Result<usize, String> {
 
 /// Read specific bytes from a file
 pub fn read_bytes_at_offset(path: &Path, offset: u64, length: usize) -> Result<Vec<u8>, String> {
+    // Cap read length to 10 MB to prevent OOM
+    const MAX_READ_LENGTH: usize = 10 * 1024 * 1024;
+    if length > MAX_READ_LENGTH {
+        return Err(format!("Read length {} exceeds maximum {} bytes", length, MAX_READ_LENGTH));
+    }
+    // Validate path is within download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    if let Ok(canon) = dunce::canonicalize(path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Path must be within the download directory".to_string());
+        }
+    }
+
     let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
     file.seek(SeekFrom::Start(offset)).map_err(|e| format!("Failed to seek: {}", e))?;
     let mut buffer = vec![0u8; length];
@@ -338,6 +412,22 @@ pub fn read_bytes_at_offset(path: &Path, offset: u64, length: usize) -> Result<V
 
 /// Read the last N bytes of a file
 pub fn read_last_bytes(path: &Path, length: usize) -> Result<Vec<u8>, String> {
+    // Cap read length to 10 MB
+    const MAX_READ_LENGTH: usize = 10 * 1024 * 1024;
+    if length > MAX_READ_LENGTH {
+        return Err(format!("Read length {} exceeds maximum {} bytes", length, MAX_READ_LENGTH));
+    }
+
+    // Validate path is within the download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    if let Ok(canon) = dunce::canonicalize(path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Path must be within the download directory".to_string());
+        }
+    }
+
     let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
     let file_size = file.seek(SeekFrom::End(0)).map_err(|e| format!("Failed to get file size: {}", e))?;
     let start = file_size.saturating_sub(length as u64);

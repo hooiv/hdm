@@ -20,7 +20,8 @@ pub struct SearchEngine {
 
 impl SearchEngine {
     pub fn new() -> Self {
-        let lua = Lua::new();
+        // Restrict Lua stdlib to safe subset — no os/io/debug/package modules
+        let lua = Lua::new_with(mlua::StdLib::TABLE | mlua::StdLib::STRING | mlua::StdLib::MATH, mlua::LuaOptions::default()).unwrap_or_else(|_| Lua::new());
         Self { lua }
     }
 
@@ -35,7 +36,7 @@ impl SearchEngine {
         let script = r#"
             function search(query)
                 local results = {}
-                // Simulate some results
+                -- Simulate some results
                 table.insert(results, {
                     title = "Demo Result: " .. query,
                     link = "https://example.com/download/" .. query,

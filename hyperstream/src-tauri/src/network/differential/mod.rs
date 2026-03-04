@@ -64,16 +64,28 @@ impl RollingHash {
 
 // Core Differential Logic: Map local file blocks to new file
 pub fn analyze_local_file(path: &str, _control: &ZsyncControl) -> Result<(), String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let metadata = file.metadata().map_err(|e| e.to_string())?;
-    let _len = metadata.len();
-
-    // TODO: Implement full block matching.
-    // 1. Read file in chunks of control.blocksize
-    // 2. Calculate checksums
-    // 3. Compare with Zsync checksums (not parsed yet fully)
-    
-    // For MVP/Demo: Just verifying we can read headers and start hash.
+    // Implement basic block-matching to compute rolling hashes for each block
+    // (checksums from zsync control are not yet parsed; we merely demonstrate the
+    // mechanism for possible future differential download support).
     println!("Analyzing local file for differential update: {}", path);
+
+    use std::io::{Read, BufReader};
+    let f = File::open(path).map_err(|e| e.to_string())?;
+    let _len = f.metadata().map_err(|e| e.to_string())?.len();
+    let mut reader = BufReader::new(f);
+    let mut buffer = vec![0u8; _control.blocksize];
+    let mut rolling = RollingHash::new();
+    let mut block_index = 0;
+    loop {
+        let n = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        rolling.update(&buffer[..n]);
+        let digest = rolling.digest();
+        println!("block {} hash {:08x}", block_index, digest);
+        block_index += 1;
+        rolling = RollingHash::new(); // reset for next block
+    }
     Ok(())
 }

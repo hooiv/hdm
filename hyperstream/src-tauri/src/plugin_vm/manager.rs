@@ -20,22 +20,24 @@ impl PluginManager {
     }
 
     pub fn get_plugins_dir(&self) -> PathBuf {
-        // Use local 'plugins' folder for development ease, or app_data
-        // For now, let's look in "plugins" relative to CWD
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("plugins")
+        // Use app_data_dir for consistency with updater.rs
+        use tauri::Manager;
+        self.app.path().app_data_dir()
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .join("plugins")
     }
 
     pub async fn load_plugins(&self) -> Result<(), String> {
         let dir = self.get_plugins_dir();
         if !dir.exists() {
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            tokio::fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
         }
 
         // Temporary maps to populate
         let mut new_plugins = HashMap::new();
         let mut new_meta_cache = HashMap::new();
 
-        let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+        let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
         
         for entry in entries {
             if let Ok(entry) = entry {
@@ -57,7 +59,7 @@ impl PluginManager {
                     }
 
                     // Load Script (Async)
-                    let script = std::fs::read_to_string(&path).unwrap_or_default();
+                    let script = tokio::fs::read_to_string(&path).await.unwrap_or_default();
                     if let Err(e) = host.load_script(&script).await {
                         println!("Failed to load script {}: {}", filename, e);
                         continue;
@@ -81,8 +83,8 @@ impl PluginManager {
         
         // Critical Section: Swap
         {
-            let mut plugins = self.plugins.lock().unwrap();
-            let mut meta_cache = self.metadata_cache.lock().unwrap();
+            let mut plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
+            let mut meta_cache = self.metadata_cache.lock().unwrap_or_else(|e| e.into_inner());
             *plugins = new_plugins;
             *meta_cache = new_meta_cache;
             println!("Loaded {} plugins", plugins.len());
@@ -92,7 +94,7 @@ impl PluginManager {
     }
 
     pub fn get_plugins_list(&self) -> Vec<PluginMetadata> {
-        let cache = self.metadata_cache.lock().unwrap();
+        let cache = self.metadata_cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.values().cloned().collect()
     }
 }

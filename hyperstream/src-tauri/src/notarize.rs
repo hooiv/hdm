@@ -1,20 +1,47 @@
 use sha2::{Sha256, Digest};
 use std::path::Path;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
+
+/// Validate that a file path is within the download directory (path traversal protection).
+fn validate_notarize_path(file_path: &str) -> Result<std::path::PathBuf, String> {
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canon = dunce::canonicalize(file_path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    if !canon.starts_with(&download_dir) {
+        return Err("File must be within the download directory".to_string());
+    }
+    Ok(canon)
+}
+
+/// Stream-hash a file using SHA-256 without loading it entirely into memory.
+async fn stream_sha256(path: &Path) -> Result<(sha2::digest::Output<Sha256>, u64), String> {
+    let mut file = fs::File::open(path).await.map_err(|e| format!("Failed to open file: {}", e))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    let mut total = 0u64;
+    loop {
+        let n = file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((hasher.finalize(), total))
+}
 
 /// Compute SHA-256 hash of a file and submit it to a free RFC 3161 Timestamp Authority.
 /// Saves the timestamp response token as a `.tsr` file alongside the original file.
 pub async fn notarize_file(file_path: String) -> Result<serde_json::Value, String> {
-    let path = Path::new(&file_path);
+    let canon = validate_notarize_path(&file_path)?;
+    let path = canon.as_path();
     if !path.exists() {
         return Err(format!("File not found: {}", file_path));
     }
 
-    // 1. Compute SHA-256
-    let file_bytes = fs::read(path).await.map_err(|e| format!("Failed to read file: {}", e))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&file_bytes);
-    let hash = hasher.finalize();
+    // 1. Compute SHA-256 via streaming (avoids loading entire file into memory)
+    let (hash, file_size) = stream_sha256(path).await?;
     let hash_hex = hex::encode(&hash);
 
     // 2. Build a simple timestamp query
@@ -83,8 +110,8 @@ pub async fn notarize_file(file_path: String) -> Result<serde_json::Value, Strin
 
     let tsr_bytes = response.bytes().await.map_err(|e| format!("Failed to read TSA response: {}", e))?;
 
-    // 4. Save .tsr file
-    let tsr_path = format!("{}.tsr", file_path);
+    // 4. Save .tsr file (use canonical path to avoid inconsistency with verify)
+    let tsr_path = format!("{}.tsr", canon.display());
     fs::write(&tsr_path, &tsr_bytes).await.map_err(|e| format!("Failed to save .tsr: {}", e))?;
 
     Ok(serde_json::json!({
@@ -93,41 +120,71 @@ pub async fn notarize_file(file_path: String) -> Result<serde_json::Value, Strin
         "tsr_path": tsr_path,
         "tsa_url": "https://freetsa.org/tsr",
         "timestamp": chrono::Utc::now().to_rfc3339(),
-        "file_size": file_bytes.len(),
+        "file_size": file_size,
         "status": "notarized"
     }))
 }
 
 /// Verify a previously notarized file by checking if the hash still matches.
+///
+/// NOTE: This performs an integrity check (re-hash comparison) and a structural
+/// TSR validation. Full cryptographic verification of the TSA signature would
+/// require parsing ASN.1/CMS and validating the FreeTSA certificate chain,
+/// which is beyond the scope of this lightweight verifier. For legal-grade
+/// verification, use `openssl ts -verify`.
 pub async fn verify_notarization(file_path: String) -> Result<serde_json::Value, String> {
-    let path = Path::new(&file_path);
+    let canon = validate_notarize_path(&file_path)?;
+    let path = canon.as_path();
     if !path.exists() {
         return Err(format!("File not found: {}", file_path));
     }
 
-    let tsr_path = format!("{}.tsr", file_path);
+    let tsr_path = format!("{}.tsr", canon.display());
     if !Path::new(&tsr_path).exists() {
         return Err("No .tsr notarization file found. File has not been notarized.".to_string());
     }
 
-    // Compute current hash
-    let file_bytes = fs::read(path).await.map_err(|e| format!("Failed to read file: {}", e))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&file_bytes);
-    let hash = hasher.finalize();
+    // Compute current hash via streaming
+    let (hash, _file_size) = stream_sha256(path).await?;
     let hash_hex = hex::encode(&hash);
 
     let tsr_bytes = fs::read(&tsr_path).await.map_err(|e| format!("Failed to read .tsr: {}", e))?;
 
-    // Check if the TSR contains the hash (simplified verification)
-    let hash_found = tsr_bytes.windows(32).any(|w| w == hash.as_slice());
+    // Structural validation: A valid TSR is a DER-encoded TimeStampResp.
+    // Minimum valid TSR is at least ~100 bytes and starts with SEQUENCE tag (0x30).
+    if tsr_bytes.len() < 64 || tsr_bytes[0] != 0x30 {
+        return Ok(serde_json::json!({
+            "hash": hash_hex,
+            "tsr_path": tsr_path,
+            "tsr_size": tsr_bytes.len(),
+            "integrity": "FAILED - TSR file is malformed or corrupted",
+            "status": "invalid_tsr"
+        }));
+    }
+
+    // Check that the file's current hash appears in the TSR's MessageImprint.
+    // We look for the specific DER pattern: OCTET STRING (tag 0x04, length 0x20) followed by the 32 hash bytes.
+    // This is more precise than a raw sliding-window search.
+    let mut hash_verified = false;
+    for i in 0..tsr_bytes.len().saturating_sub(33) {
+        if tsr_bytes[i] == 0x04 && tsr_bytes[i + 1] == 0x20 && &tsr_bytes[i + 2..i + 34] == hash.as_slice() {
+            hash_verified = true;
+            break;
+        }
+    }
+
+    let (integrity_msg, status) = if hash_verified {
+        ("INTEGRITY_OK - File hash matches TSR (note: TSA signature not cryptographically verified — use 'openssl ts -verify' for full validation)", "integrity_ok")
+    } else {
+        ("FAILED - File has been modified since notarization", "tampered")
+    };
 
     Ok(serde_json::json!({
         "hash": hash_hex,
         "tsr_path": tsr_path,
         "tsr_size": tsr_bytes.len(),
-        "integrity": if hash_found { "VERIFIED - Hash matches notarization" } else { "HASH PRESENT - TSR recorded" },
-        "status": "verified"
+        "integrity": integrity_msg,
+        "status": status
     }))
 }
 

@@ -40,7 +40,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     // Check if HyperStream is running
     const connected = await checkConnection();
     if (!connected) {
-        console.log('HyperStream not running, allowing browser download');
+        // HyperStream not running; allow default browser download
         return;
     }
 
@@ -48,7 +48,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     const url = downloadItem.finalUrl || downloadItem.url;
     const filename = downloadItem.filename ? downloadItem.filename.split(/[/\\]/).pop() : null;
 
-    console.log('Intercepting download:', url);
+    // intercepting download: silently handled
 
     // Cancel the browser download
     chrome.downloads.cancel(downloadItem.id);
@@ -63,7 +63,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
         chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
         setTimeout(() => chrome.action.setBadgeText({ text: '' }), 2000);
     } else {
-        console.error('Failed to send to HyperStream:', result.message);
+        console.warn('Failed to send to HyperStream:', result.message);
         // Fallback: restart the download in browser
         chrome.downloads.download({ url });
     }
@@ -101,7 +101,7 @@ chrome.runtime.onInstalled.addListener(() => {
         contexts: ['image']
     });
 
-    console.log('HyperStream extension installed');
+    // extension installed
 });
 
 // Handle context menu clicks
@@ -109,7 +109,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const connected = await checkConnection();
 
     if (!connected) {
-        console.log('HyperStream is not running');
+        // HyperStream not running (context menu)
         return;
     }
 
@@ -146,7 +146,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
             }).then(async (results) => {
                 if (results && results[0] && results[0].result) {
                     const links = results[0].result;
-                    console.log(`Found ${links.length} downloadable links`);
+                    // found links count for batch download
 
                     // Send all links as batch to HyperStream for user review
                     try {
@@ -159,7 +159,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
                             })))
                         });
                     } catch (e) {
-                        console.error('Failed to send batch to HyperStream:', e);
+                        console.warn('Failed to send batch to HyperStream:', e);
                     }
 
                     showBadge(links.length.toString());

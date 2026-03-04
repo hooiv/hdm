@@ -10,6 +10,16 @@ interface ThreadVisualizerProps {
 export const ThreadVisualizer = React.memo<ThreadVisualizerProps>(({ segments, totalSize }) => {
     const effectiveTotal = totalSize > 0 ? totalSize : segments.reduce((acc, seg) => Math.max(acc, seg.end_byte), 0);
 
+    if (effectiveTotal === 0) {
+        return (
+            <div className="cyber-hud-container mt-2">
+                <div className="text-[9px] font-mono text-cyan-500/40 text-center py-2">
+                    AWAITING SIZE DATA...
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="cyber-hud-container mt-2">
 
@@ -34,7 +44,10 @@ export const ThreadVisualizer = React.memo<ThreadVisualizerProps>(({ segments, t
                     {segments.map((seg) => {
                         const widthPercent = ((seg.end_byte - seg.start_byte) / effectiveTotal) * 100;
                         const leftPercent = (seg.start_byte / effectiveTotal) * 100;
-                        const progressPercent = ((Math.min(seg.downloaded_cursor, seg.end_byte) - seg.start_byte) / (seg.end_byte - seg.start_byte)) * 100;
+                        const segRange = seg.end_byte - seg.start_byte;
+                        const progressPercent = segRange > 0
+                            ? Math.min(((Math.min(seg.downloaded_cursor, seg.end_byte) - seg.start_byte) / segRange) * 100, 100)
+                            : 0;
 
                         // Cyberpunk Color Palette
                         let baseColor = 'rgba(15, 23, 42, 0.4)'; // Slate 900
@@ -103,48 +116,6 @@ export const ThreadVisualizer = React.memo<ThreadVisualizerProps>(({ segments, t
                     })}
                 </AnimatePresence>
             </div>
-
-            {/* Local Styles for Effects */}
-            <style>{`
-                .cyber-hud-container {
-                    background: linear-gradient(180deg, rgba(8, 14, 23, 0.7) 0%, rgba(3, 7, 18, 0.9) 100%);
-                    padding: 8px;
-                    border-radius: 6px;
-                    border: 1px solid rgba(6, 182, 212, 0.15);
-                    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-                }
-                .cyber-grid-bg {
-                    background-image: 
-                        linear-gradient(rgba(6, 182, 212, 0.05) 1px, transparent 1px),
-                        linear-gradient(90deg, rgba(6, 182, 212, 0.05) 1px, transparent 1px);
-                    background-size: 8px 8px;
-                }
-                .crt-scanlines {
-                    background: linear-gradient(
-                        to bottom,
-                        rgba(255,255,255,0),
-                        rgba(255,255,255,0) 50%,
-                        rgba(0,0,0,0.2) 50%,
-                        rgba(0,0,0,0.2)
-                    );
-                    background-size: 100% 4px;
-                }
-                .data-stream-anim {
-                    background-image: repeating-linear-gradient(
-                        -45deg,
-                        transparent,
-                        transparent 4px,
-                        rgba(255, 255, 255, 0.15) 4px,
-                        rgba(255, 255, 255, 0.15) 8px
-                    );
-                    background-size: 16px 16px;
-                    animation: stream-pan 1s linear infinite;
-                }
-                @keyframes stream-pan {
-                    from { background-position: 0 0; }
-                    to { background-position: 16px 0; }
-                }
-            `}</style>
         </div>
     );
 });

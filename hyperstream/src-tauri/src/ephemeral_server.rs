@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use warp::Filter;
 use tokio::sync::oneshot;
+use tokio_util::io::ReaderStream;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EphemeralShare {
@@ -37,6 +38,8 @@ impl EphemeralManager {
 
     /// Start sharing a file via temporary HTTP server
     pub async fn start_share(&self, file_path: String, timeout_mins: u64) -> Result<EphemeralShare, String> {
+        // Clamp to at least 1 minute to avoid immediately-expiring shares
+        let timeout_mins = timeout_mins.max(1);
         let path = PathBuf::from(&file_path);
         if !path.exists() {
             return Err("File does not exist".to_string());
@@ -93,32 +96,82 @@ impl EphemeralManager {
         let serve_filename = file_name.clone();
         let shares_ref = self.shares.clone();
         let share_id = id.clone();
+        let cleanup_id = id.clone();
+        let download_shares_ref = self.shares.clone();
         
         tokio::spawn(async move {
-            // Route: GET /<token>/<filename>
+            // Route: GET /<token>/<filename> — stream file asynchronously instead of loading into RAM
+            let dl_shares = download_shares_ref.clone();
             let file_route = warp::path(serve_token.clone())
                 .and(warp::path(serve_filename.clone()))
                 .and(warp::get())
-                .map(move || {
+                .and_then(move || {
                     let path = PathBuf::from(&serve_path);
-                    match std::fs::read(&path) {
-                        Ok(data) => {
-                            // Guess content type
-                            let content_type = guess_content_type(&path);
-                            warp::http::Response::builder()
-                                .header("Content-Type", content_type)
-                                .header("Content-Disposition", format!("attachment; filename=\"{}\"", 
-                                    path.file_name().and_then(|n| n.to_str()).unwrap_or("file")))
-                                .header("Content-Length", data.len().to_string())
-                                .body(data)
-                                .unwrap()
+                    let shares_for_count = dl_shares.clone();
+                    let share_id_for_count = share_id.clone();
+                    async move {
+                        // Enforce a maximum download count to limit abuse
+                        const MAX_DOWNLOADS: u64 = 100;
+                        {
+                            if let Ok(shares) = shares_for_count.lock() {
+                                if let Some(handle) = shares.get(&share_id_for_count) {
+                                    if handle.info.download_count >= MAX_DOWNLOADS {
+                                        return Ok::<_, warp::Rejection>(
+                                            warp::http::Response::builder()
+                                                .status(429)
+                                                .body(warp::hyper::Body::from("Download limit reached"))
+                                                .unwrap()
+                                        );
+                                    }
+                                }
+                            }
                         }
-                        Err(_) => {
-                            warp::http::Response::builder()
-                                .status(404)
-                                .body(b"File not found".to_vec())
-                                .unwrap()
+
+                        let file = match tokio::fs::File::open(&path).await {
+                            Ok(f) => f,
+                            Err(_) => {
+                                return Ok::<_, warp::Rejection>(
+                                    warp::http::Response::builder()
+                                        .status(404)
+                                        .body(warp::hyper::Body::from("File not found"))
+                                        .unwrap()
+                                );
+                            }
+                        };
+                        let metadata = match file.metadata().await {
+                            Ok(m) => m,
+                            Err(_) => {
+                                return Ok(warp::http::Response::builder()
+                                    .status(500)
+                                    .body(warp::hyper::Body::from("Failed to read file metadata"))
+                                    .unwrap());
+                            }
+                        };
+                        let content_type = guess_content_type(&path);
+                        let file_len = metadata.len();
+                        let stream = ReaderStream::new(file);
+                        let body = warp::hyper::Body::wrap_stream(stream);
+
+                        // Increment download count
+                        if let Ok(mut shares) = shares_for_count.lock() {
+                            if let Some(handle) = shares.get_mut(&share_id_for_count) {
+                                handle.info.download_count += 1;
+                            }
                         }
+
+                        // Sanitize filename for Content-Disposition header to prevent header injection
+                        let raw_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                        let safe_name: String = raw_name.chars()
+                            .filter(|c| !matches!(c, '"' | '\r' | '\n' | '\0' | '\\'))
+                            .collect();
+                        let safe_name = if safe_name.is_empty() { "file".to_string() } else { safe_name };
+
+                        Ok(warp::http::Response::builder()
+                            .header("Content-Type", content_type)
+                            .header("Content-Disposition", format!("attachment; filename=\"{}\"", safe_name))
+                            .header("Content-Length", file_len.to_string())
+                            .body(body)
+                            .unwrap())
                     }
                 });
             
@@ -131,6 +184,22 @@ impl EphemeralManager {
                 .and(warp::get())
                 .map(move || {
                     let size_str = format_size(landing_file_size);
+                    // HTML-escape the filename to prevent XSS via crafted filenames
+                    let escaped_name = landing_filename
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('"', "&quot;")
+                        .replace('\'', "&#x27;");
+                    // URL-encode filename for href (handles #, ?, spaces, etc.)
+                    let url_encoded_name: String = landing_filename.bytes().map(|b| {
+                        match b {
+                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                                (b as char).to_string()
+                            }
+                            _ => format!("%{:02X}", b),
+                        }
+                    }).collect();
                     let html = format!(r#"<!DOCTYPE html>
 <html><head><title>HyperStream Share</title>
 <style>
@@ -149,7 +218,7 @@ a.download:hover {{ transform: scale(1.05); }}
 <div class="size">{}</div>
 <a class="download" href="{}">⬇ Download</a>
 <div class="footer">This link will expire automatically.</div>
-</div></body></html>"#, landing_filename, size_str, landing_filename);
+</div></body></html>"#, escaped_name, size_str, url_encoded_name);
                     warp::reply::html(html)
                 });
                 
@@ -165,19 +234,19 @@ a.download:hover {{ transform: scale(1.05); }}
             tokio::select! {
                 _ = server => {},
                 _ = tokio::time::sleep(timeout_duration) => {
-                    println!("[EphemeralServer] Share {} expired after {} minutes", share_id, timeout_mins);
+                    println!("[EphemeralServer] Share {} expired after {} minutes", cleanup_id, timeout_mins);
                 }
             }
             
             // Cleanup
             if let Ok(mut shares) = shares_ref.lock() {
-                shares.remove(&share_id);
+                shares.remove(&cleanup_id);
             }
         });
         
         // Store handle
         {
-            let mut shares = self.shares.lock().unwrap();
+            let mut shares = self.shares.lock().unwrap_or_else(|e| e.into_inner());
             shares.insert(id.clone(), ShareHandle {
                 info: share.clone(),
                 stop_tx: Some(stop_tx),
@@ -190,7 +259,7 @@ a.download:hover {{ transform: scale(1.05); }}
 
     /// Stop and remove a share
     pub fn stop_share(&self, id: &str) -> Result<(), String> {
-        let mut shares = self.shares.lock().unwrap();
+        let mut shares = self.shares.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mut handle) = shares.remove(id) {
             if let Some(tx) = handle.stop_tx.take() {
                 let _ = tx.send(());
@@ -204,19 +273,23 @@ a.download:hover {{ transform: scale(1.05); }}
 
     /// List all active shares
     pub fn list_shares(&self) -> Vec<EphemeralShare> {
-        let shares = self.shares.lock().unwrap();
+        let shares = self.shares.lock().unwrap_or_else(|e| e.into_inner());
         shares.values().map(|h| h.info.clone()).collect()
     }
 }
 
 async fn find_available_port() -> Result<u16, String> {
-    // Try ports in range 18000-18100
-    for port in 18000..18100 {
-        if tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await.is_ok() {
-            return Ok(port);
-        }
-    }
-    Err("No available port found for ephemeral server".to_string())
+    // Bind to port 0 to let the OS assign an available port — avoids TOCTOU race
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| format!("Failed to bind ephemeral port: {}", e))?;
+    let port = listener.local_addr()
+        .map_err(|e| format!("Failed to get local addr: {}", e))?
+        .port();
+    // Drop the listener so warp can bind to the same port.
+    // Tiny race window but far better than scanning 100 ports.
+    drop(listener);
+    Ok(port)
 }
 
 fn format_size(bytes: u64) -> String {

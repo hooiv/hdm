@@ -16,7 +16,11 @@ pub async fn extract_archive(archive_path: String, destination: Option<String>) 
         d
     } else {
         // Extract to a folder with the same name (without extension)
-        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let mut stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        // Handle double extensions like .tar.gz, .tar.bz2, .tar.xz
+        if stem.ends_with(".tar") {
+            stem = stem.trim_end_matches(".tar").to_string();
+        }
         let parent = path.parent().unwrap_or(Path::new("."));
         parent.join(&stem).to_string_lossy().to_string()
     };
@@ -59,10 +63,27 @@ fn extract_zip(archive_path: &str, dest: &str) -> Result<(), String> {
         .map_err(|e| format!("Cannot open zip: {}", e))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| format!("Invalid zip: {}", e))?;
+    let dest_path = Path::new(dest);
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| format!("Zip entry error: {}", e))?;
-        let outpath = Path::new(dest).join(file.mangled_name());
+        let outpath = dest_path.join(file.mangled_name());
+
+        // Validate extracted path stays within destination (defense-in-depth beyond mangled_name)
+        // Normalize path components without requiring filesystem existence
+        let mut normalized = std::path::PathBuf::new();
+        for component in outpath.components() {
+            match component {
+                std::path::Component::ParentDir => { normalized.pop(); },
+                std::path::Component::CurDir => {},
+                c => normalized.push(c.as_os_str()),
+            }
+        }
+        if let Ok(canonical_dest) = dunce::canonicalize(dest_path) {
+            if !normalized.starts_with(&canonical_dest) {
+                return Err(format!("Zip entry escapes destination: {}", file.name()));
+            }
+        }
 
         if file.name().ends_with('/') {
             std::fs::create_dir_all(&outpath).ok();
@@ -86,10 +107,18 @@ fn extract_via_powershell(archive_path: &str, dest: &str, tool: &str) -> Result<
             .output()
             .map_err(|e| format!("tar failed: {}", e))?
     } else {
+        // Single-quote-escape paths for PowerShell -Command to prevent injection
+        // via special characters ($, `, (), ;, etc.) in filenames
+        let escaped_path = archive_path.replace('\'', "''");
+        let escaped_dest = dest.replace('\'', "''");
+        let script = format!(
+            "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+            escaped_path, escaped_dest
+        );
         Command::new("powershell")
             .args([
                 "-NoProfile", "-Command",
-                &format!("Expand-Archive -Path '{}' -DestinationPath '{}' -Force", archive_path, dest)
+                &script
             ])
             .output()
             .map_err(|e| format!("PowerShell extract failed: {}", e))?
@@ -99,6 +128,12 @@ fn extract_via_powershell(archive_path: &str, dest: &str, tool: &str) -> Result<
         let stderr = String::from_utf8_lossy(&result.stderr);
         return Err(format!("Extraction failed: {}", stderr));
     }
+
+    // Post-extraction: verify no files escaped the destination (tar/zip-slip prevention)
+    let canonical_dest = dunce::canonicalize(dest)
+        .unwrap_or_else(|_| std::path::PathBuf::from(dest));
+    verify_extraction_boundaries(&canonical_dest)?;
+
     Ok(())
 }
 
@@ -117,12 +152,38 @@ fn extract_via_7zip(archive_path: &str, dest: &str) -> Result<(), String> {
 
         if let Ok(output) = result {
             if output.status.success() {
+                // Post-extraction: verify no files escaped the destination (Zip-Slip for 7z/RAR)
+                let canonical_dest = dunce::canonicalize(dest)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(dest));
+                verify_extraction_boundaries(&canonical_dest)?;
                 return Ok(());
             }
         }
     }
 
     Err("7-Zip not found. Install 7-Zip to extract .7z and .rar files.".to_string())
+}
+
+/// Post-extraction safety check: recursively verify all extracted files stay within dest_dir.
+fn verify_extraction_boundaries(dest_dir: &std::path::Path) -> Result<(), String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path) -> Result<(), String> {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let canonical = dunce::canonicalize(&path)
+                    .unwrap_or_else(|_| path.clone());
+                if !canonical.starts_with(root) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!("Path traversal detected in archive: {}", canonical.display()));
+                }
+                if path.is_dir() {
+                    walk(&path, root)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(dest_dir, dest_dir)
 }
 
 fn count_files_recursive(dir: &str) -> usize {

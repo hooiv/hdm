@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { error as logError } from '../utils/logger';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 
@@ -40,7 +41,9 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose })
     useEffect(() => {
         if (isOpen) {
             refreshData();
-            const interval = setInterval(refreshData, 10000);
+            const interval = setInterval(() => {
+                if (!document.hidden) refreshData();
+            }, 10000);
             return () => clearInterval(interval);
         }
     }, [isOpen]);
@@ -52,7 +55,7 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose })
             setDownloads(list);
             setTimeInfo(info);
         } catch (err) {
-            console.error('Failed to fetch schedule data:', err);
+            logError('Failed to fetch schedule data:', err);
         }
     };
 
@@ -84,12 +87,14 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose })
             // Reset form
             setUrl('');
             setFilename('');
+            setDate('');
+            setTime('');
             setError('');
             setActiveTab('list'); // Switch to list view
             refreshData();
         } catch (err) {
             setError('Failed to schedule download');
-            console.error(err);
+            logError(err);
         }
     };
 
@@ -98,7 +103,7 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose })
             await invoke('force_start_scheduled_download', { id });
             await refreshData();
         } catch (err) {
-            console.error('Failed to force start:', err);
+            logError('Failed to force start:', err);
             toast.error("Failed to force start download");
         }
     };
@@ -108,7 +113,7 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose })
             await invoke('remove_scheduled_download', { id });
             await refreshData();
         } catch (err) {
-            console.error('Failed to remove schedule:', err);
+            logError('Failed to remove schedule:', err);
             toast.error("Failed to remove scheduled download");
         }
     };
@@ -119,7 +124,7 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose })
     const pendingDownloads = downloads.filter(d => d.status === 'pending');
 
     return (
-        <div className="modal-overlay" onClick={onClose}>
+        <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true">
             <div className="modal-content schedule-modal" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
                     <h3>📅 Scheduler</h3>

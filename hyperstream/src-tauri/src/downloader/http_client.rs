@@ -67,7 +67,7 @@ impl Default for HttpClientConfig {
 
 /// Chrome-like user agent for better compatibility
 pub const CHROME_USER_AGENT: &str = 
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 
 /// Build a configured HTTP client
@@ -101,7 +101,7 @@ pub fn build_stealth_client(config: &HttpClientConfig) -> Result<Client, rquest:
     default_headers.insert("Accept", HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"));
     default_headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
     default_headers.insert("Accept-Encoding", HeaderValue::from_static("identity")); // we manually handle decomp if needed, or let reqwest do it but we want byte accuracy
-    default_headers.insert("Sec-Ch-Ua", HeaderValue::from_static("\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\""));
+    default_headers.insert("Sec-Ch-Ua", HeaderValue::from_static("\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"131\", \"Google Chrome\";v=\"131\""));
     default_headers.insert("Sec-Ch-Ua-Mobile", HeaderValue::from_static("?0"));
     default_headers.insert("Sec-Ch-Ua-Platform", HeaderValue::from_static("\"Windows\""));
     default_headers.insert("Sec-Fetch-Dest", HeaderValue::from_static("document"));
@@ -109,10 +109,10 @@ pub fn build_stealth_client(config: &HttpClientConfig) -> Result<Client, rquest:
     default_headers.insert("Sec-Fetch-Site", HeaderValue::from_static("none"));
     default_headers.insert("Sec-Fetch-User", HeaderValue::from_static("?1"));
     default_headers.insert("Upgrade-Insecure-Requests", HeaderValue::from_static("1"));
+    // USER_AGENT is set via default_headers only — do NOT also call .user_agent() which would conflict
     default_headers.insert(USER_AGENT, HeaderValue::from_static(CHROME_USER_AGENT)); 
 
-    let builder = Client::builder()
-        .user_agent(&config.user_agent)
+    let mut builder = Client::builder()
         .timeout(config.timeout)
         .connect_timeout(config.connect_timeout)
         .default_headers(default_headers)
@@ -122,6 +122,12 @@ pub fn build_stealth_client(config: &HttpClientConfig) -> Result<Client, rquest:
         } else {
             rquest::redirect::Policy::none()
         });
+
+    if let Some(proxy_config) = &config.proxy {
+        if let Some(proxy) = proxy_config.to_rquest_proxy() {
+            builder = builder.proxy(proxy);
+        }
+    }
 
     builder.build()
 }

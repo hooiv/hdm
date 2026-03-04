@@ -18,7 +18,7 @@ impl Default for ProxyType {
 }
 
 /// Proxy configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ProxyConfig {
     pub enabled: bool,
     pub proxy_type: ProxyType,
@@ -28,6 +28,20 @@ pub struct ProxyConfig {
     pub password: Option<String>,
     /// Bypass proxy for these hosts (comma-separated)
     pub bypass_list: String,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("enabled", &self.enabled)
+            .field("proxy_type", &self.proxy_type)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("bypass_list", &self.bypass_list)
+            .finish()
+    }
 }
 
 impl ProxyConfig {
@@ -143,8 +157,11 @@ impl ProxyConfig {
             
             // Support wildcards like *.example.com
             if bypass.starts_with("*.") {
-                let domain = &bypass[2..];
-                if host.ends_with(domain) || host == domain {
+                let domain = &bypass[2..]; // e.g. "example.com"
+                // Exact match (host == "example.com") or subdomain match
+                // (host ends with ".example.com").  The dot prefix prevents
+                // "evilexample.com" from matching "*.example.com".
+                if host == domain || host.ends_with(&format!(".{}", domain)) {
                     return true;
                 }
             } else if host == bypass {
@@ -180,8 +197,10 @@ mod tests {
         assert!(config.should_bypass("localhost"));
         assert!(config.should_bypass("www.google.com"));
         assert!(config.should_bypass("mail.google.com"));
+        assert!(config.should_bypass("google.com")); // exact match for *.google.com
         assert!(config.should_bypass("192.168.1.1"));
         assert!(!config.should_bypass("example.com"));
+        assert!(!config.should_bypass("evilgoogle.com")); // must NOT match *.google.com
     }
 
     #[test]

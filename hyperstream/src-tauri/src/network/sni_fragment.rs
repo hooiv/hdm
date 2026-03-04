@@ -13,6 +13,7 @@ pub struct SniFragmentedStream {
 }
 
 impl SniFragmentedStream {
+    #[allow(dead_code)]
     pub async fn connect(addr: impl tokio::net::ToSocketAddrs) -> io::Result<Self> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?; // Essential for fragmentation to work immediately

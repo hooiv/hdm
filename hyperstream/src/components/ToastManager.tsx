@@ -10,13 +10,20 @@ export interface ToastRef {
     addToast: (message: string, type: 'success' | 'error' | 'info') => void;
 }
 
+let toastIdCounter = 0;
+const MAX_TOASTS = 5;
+
 export const ToastManager = forwardRef<ToastRef>((_props, ref) => {
     const [toasts, setToasts] = useState<ToastProps[]>([]);
 
     useImperativeHandle(ref, () => ({
         addToast(message, type) {
-            const id = Date.now();
-            setToasts(prev => [...prev, { id, message, type }]);
+            const id = ++toastIdCounter;
+            setToasts(prev => {
+                const next = [...prev, { id, message, type }];
+                // Cap visible toasts to prevent overflow
+                return next.length > MAX_TOASTS ? next.slice(-MAX_TOASTS) : next;
+            });
             setTimeout(() => {
                 setToasts(prev => prev.filter(t => t.id !== id));
             }, 3000);

@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Share2, Users, Upload, Download, Copy, Check, Wifi, AlertCircle } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
+import { formatBytes } from '../utils/formatters';
+import { error as logError } from '../utils/logger';
 
 interface P2PShareSession {
     id: string;
@@ -38,7 +40,17 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
         if (isOpen && !isJoinMode) {
             createShare();
         }
-    }, [isOpen, downloadId]);
+    }, [isOpen, downloadId, isJoinMode]);
+
+    // Cleanup: close session when modal unmounts or closes
+    useEffect(() => {
+        return () => {
+            // Use a local ref capture so we don't close a stale session
+            if (session) {
+                invoke('close_p2p_session', { sessionId: session.id }).catch(() => {});
+            }
+        };
+    }, [session?.id]);
 
     const createShare = async () => {
         try {
@@ -49,7 +61,7 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
             });
             setSession(result);
         } catch (e) {
-            setError(e as string);
+            setError(String(e));
         } finally {
             setLoading(false);
         }
@@ -71,7 +83,7 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
             setSession(result);
             setIsJoinMode(false);
         } catch (e) {
-            setError(e as string);
+            setError(String(e));
         } finally {
             setLoading(false);
         }
@@ -83,7 +95,7 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
                 await invoke('close_p2p_session', { sessionId: session.id });
                 onClose();
             } catch (e) {
-                console.error('Failed to close session:', e);
+                logError('Failed to close session:', e);
                 toast.error("Failed to close P2P session");
                 onClose();
             }
@@ -100,14 +112,6 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
         }
     };
 
-    const formatBytes = (bytes: number) => {
-        if (!bytes || bytes <= 0) return '0 B';
-        const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB'];
-        const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
-        return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
-    };
-
     return (
         <AnimatePresence>
             {isOpen && (
@@ -117,6 +121,8 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
                     exit={{ opacity: 0 }}
                     className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
                     onClick={closeShare}
+                    role="dialog"
+                    aria-modal="true"
                 >
                     <motion.div
                         initial={{ scale: 0.95, opacity: 0 }}

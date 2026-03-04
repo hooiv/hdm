@@ -2,7 +2,7 @@
 // HyperStream Content Script
 // Scans for media and downloadable links
 
-console.log("HyperStream Content Script Loaded");
+// Content script initialized
 
 function scanPage() {
     const media = [];

@@ -9,10 +9,20 @@ pub struct UpscaleResult {
     pub message: String,
 }
 
-pub fn upscale_image(image_path: &str) -> Result<UpscaleResult, String> {
+pub async fn upscale_image(image_path: &str) -> Result<UpscaleResult, String> {
     let path = Path::new(image_path);
     if !path.exists() {
         return Err("Image file does not exist".into());
+    }
+
+    // Validate path is within download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    if let Ok(canon) = dunce::canonicalize(path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Image must be within the download directory".to_string());
+        }
     }
 
     let file_stem = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -30,9 +40,9 @@ pub fn upscale_image(image_path: &str) -> Result<UpscaleResult, String> {
     // In a real scenario, we would bundle and call `realesrgan-ncnn-vulkan.exe -i in.jpg -o out.png -s 4`
     // Since we don't have the 200MB binary in the repo, we simulate the execution visually via a 2-second sleep
     // and just do a simple image resize utilizing the `image` crate (or just mock it by copying for MVP).
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    match std::fs::copy(image_path, &out_path) {
+    match tokio::fs::copy(image_path, &out_path).await {
         Ok(_) => Ok(UpscaleResult {
             success: true,
             original_path: image_path.to_string(),

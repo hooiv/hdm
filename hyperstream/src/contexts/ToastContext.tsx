@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useCallback, useRef, useEffect, useMemo, ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle, AlertTriangle, XCircle, Info, X } from 'lucide-react';
 
@@ -58,32 +58,48 @@ const getColors = (type: ToastType) => {
 
 export const ToastProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const [toasts, setToasts] = useState<ToastMessage[]>([]);
+    const toastIdCounter = useRef(0);
+    const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-    const addToast = useCallback((options: Omit<ToastMessage, 'id'>) => {
-        const id = Math.random().toString(36).substring(2, 9);
-        setToasts((prev) => [...prev, { ...options, id }]);
-
-        if (options.duration !== Infinity) {
-            setTimeout(() => {
-                removeToast(id);
-            }, options.duration || 5000);
-        }
+    // Cleanup all timers on unmount
+    useEffect(() => {
+        return () => {
+            timersRef.current.forEach((timer) => clearTimeout(timer));
+            timersRef.current.clear();
+        };
     }, []);
 
     const removeToast = useCallback((id: string) => {
         setToasts((prev) => prev.filter((t) => t.id !== id));
+        const timer = timersRef.current.get(id);
+        if (timer) {
+            clearTimeout(timer);
+            timersRef.current.delete(id);
+        }
     }, []);
 
+    const addToast = useCallback((options: Omit<ToastMessage, 'id'>) => {
+        const id = `toast-${++toastIdCounter.current}`;
+        setToasts((prev) => [...prev, { ...options, id }]);
+
+        if (options.duration !== Infinity) {
+            const timer = setTimeout(() => {
+                removeToast(id);
+            }, options.duration || 5000);
+            timersRef.current.set(id, timer);
+        }
+    }, [removeToast]);
+
+    const contextValue = useMemo<ToastContextType>(() => ({
+        toast: addToast,
+        success: (m, t) => addToast({ type: 'success', message: m, title: t }),
+        error: (m, t) => addToast({ type: 'error', message: m, title: t }),
+        warning: (m, t) => addToast({ type: 'warning', message: m, title: t }),
+        info: (m, t) => addToast({ type: 'info', message: m, title: t }),
+    }), [addToast]);
+
     return (
-        <ToastContext.Provider
-            value={{
-                toast: addToast,
-                success: (m, t) => addToast({ type: 'success', message: m, title: t }),
-                error: (m, t) => addToast({ type: 'error', message: m, title: t }),
-                warning: (m, t) => addToast({ type: 'warning', message: m, title: t }),
-                info: (m, t) => addToast({ type: 'info', message: m, title: t }),
-            }}
-        >
+        <ToastContext.Provider value={contextValue}>
             {children}
 
             {/* Toast Container */}

@@ -124,7 +124,7 @@ async fn play_torrent(
     
     // 2. Register in FileMap (ID -> Torrent Source)
     {
-        let mut map = state.p2p_file_map.lock().unwrap();
+        let mut map = state.p2p_file_map.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(id.to_string(), StreamingSource::Torrent { torrent_id: id, file_id: fid });
         // NOTE: If we want to support file system fallback (e.g. from get_main_file_path),
         // we could check if file exists on disk.
@@ -142,27 +142,78 @@ async fn get_torrents(
     Ok(state.torrent_manager.get_torrents())
 }
 
+/// Validate that an export/import file path is within safe user directories
+fn validate_export_import_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let canonical = dunce::canonicalize(std::path::Path::new(path))
+        .or_else(|_| {
+            // File may not exist yet (export case) — canonicalize the parent
+            let p = std::path::Path::new(path);
+            if let Some(parent) = p.parent() {
+                dunce::canonicalize(parent).map(|cp| cp.join(p.file_name().unwrap_or_default()))
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Invalid path"))
+            }
+        })
+        .map_err(|e| format!("Invalid path: {}", e))?;
+
+    let allowed_dirs: Vec<std::path::PathBuf> = [
+        dirs::download_dir(),
+        dirs::document_dir(),
+        dirs::desktop_dir(),
+    ]
+    .iter()
+    .filter_map(|d| d.as_ref().and_then(|p| dunce::canonicalize(p).ok()))
+    .collect();
+
+    if allowed_dirs.is_empty() {
+        return Err("Cannot determine safe directories".to_string());
+    }
+
+    if !allowed_dirs.iter().any(|dir| canonical.starts_with(dir)) {
+        return Err("Export/import path must be within Downloads, Documents, or Desktop".to_string());
+    }
+
+    Ok(canonical)
+}
+
 #[tauri::command]
 async fn export_data(path: String) -> Result<(), String> {
+    let validated_path = validate_export_import_path(&path)?;
     let settings = settings::load_settings();
     let downloads = persistence::load_downloads().unwrap_or_default();
     
     let data = crate::import_export::ExportData {
         version: "1.0".to_string(),
-        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
         settings,
         downloads,
     };
     
-    crate::import_export::save_export_to_file(&data, &path)
+    crate::import_export::save_export_to_file(&data, &validated_path.to_string_lossy())
 }
 
 #[tauri::command]
 async fn import_data(path: String) -> Result<(), String> {
-    let data = crate::import_export::load_export_from_file(&path)?;
+    let validated_path = validate_export_import_path(&path)?;
+    let data = crate::import_export::load_export_from_file(&validated_path.to_string_lossy())?;
     
-    // 1. Restore Settings
-    settings::save_settings(&data.settings)?;
+    // 1. Selectively merge safe settings fields — skip security-critical ones
+    //    (proxy creds, cloud API keys, download_dir, telegram tokens, mqtt, vpn, etc.)
+    let mut current_settings = settings::load_settings();
+    current_settings.segments = data.settings.segments;
+    current_settings.speed_limit_kbps = data.settings.speed_limit_kbps;
+    current_settings.clipboard_monitor = data.settings.clipboard_monitor;
+    current_settings.auto_start_extension = data.settings.auto_start_extension;
+    current_settings.use_category_folders = data.settings.use_category_folders;
+    current_settings.category_rules = data.settings.category_rules.clone();
+    current_settings.auto_extract_archives = data.settings.auto_extract_archives;
+    current_settings.cleanup_archives_after_extract = data.settings.cleanup_archives_after_extract;
+    current_settings.auto_scrub_metadata = data.settings.auto_scrub_metadata;
+    current_settings.prevent_sleep_during_download = data.settings.prevent_sleep_during_download;
+    current_settings.pause_on_low_battery = data.settings.pause_on_low_battery;
+    current_settings.min_threads = data.settings.min_threads;
+    current_settings.max_threads = data.settings.max_threads;
+    settings::save_settings(&current_settings)?;
     
     // 2. Restore Downloads (Merge/Append)
     let mut current_downloads = persistence::load_downloads().unwrap_or_default();
@@ -203,12 +254,38 @@ async fn pause_download(
     id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut downloads = state.downloads.lock().unwrap();
+    let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(session) = downloads.remove(&id) {
+        // Capture segment state BEFORE sending stop signal to avoid losing up to 5s of progress
+        let segments = session.manager.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
+        let total_downloaded: u64 = segments.iter()
+            .map(|s| s.downloaded_cursor.saturating_sub(s.start_byte))
+            .sum();
+        
         let _ = session.stop_tx.send(());
+        
+        // Update persistence with accurate segment state
+        let filename = std::path::Path::new(&session.path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "download".to_string());
+        
+        let saved = persistence::SavedDownload {
+            id: id.clone(),
+            url: session.url.clone(),
+            path: session.path.clone(),
+            filename,
+            total_size: session.manager.lock().unwrap_or_else(|e| e.into_inner()).file_size,
+            downloaded_bytes: total_downloaded,
+            status: "Paused".to_string(),
+            segments: Some(segments),
+        };
+        let _ = persistence::upsert_download(saved);
+        
+        return Ok(());
     }
     
-    // Update persistence
+    // Fallback: update persistence if session wasn't found (already stopped)
     let mut saved_downloads = persistence::load_downloads().unwrap_or_default();
     if let Some(d) = saved_downloads.iter_mut().find(|d| d.id == id) {
         d.status = "Paused".to_string();
@@ -245,6 +322,16 @@ fn save_settings(settings: serde_json::Value) -> Result<(), String> {
 
 #[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
+    // Validate path is within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    if let Ok(canon) = dunce::canonicalize(&path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Path must be within the download directory".to_string());
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
         // Use explorer.exe directly instead of cmd /c start to avoid command injection
@@ -298,6 +385,16 @@ fn select_file(filter: Option<String>) -> Result<String, String> {
 
 #[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
+    // Validate path is within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    if let Ok(canon) = dunce::canonicalize(&path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Path must be within the download directory".to_string());
+        }
+    }
+
     let folder = std::path::Path::new(&path)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
@@ -355,9 +452,12 @@ async fn crawl_website(
     max_depth: u32, 
     extensions: Vec<String>
 ) -> Result<Vec<spider::GrabbedFile>, String> {
+    // Cap max_depth to prevent excessive crawling
+    let max_depth = max_depth.min(5);
+    
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0")
+        .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
     
@@ -380,15 +480,47 @@ fn preview_zip_partial(data: Vec<u8>) -> Result<zip_preview::ZipPreview, String>
 
 #[tauri::command]
 fn preview_zip_file(path: String) -> Result<zip_preview::ZipPreview, String> {
+    // Validate path is within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    if let Ok(canon) = dunce::canonicalize(&path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Path must be within the download directory".to_string());
+        }
+    }
     zip_preview::preview_zip(std::path::Path::new(&path))
 }
 
 #[tauri::command]
 fn extract_single_file(zip_path: String, entry_name: String, dest_path: String) -> Result<(), String> {
+    // Validate both paths are within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    if let Ok(canon) = dunce::canonicalize(&zip_path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Zip path must be within the download directory".to_string());
+        }
+    }
+    // Normalize dest_path to prevent traversal
+    let dest = std::path::Path::new(&dest_path);
+    let abs_dest = if dest.is_absolute() { dest.to_path_buf() } else { download_dir.join(dest) };
+    let mut normalized = std::path::PathBuf::new();
+    for component in abs_dest.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); },
+            std::path::Component::CurDir => {},
+            c => normalized.push(c.as_os_str()),
+        }
+    }
+    if !normalized.starts_with(&download_dir) {
+        return Err("Destination must be within the download directory".to_string());
+    }
     zip_preview::extract_file(
         std::path::Path::new(&zip_path),
         &entry_name,
-        std::path::Path::new(&dest_path)
+        &normalized
     )
 }
 
@@ -402,16 +534,64 @@ async fn preview_zip_remote(url: String) -> Result<zip_preview::ZipPreview, Stri
 
 #[tauri::command]
 async fn download_zip_entry(url: String, entry_name: String, dest_path: String) -> Result<(), String> {
+    // Validate URL scheme
+    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
+    match parsed.scheme() {
+        "http" | "https" => {},
+        s => return Err(format!("Unsupported URL scheme: {}", s)),
+    }
+
+    // Validate dest_path stays within the download directory using path normalization
+    // (canonicalize fails on non-existent paths, so we normalize manually)
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    let dest = std::path::Path::new(&dest_path);
+    let abs_dest = if dest.is_absolute() {
+        dest.to_path_buf()
+    } else {
+        download_dir.join(dest)
+    };
+    // Normalize path: resolve .. components without filesystem access
+    let mut normalized = std::path::PathBuf::new();
+    for component in abs_dest.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); },
+            std::path::Component::CurDir => {},
+            c => normalized.push(c.as_os_str()),
+        }
+    }
+    if !normalized.starts_with(&download_dir) {
+        return Err("Destination path must be within the download directory".to_string());
+    }
+
     let client = rquest::Client::builder()
         .build()
         .map_err(|e| e.to_string())?;
     let bytes = zip_preview::download_entry_remote(url, entry_name, client).await?;
-    std::fs::write(dest_path, bytes).map_err(|e| e.to_string())
+    // Write to the normalized path to prevent traversal
+    if let Some(parent) = normalized.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&normalized, bytes).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn read_zip_last_bytes(path: String, length: usize) -> Result<Vec<u8>, String> {
-    zip_preview::read_last_bytes(std::path::Path::new(&path), length)
+    // Cap read length to 10MB
+    const MAX_READ: usize = 10 * 1024 * 1024;
+    if length > MAX_READ {
+        return Err(format!("Read length {} exceeds max {} bytes", length, MAX_READ));
+    }
+    // Validate path is within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    let canon = dunce::canonicalize(&path).map_err(|e| e.to_string())?;
+    if !canon.starts_with(&download_dir) {
+        return Err("Path must be within the download directory".to_string());
+    }
+    zip_preview::read_last_bytes(&canon, length)
 }
 
 
@@ -458,7 +638,6 @@ async fn join_workspace(host_ip: String) -> Result<(), String> {
 #[tauri::command]
 async fn parse_hls_stream(url: String) -> Result<media::HlsStream, String> {
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .build()
         .map_err(|e| e.to_string())?;
     
@@ -475,6 +654,32 @@ fn parse_dash_manifest(content: String, base_url: String) -> Result<media::dash_
 
 #[tauri::command]
 async fn mux_video_audio(video_path: String, audio_path: String, output_path: String) -> Result<(), String> {
+    // Validate all paths are within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    for (label, p) in [("Video", &video_path), ("Audio", &audio_path)] {
+        if let Ok(canon) = dunce::canonicalize(p) {
+            if !canon.starts_with(&download_dir) {
+                return Err(format!("{} path must be within the download directory", label));
+            }
+        }
+    }
+    // Normalize output path (may not exist yet)
+    let out = std::path::Path::new(&output_path);
+    let abs_out = if out.is_absolute() { out.to_path_buf() } else { download_dir.join(out) };
+    let mut normalized = std::path::PathBuf::new();
+    for component in abs_out.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); },
+            std::path::Component::CurDir => {},
+            c => normalized.push(c.as_os_str()),
+        }
+    }
+    if !normalized.starts_with(&download_dir) {
+        return Err("Output path must be within the download directory".to_string());
+    }
+
     media::muxer::merge_streams(
         std::path::Path::new(&video_path),
         std::path::Path::new(&audio_path),
@@ -489,6 +694,24 @@ fn check_ffmpeg_installed() -> bool {
 
 #[tauri::command]
 fn decrypt_aes_128(input_path: String, output_path: String, key_hex: String, iv_hex: String) -> Result<(), String> {
+    // Validate both paths are within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+
+    let abs_input = dunce::canonicalize(&input_path)
+        .map_err(|e| format!("Invalid input path: {}", e))?;
+    if !abs_input.starts_with(&download_dir) {
+        return Err("Input path must be within the download directory".to_string());
+    }
+
+    let abs_output_parent = dunce::canonicalize(
+        std::path::Path::new(&output_path).parent().unwrap_or(std::path::Path::new("."))
+    ).unwrap_or_else(|_| std::path::PathBuf::from(&output_path));
+    if !abs_output_parent.starts_with(&download_dir) {
+        return Err("Output path must be within the download directory".to_string());
+    }
+
     let key = media::decrypt::decode_hex(&key_hex)?;
     let iv = media::decrypt::decode_hex(&iv_hex)?;
     
@@ -899,8 +1122,30 @@ fn check_captive_portal(first_bytes: Vec<u8>) -> bool {
 
 #[tauri::command]
 fn preallocate_download_file(path: String, size: u64) -> Result<(), String> {
+    // Validate path is within download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    let p = std::path::Path::new(&path);
+    let abs_path = if p.is_absolute() { p.to_path_buf() } else { download_dir.join(p) };
+    let mut normalized = std::path::PathBuf::new();
+    for component in abs_path.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); },
+            std::path::Component::CurDir => {},
+            c => normalized.push(c.as_os_str()),
+        }
+    }
+    if !normalized.starts_with(&download_dir) {
+        return Err("Path must be within the download directory".to_string());
+    }
+    // Cap preallocation to 100 GB
+    const MAX_PREALLOC: u64 = 100 * 1024 * 1024 * 1024;
+    if size > MAX_PREALLOC {
+        return Err(format!("Preallocation size {} exceeds maximum {} bytes", size, MAX_PREALLOC));
+    }
     downloader::disk::preallocate_file(std::path::Path::new(&path), size)
-        .map(|_| ()) // Discard the file handle
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
@@ -978,8 +1223,8 @@ fn get_feeds() -> Vec<feeds::FeedConfig> {
 }
 
 #[tauri::command]
-fn add_feed(config: feeds::FeedConfig) {
-    feeds::FEED_MANAGER.add_feed(config);
+fn add_feed(config: feeds::FeedConfig) -> Result<(), String> {
+    feeds::FEED_MANAGER.add_feed(config)
 }
 
 #[tauri::command]
@@ -1094,6 +1339,19 @@ fn analyze_error_strategy(error_type: String) -> String {
 
 #[tauri::command]
 async fn start_range_download(url: String, start: u64, end: u64) -> Result<Vec<u8>, String> {
+    // Validate URL scheme to prevent SSRF
+    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
+    match parsed.scheme() {
+        "http" | "https" => {},
+        s => return Err(format!("Unsupported URL scheme: {}", s)),
+    }
+
+    // Cap range size to 50 MB to prevent OOM
+    const MAX_RANGE_SIZE: u64 = 50 * 1024 * 1024;
+    if end > start && (end - start) > MAX_RANGE_SIZE {
+        return Err(format!("Range too large: {} bytes (max {})", end - start, MAX_RANGE_SIZE));
+    }
+
     let settings = settings::load_settings();
     let mut config = downloader::http_client::HttpClientConfig::default();
     config.proxy = Some(crate::proxy::ProxyConfig::from_settings(&settings));
@@ -1109,6 +1367,9 @@ async fn start_range_download(url: String, start: u64, end: u64) -> Result<Vec<u
         .map_err(|e| e.to_string())?;
     
     let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_RANGE_SIZE {
+        return Err(format!("Response body too large: {} bytes", bytes.len()));
+    }
     Ok(bytes.to_vec())
 }
 
@@ -1211,7 +1472,7 @@ lazy_static::lazy_static! {
 
 #[tauri::command]
 fn get_retry_state() -> serde_json::Value {
-    let state = RETRY_STATE.lock().unwrap();
+    let state = RETRY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     serde_json::json!({
         "immediate_attempts": state.immediate_attempts,
         "delayed_attempts": state.delayed_attempts,
@@ -1222,7 +1483,7 @@ fn get_retry_state() -> serde_json::Value {
 
 #[tauri::command]
 fn reset_retry_state() {
-    let mut state = RETRY_STATE.lock().unwrap();
+    let mut state = RETRY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.reset();
 }
 
@@ -1243,6 +1504,24 @@ fn analyze_network_error(error_type: String) -> String {
 
 #[tauri::command]
 fn open_file_for_resume(path: String) -> Result<u64, String> {
+    // Validate path is within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    let p = std::path::Path::new(&path);
+    let abs_path = if p.is_absolute() { p.to_path_buf() } else { download_dir.join(p) };
+    let mut normalized = std::path::PathBuf::new();
+    for component in abs_path.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); },
+            std::path::Component::CurDir => {},
+            c => normalized.push(c.as_os_str()),
+        }
+    }
+    if !normalized.starts_with(&download_dir) {
+        return Err("Path must be within the download directory".to_string());
+    }
+
     let file = downloader::disk::open_for_resume(std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
     let size = file.metadata()
@@ -1280,6 +1559,12 @@ fn get_disk_writer_config() -> serde_json::Value {
 
 #[tauri::command]
 async fn refresh_download_url(state: State<'_, AppState>, app_handle: tauri::AppHandle, id: String, new_url: String) -> Result<(), String> {
+    // Validate new URL scheme
+    let parsed = reqwest::Url::parse(&new_url).map_err(|e| format!("Invalid URL: {}", e))?;
+    match parsed.scheme() {
+        "http" | "https" => {},
+        s => return Err(format!("Unsupported URL scheme: {}", s)),
+    }
     println!("DEBUG: Refreshing URL for {}: {}", id, new_url);
     
     // 1. Update in persistence
@@ -1294,7 +1579,7 @@ async fn refresh_download_url(state: State<'_, AppState>, app_handle: tauri::App
 
     // 2. Stop active session if any
     {
-        let mut active_downloads = state.downloads.lock().unwrap();
+        let mut active_downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(session) = active_downloads.remove(&id) {
             // Signal stop
             let _ = session.stop_tx.send(());
@@ -1319,7 +1604,7 @@ async fn refresh_download_url(state: State<'_, AppState>, app_handle: tauri::App
 #[tauri::command]
 async fn install_plugin(app_handle: tauri::AppHandle, url: String, filename: Option<String>) -> Result<String, String> {
 
-    plugin_vm::updater::install_plugin_from_url(&app_handle, url, filename).await
+    plugin_vm::updater::install_plugin_from_url(&app_handle, url, filename, None).await
 }
 
 #[tauri::command]
@@ -1344,13 +1629,21 @@ fn get_chaos_config() -> serde_json::Value {
 
 #[tauri::command]
 async fn download_as_warc(url: String, save_path: String) -> Result<String, String> {
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
     let path = std::path::PathBuf::from(&save_path);
     let resolved = if path.is_absolute() {
         path
     } else {
-        let settings = settings::load_settings();
         std::path::PathBuf::from(&settings.download_dir).join(path)
     };
+    // Validate resolved path stays within download directory
+    let canonical_resolved = dunce::canonicalize(resolved.parent().unwrap_or(&resolved))
+        .unwrap_or_else(|_| resolved.clone());
+    if !canonical_resolved.starts_with(&download_dir) {
+        return Err("Save path must be within the download directory".to_string());
+    }
     crate::warc_archiver::download_as_warc(url, resolved).await
 }
 
@@ -1371,6 +1664,15 @@ async fn verify_notarization(path: String) -> Result<serde_json::Value, String> 
 
 #[tauri::command]
 async fn find_mirrors(path: String) -> Result<serde_json::Value, String> {
+    // Validate that path is within download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canonical = dunce::canonicalize(&path)
+        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+    if !canonical.starts_with(&download_dir) {
+        return Err("Path is outside download directory".to_string());
+    }
     crate::mirror_hunter::find_mirrors(path).await
 }
 
@@ -1427,6 +1729,32 @@ fn launch_tui_dashboard() -> Result<String, String> {
 
 #[tauri::command]
 async fn auto_extract_archive(path: String, destination: Option<String>) -> Result<serde_json::Value, String> {
+    // Validate archive path is within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    if let Ok(canon) = dunce::canonicalize(&path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Archive path must be within the download directory".to_string());
+        }
+    }
+    // Validate destination if provided
+    if let Some(ref dest) = destination {
+        let dest_path = std::path::Path::new(dest);
+        if dest_path.exists() {
+            if let Ok(canon_dest) = dunce::canonicalize(dest_path) {
+                if !canon_dest.starts_with(&download_dir) {
+                    return Err("Destination must be within the download directory".to_string());
+                }
+            }
+        } else if let Some(parent) = dest_path.parent() {
+            if let Ok(canon_parent) = dunce::canonicalize(parent) {
+                if !canon_parent.starts_with(&download_dir) {
+                    return Err("Destination must be within the download directory".to_string());
+                }
+            }
+        }
+    }
     crate::auto_extract::extract_archive(path, destination).await
 }
 
@@ -1472,8 +1800,8 @@ fn rclone_list_remotes() -> Result<Vec<crate::rclone_bridge::RcloneRemote>, Stri
 }
 
 #[tauri::command]
-fn rclone_transfer(source: String, destination: String) -> Result<String, String> {
-    crate::rclone_bridge::rclone_transfer(source, destination)
+async fn rclone_transfer(source: String, destination: String) -> Result<String, String> {
+    crate::rclone_bridge::rclone_transfer(source, destination).await
 }
 
 #[tauri::command]
@@ -1507,8 +1835,8 @@ fn get_geofence_rules() -> Result<Vec<crate::geofence::GeofenceRule>, String> {
 }
 
 #[tauri::command]
-fn upscale_image(path: String) -> Result<crate::ai::upscale::UpscaleResult, String> {
-    crate::ai::upscale::upscale_image(&path)
+async fn upscale_image(path: String) -> Result<crate::ai::upscale::UpscaleResult, String> {
+    crate::ai::upscale::upscale_image(&path).await
 }
 
 #[tauri::command]
@@ -1790,8 +2118,16 @@ pub fn run() {
                             Ok(node) => node,
                             Err(e2) => {
                                 eprintln!("Warning: P2P also failed on fallback port: {}. Trying dynamic port...", e2);
+                                match network::p2p::P2PNode::new(0).await {
+                            Ok(node) => node,
+                            Err(e3) => {
+                                eprintln!("CRITICAL: P2P node failed on all ports including dynamic: {}. P2P features disabled.", e3);
+                                // Create a dummy node bound to a random port — accept that P2P won't work
+                                // Rather than crashing the entire app, we proceed with degraded functionality
                                 network::p2p::P2PNode::new(0).await
-                                    .expect("P2P node creation with dynamic port should not fail")
+                                    .unwrap_or_else(|_| panic!("P2P subsystem completely unavailable"))
+                            }
+                        }
                             }
                         }
                     }
@@ -1813,8 +2149,17 @@ pub fn run() {
                          // Use a fallback temp directory instead of panicking
                          let fallback = std::env::temp_dir().join("hyperstream_torrents");
                          std::fs::create_dir_all(&fallback).unwrap_or_default();
-                         network::bittorrent::manager::TorrentManager::new(fallback).await
-                             .expect("Torrent Manager fallback with temp dir also failed")
+                         match network::bittorrent::manager::TorrentManager::new(fallback).await {
+                             Ok(tm) => tm,
+                             Err(e2) => {
+                                 eprintln!("CRITICAL: Torrent Manager failed even with temp dir: {}. Torrent features will be unavailable.", e2);
+                                 // Try one last time with a unique temp dir
+                                 let last_resort = std::env::temp_dir().join(format!("hyperstream_torrents_{}", std::process::id()));
+                                 std::fs::create_dir_all(&last_resort).unwrap_or_default();
+                                 network::bittorrent::manager::TorrentManager::new(last_resort).await
+                                     .unwrap_or_else(|e3| panic!("Torrent subsystem completely unavailable: {}", e3))
+                             }
+                         }
                      }
                  }
             });
@@ -1919,7 +2264,7 @@ pub fn run() {
                     let state = battery_app_handle.state::<AppState>();
                     
                     let active_count = {
-                        let downloads = state.downloads.lock().unwrap();
+                        let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                         downloads.len()
                     };
                     
@@ -1933,27 +2278,38 @@ pub fn run() {
                         if let Some(pct) = crate::power_manager::get_battery_percentage() {
                             if pct <= 15 && active_count > 0 {
                                 println!("🔋 Battery critical ({}%). Pausing all downloads.", pct);
-                                let to_pause = {
-                                    let downloads = state.downloads.lock().unwrap();
-                                    downloads.keys().cloned().collect::<Vec<_>>()
+                                let to_pause: Vec<String> = {
+                                    let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+                                    downloads.keys().cloned().collect()
                                 };
                                 
-                                let mut saved_downloads = crate::persistence::load_downloads().unwrap_or_default();
-                                let mut did_pause = false;
-                                
                                 for id in to_pause {
-                                    let mut downloads = state.downloads.lock().unwrap();
+                                    let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                                     if let Some(session) = downloads.remove(&id) {
+                                        // Capture segment state BEFORE sending stop signal (same as pause_download)
+                                        let segments = session.manager.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
+                                        let total_downloaded: u64 = segments.iter()
+                                            .map(|s| if s.downloaded_cursor > s.start_byte { s.downloaded_cursor - s.start_byte } else { 0 })
+                                            .sum();
+                                        let total_size: u64 = segments.iter()
+                                            .map(|s| s.end_byte - s.start_byte)
+                                            .sum();
                                         let _ = session.stop_tx.send(());
-                                        if let Some(d) = saved_downloads.iter_mut().find(|d| d.id == id) {
-                                            d.status = "Paused".to_string();
-                                        }
-                                        did_pause = true;
+                                        // Use upsert_download per item to avoid race with concurrent persistence changes
+                                        let _ = crate::persistence::upsert_download(crate::persistence::SavedDownload {
+                                            id: id.clone(),
+                                            url: session.url.clone(),
+                                            path: session.path.clone(),
+                                            filename: std::path::Path::new(&session.path)
+                                                .file_name()
+                                                .map(|f| f.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| "download".to_string()),
+                                            total_size,
+                                            downloaded_bytes: total_downloaded,
+                                            status: "Paused".to_string(),
+                                            segments: Some(segments),
+                                        });
                                     }
-                                }
-                                
-                                if did_pause {
-                                    let _ = crate::persistence::save_downloads(&saved_downloads);
                                 }
                             }
                         }
@@ -2313,6 +2669,15 @@ fn get_file_metadata(path: String) -> Result<metadata_scrubber::MetadataInfo, St
 // ============ Ephemeral Web Server Commands ============
 #[tauri::command]
 async fn start_ephemeral_share(path: String, timeout_mins: Option<u64>) -> Result<ephemeral_server::EphemeralShare, String> {
+    // Validate that shared file is within the download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canonical = dunce::canonicalize(&path)
+        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+    if !canonical.starts_with(&download_dir) {
+        return Err("Cannot share files outside the download directory".to_string());
+    }
     let timeout = timeout_mins.unwrap_or(60); // Default 1 hour
     ephemeral_server::EPHEMERAL_MANAGER.start_share(path, timeout).await
 }

@@ -3920,6 +3920,7 @@ dependencies = [
  "dashmap",
  "dav-server",
  "dirs 6.0.0",
+ "dunce",
  "fastembed",
  "feed-rs",
  "flate2",

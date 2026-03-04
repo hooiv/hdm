@@ -13,6 +13,7 @@ lazy_static::lazy_static! {
 
 pub struct ClipboardMonitor {
     enabled: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
     last_content: Arc<std::sync::Mutex<String>>,
 }
 
@@ -20,6 +21,7 @@ impl ClipboardMonitor {
     pub fn new() -> Self {
         Self {
             enabled: Arc::new(AtomicBool::new(false)),
+            running: Arc::new(AtomicBool::new(true)),
             last_content: Arc::new(std::sync::Mutex::new(String::new())),
         }
     }
@@ -32,8 +34,15 @@ impl ClipboardMonitor {
         self.enabled.load(Ordering::SeqCst)
     }
 
+    /// Signal the clipboard monitoring thread to stop
+    #[allow(dead_code)]
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+
     pub fn start<R: tauri::Runtime>(&self, app_handle: tauri::AppHandle<R>) {
         let enabled = self.enabled.clone();
+        let running = self.running.clone();
         let last_content = self.last_content.clone();
 
         std::thread::spawn(move || {
@@ -48,6 +57,10 @@ impl ClipboardMonitor {
             loop {
                 std::thread::sleep(Duration::from_millis(500));
 
+                if !running.load(Ordering::SeqCst) {
+                    break;
+                }
+
                 if !enabled.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -59,7 +72,7 @@ impl ClipboardMonitor {
 
                 // Check if content changed
                 {
-                    let mut last = last_content.lock().unwrap();
+                    let mut last = last_content.lock().unwrap_or_else(|e| e.into_inner());
                     if *last == text {
                         continue;
                     }

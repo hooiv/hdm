@@ -13,6 +13,18 @@ const WORDS: &[&str] = &[
     "cloud", "sunrise", "sunset", "winter", "spring", "summer", "autumn", "galaxy",
     "comet", "nebula", "asteroid", "planet", "star", "moon", "crystal", "diamond",
     "phoenix", "dragon", "thunder", "lightning", "rainbow", "cascade", "volcano", "breeze",
+    "falcon", "harbor", "meadow", "canyon", "glacier", "prairie", "tundra", "aurora",
+    "zenith", "anchor", "beacon", "copper", "ember", "flint", "ivory", "jasper",
+    "kindle", "lantern", "marble", "obsidian", "opal", "quartz", "ruby", "silver",
+    "topaz", "velvet", "willow", "zephyr", "amber", "cobalt", "dusk", "frost",
+    "granite", "haven", "indigo", "jade", "lapis", "magnet", "onyx", "pearl",
+    "raven", "scholar", "timber", "umber", "vertex", "walnut", "coral", "delta",
+    "echo", "forge", "grove", "hedge", "inlet", "jewel", "knoll", "lotus",
+    "marsh", "nexus", "olive", "pebble", "ridge", "spruce", "tropic", "umbra",
+    "vapor", "wren", "apex", "birch", "cedar", "drift", "elder", "fable",
+    "garnet", "hazel", "iris", "juniper", "kelp", "linen", "mango", "niche",
+    "orchid", "pine", "quill", "reed", "sage", "thorn", "urchin", "vine",
+    "weave", "yucca", "zinc", "agate", "basalt", "clover", "dune", "elm",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,7 +118,9 @@ impl P2PNode {
     }
 
     async fn start_ws_server(&self) -> Result<(), String> {
-        let addr = format!("0.0.0.0:{}", self.ws_port);
+        // Bind to localhost only — P2P connections are established via explicit peer_addr
+        // from LAN discovery, not by exposing a server to the wider internet.
+        let addr = format!("127.0.0.1:{}", self.ws_port);
         let listener = TcpListener::bind(&addr).await
             .map_err(|e| format!("Failed to bind WebSocket server: {}", e))?;
         
@@ -164,11 +178,11 @@ impl P2PNode {
         match msg {
             P2PMessage::Join { pairing_code } => {
                 // Look up session by pairing code
-                let session_id = self.pairing_registry.lock().unwrap()
+                let session_id = self.pairing_registry.lock().unwrap_or_else(|e| e.into_inner())
                     .get(&pairing_code).cloned();
                 
                 if let Some(sid) = session_id {
-                    let download_id = self.sessions.lock().unwrap()
+                    let download_id = self.sessions.lock().unwrap_or_else(|e| e.into_inner())
                         .get(&sid)
                         .map(|s| s.download_id.clone());
                     
@@ -187,14 +201,32 @@ impl P2PNode {
                 
                 // Get download path from session
                 let download_id = {
-                    let sessions = self.sessions.lock().unwrap();
+                    let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
                     sessions.get(&session_id).map(|s| s.download_id.clone())
                 };
                 
                 if let Some(did) = download_id {
+                    // Validate download_id to prevent path traversal
+                    if did.contains("..") || did.contains('/') || did.contains('\\') || did.contains(':') {
+                        return Some(P2PMessage::RangeError {
+                            session_id,
+                            error: "Invalid download ID".to_string(),
+                        });
+                    }
+                    
                     // Read file chunk (assuming downloads are in ./downloads/ directory)
-                    // In production, get actual path from download manager
-                    let file_path = format!("./downloads/{}", did);
+                    let base_dir = std::path::Path::new("./downloads");
+                    let file_path = base_dir.join(&did);
+
+                    // Canonicalize to ensure path stays within downloads directory
+                    let canon_base = dunce::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
+                    let canon_file = dunce::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
+                    if !canon_file.starts_with(&canon_base) {
+                        return Some(P2PMessage::RangeError {
+                            session_id,
+                            error: "Path traversal denied".to_string(),
+                        });
+                    }
                     
                     match tokio::fs::File::open(&file_path).await {
                         Ok(mut file) => {
@@ -207,6 +239,18 @@ impl P2PNode {
                                     });
                                 }
 
+                                if end <= start {
+                                    return Some(P2PMessage::RangeError {
+                                        session_id: session_id.clone(),
+                                        error: format!("Invalid range: end ({}) <= start ({})", end, start),
+                                    });
+                                }
+
+                                // Cap chunk size to 4 MB to prevent OOM from malicious requests
+                                const MAX_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
+                                let length = (end - start).min(MAX_CHUNK_SIZE).min(file_len - start);
+                                let length_usize = length as usize;
+
                                 if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
                                     return Some(P2PMessage::RangeError {
                                         session_id: session_id.clone(),
@@ -214,8 +258,7 @@ impl P2PNode {
                                     });
                                 }
 
-                                let length = (end - start) as usize;
-                                let mut buffer = vec![0u8; length];
+                                let mut buffer = vec![0u8; length_usize];
                                 match file.read(&mut buffer).await {
                                     Ok(n) => {
                                         buffer.truncate(n); // Handle partial reads (EOF)
@@ -224,7 +267,7 @@ impl P2PNode {
                                         let _allowed = self.upload_limiter.acquire(buffer.len() as u64).await;
                                         
                                         // Update bytes sent stats
-                                        self.sessions.lock().unwrap()
+                                        self.sessions.lock().unwrap_or_else(|e| e.into_inner())
                                             .get_mut(&session_id)
                                             .map(|s| s.bytes_sent += buffer.len() as u64);
                                         
@@ -269,7 +312,8 @@ impl P2PNode {
     pub fn generate_pairing_code() -> String {
         use rand::Rng;
         let mut rng = rand::rng();
-        let words: Vec<_> = (0..3)
+        // Use 4 words from 128-word list for ~28 bits of entropy
+        let words: Vec<_> = (0..4)
             .map(|_| WORDS[rng.random_range(0..WORDS.len())])
             .collect();
         words.join("-")
@@ -281,7 +325,7 @@ impl P2PNode {
         let pairing_code = Self::generate_pairing_code();
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         let session = P2PShareSession {
@@ -295,9 +339,9 @@ impl P2PNode {
             is_host: true,
         };
 
-        self.sessions.lock().unwrap().insert(session_id.clone(), session.clone());
-        self.pairing_registry.lock().unwrap().insert(pairing_code.clone(), session_id.clone());
-        self.my_files.lock().unwrap().insert(download_id.clone());
+        self.sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(session_id.clone(), session.clone());
+        self.pairing_registry.lock().unwrap_or_else(|e| e.into_inner()).insert(pairing_code.clone(), session_id.clone());
+        self.my_files.lock().unwrap_or_else(|e| e.into_inner()).insert(download_id.clone());
 
         println!("[P2P] Created share session: {} with code: {}", session_id, pairing_code);
         Ok(session)
@@ -333,7 +377,7 @@ impl P2PNode {
                     is_host: false,
                 };
                 
-                self.sessions.lock().unwrap().insert(session_id.clone(), session.clone());
+                self.sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(session_id.clone(), session.clone());
                 println!("[P2P] Joined session: {}", session_id);
                 return Ok(session);
             }
@@ -344,13 +388,13 @@ impl P2PNode {
 
     // Get all active sessions
     pub fn list_sessions(&self) -> Vec<P2PShareSession> {
-        self.sessions.lock().unwrap().values().cloned().collect()
+        self.sessions.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect()
     }
 
     // Close a session
     pub fn close_session(&self, session_id: &str) -> Result<(), String> {
-        if let Some(session) = self.sessions.lock().unwrap().remove(session_id) {
-            self.pairing_registry.lock().unwrap().remove(&session.pairing_code);
+        if let Some(session) = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(session_id) {
+            self.pairing_registry.lock().unwrap_or_else(|e| e.into_inner()).remove(&session.pairing_code);
             println!("[P2P] Closed session: {}", session_id);
             Ok(())
         } else {
@@ -360,7 +404,7 @@ impl P2PNode {
 
     // Get P2P statistics
     pub fn get_stats(&self) -> P2PStats {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let total_sent: u64 = sessions.values().map(|s| s.bytes_sent).sum();
         let total_received: u64 = sessions.values().map(|s| s.bytes_received).sum();
         let total_peers: usize = sessions.values()
@@ -378,7 +422,7 @@ impl P2PNode {
 
     // Get peer reputation
     pub fn get_reputation(&self, peer_id: &str) -> Option<PeerReputation> {
-        self.reputation.lock().unwrap().get(peer_id).cloned()
+        self.reputation.lock().unwrap_or_else(|e| e.into_inner()).get(peer_id).cloned()
     }
 
     /// Set upload speed limit in KB/s (0 = unlimited)

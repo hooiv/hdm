@@ -11,7 +11,7 @@
         "contextMenus"
     ],
     "host_permissions": [
-        "http://localhost:9876/*",
+        "http://localhost:14733/*",
         "<all_urls>"
     ],
     "background": {

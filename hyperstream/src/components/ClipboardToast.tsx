@@ -9,7 +9,7 @@ interface ToastProps {
 
 export const ClipboardToast: React.FC<ToastProps> = ({ message, filename, onDownload, onDismiss }) => {
     return (
-        <div className="clipboard-toast">
+        <div className="clipboard-toast" role="alert" aria-live="polite">
             <div className="toast-icon">📋</div>
             <div className="toast-content">
                 <div className="toast-message">{message}</div>

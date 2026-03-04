@@ -10,7 +10,25 @@ pub async fn query_file(file_path: String, sql: String) -> Result<serde_json::Va
         return Err(format!("File not found: {}", file_path));
     }
 
+    // Restrict to downloads directory to prevent arbitrary file reads
+    let settings = crate::settings::load_settings();
+    let downloads_dir = Path::new(&settings.download_dir);
+    let canon_target = dunce::canonicalize(path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    let canon_downloads = dunce::canonicalize(downloads_dir)
+        .unwrap_or_else(|_| downloads_dir.to_path_buf());
+    if !canon_target.starts_with(&canon_downloads) {
+        return Err("Only files inside the download directory can be queried".to_string());
+    }
+
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+
+    // Cap file size to prevent OOM when loading into memory
+    let file_size = fs::metadata(path).await.map_err(|e| format!("Metadata error: {}", e))?.len();
+    if file_size > 100 * 1024 * 1024 {
+        return Err(format!("File too large for SQL query: {} bytes (max 100 MB)", file_size));
+    }
+
     let content = fs::read_to_string(path).await.map_err(|e| format!("Read error: {}", e))?;
 
     let rows: Vec<serde_json::Value> = match ext.as_str() {

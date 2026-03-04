@@ -10,6 +10,16 @@ pub struct MountedDrive {
 
 /// Mount a folder as a virtual drive letter using Windows `subst` command.
 pub fn mount_drive(path: String, letter: String) -> Result<String, String> {
+    // Restrict to download directory for security
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canon_path = dunce::canonicalize(&path)
+        .map_err(|e| format!("Cannot resolve path '{}': {}", path, e))?;
+    if !canon_path.starts_with(&download_dir) {
+        return Err("Only directories within the download folder can be mounted as virtual drives.".to_string());
+    }
+
     let letter = letter.trim().to_uppercase();
     if letter.len() != 1 || !letter.chars().next().unwrap().is_ascii_alphabetic() {
         return Err("Drive letter must be a single letter (e.g. Z).".to_string());

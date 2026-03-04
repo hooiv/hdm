@@ -35,6 +35,7 @@ struct LfsActions {
 struct LfsActionLink {
     href: String,
     #[serde(default)]
+    #[allow(dead_code)]
     header: std::collections::HashMap<String, String>,
 }
 
@@ -121,7 +122,38 @@ pub async fn resolve_lfs_pointer(original_url: &str, text: &str) -> Option<Strin
                 if obj.oid == oid {
                     if let Some(actions) = obj.actions {
                         if let Some(download) = actions.download {
-                            return Some(download.href);
+                            // Validate the href to prevent SSRF via malicious LFS responses
+                            if let Ok(parsed) = url::Url::parse(&download.href) {
+                                if parsed.scheme() == "http" || parsed.scheme() == "https" {
+                                    // Block private/loopback IPs in download URLs
+                                    if let Some(host) = parsed.host_str() {
+                                        let lower = host.to_lowercase();
+                                        if lower == "localhost" || lower == "[::1]" {
+                                            return None;
+                                        }
+                                        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                                            match ip {
+                                                std::net::IpAddr::V4(v4) => {
+                                                    if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() {
+                                                        return None;
+                                                    }
+                                                }
+                                                std::net::IpAddr::V6(v6) => {
+                                                    if v6.is_loopback() || v6.is_unspecified() {
+                                                        return None;
+                                                    }
+                                                    if let Some(v4) = v6.to_ipv4_mapped() {
+                                                        if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
+                                                            return None;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    return Some(download.href);
+                                }
+                            }
                         }
                     }
                 }

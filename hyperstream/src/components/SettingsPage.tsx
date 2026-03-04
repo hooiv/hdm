@@ -11,6 +11,7 @@ import {
   Volume2,
   Activity,
 } from "lucide-react";
+import { error as logError } from "../utils/logger";
 
 import { SettingsData } from "./settings/types";
 import { GeneralTab } from "./settings/GeneralTab";
@@ -68,6 +69,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   });
 
   const [saved, setSaved] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
 
   // Audio settings state
   const [audioEnabled, setAudioEnabled] = useState(true);
@@ -77,6 +79,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     if (isOpen) {
       loadSettings();
       setSaved(false);
+      setSettingsLoaded(false);
       setActiveTab("general");
     }
   }, [isOpen]);
@@ -92,15 +95,22 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         cloud_access_key: data.cloud_access_key || "",
         cloud_secret_key: data.cloud_secret_key || "",
       });
+      setSettingsLoaded(true);
+    } catch (e) {
+      logError("Failed to load settings", e);
+      toast.error('Failed to load settings');
+      return; // Don't attempt audio if core settings failed
+    }
 
-      // Load audio settings
+    // Load audio settings separately so a failure here doesn't block saving
+    try {
       const enabled = await invoke<boolean>("get_audio_enabled");
       const volume = await invoke<number>("get_audio_volume");
       setAudioEnabled(enabled);
       setAudioVolume(volume);
     } catch (e) {
-      console.error("Failed to load settings", e);
-      toast.error('Failed to load settings');
+      logError("Failed to load audio settings", e);
+      // Non-critical: audio settings use defaults, save button stays enabled
     }
   };
 
@@ -114,7 +124,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       toast.success("Settings Saved Successfully");
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
-      console.error("Failed to save settings", e);
+      logError("Failed to save settings", e);
       toast.error("Failed to save settings: " + e);
     }
   };
@@ -234,7 +244,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             </button>
             <button
               onClick={saveSettings}
-              className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-lg shadow-blue-900/20 text-sm font-bold flex items-center gap-2 transition-all"
+              disabled={!settingsLoaded}
+              className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg shadow-lg shadow-blue-900/20 text-sm font-bold flex items-center gap-2 transition-all"
             >
               <Save size={16} />
               {saved ? "Saved" : "Save Changes"}

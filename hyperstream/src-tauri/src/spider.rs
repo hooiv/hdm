@@ -27,8 +27,25 @@ impl Spider {
         Self { client }
     }
 
+    /// Maximum number of pages to visit during a crawl to prevent unbounded resource consumption.
+    const MAX_PAGES: usize = 500;
+
     pub async fn crawl(&self, options: SpiderOptions) -> Result<Vec<GrabbedFile>, String> {
         let start_url = Url::parse(&options.url).map_err(|e| e.to_string())?;
+
+        // SSRF protection: only allow http/https schemes
+        match start_url.scheme() {
+            "http" | "https" => {}
+            scheme => return Err(format!("Unsupported URL scheme '{}': only http and https are allowed", scheme)),
+        }
+
+        // Block private/internal IP ranges
+        if let Some(host) = start_url.host_str() {
+            if Self::is_private_host(host) {
+                return Err(format!("Crawling private/internal addresses is not allowed: {}", host));
+            }
+        }
+
         let domain = start_url.domain().ok_or("Invalid URL domain")?.to_string();
 
         let mut visited = HashSet::new();
@@ -38,9 +55,32 @@ impl Spider {
         queue.push_back((start_url.clone(), 0));
         visited.insert(start_url.to_string());
 
+        // Compile regex once outside the loop for performance
+        let link_regex = regex::Regex::new(r#"(?:href|src)=["']([^"']+)["']"#)
+            .map_err(|e| format!("Failed to compile regex: {}", e))?;
+
+        let mut pages_visited: usize = 0;
+
         while let Some((current_url, depth)) = queue.pop_front() {
             if depth > options.max_depth {
                 continue;
+            }
+
+            // Enforce page count limit to prevent DoS
+            pages_visited += 1;
+            if pages_visited > Self::MAX_PAGES {
+                break;
+            }
+
+            // SSRF protection on each resolved URL
+            match current_url.scheme() {
+                "http" | "https" => {}
+                _ => continue,
+            }
+            if let Some(host) = current_url.host_str() {
+                if Self::is_private_host(host) {
+                    continue;
+                }
             }
 
             println!("Crawling: {}", current_url);
@@ -50,6 +90,13 @@ impl Spider {
                 Ok(r) => r,
                 Err(_) => continue,
             };
+
+            // Reject responses larger than 10MB to prevent memory exhaustion
+            if let Some(cl) = response.content_length() {
+                if cl > 10 * 1024 * 1024 {
+                    continue;
+                }
+            }
 
             // Check Content-Type
             let content_type = response.headers()
@@ -79,11 +126,15 @@ impl Spider {
                 continue;
             }
 
-            // If HTML, parse for links
-            let html = match response.text().await {
-                Ok(t) => t,
+            // If HTML, parse for links (bounded to 10MB)
+            let bytes = match response.bytes().await {
+                Ok(b) => b,
                 Err(_) => continue,
             };
+            if bytes.len() > 10 * 1024 * 1024 {
+                continue;
+            }
+            let html = String::from_utf8_lossy(&bytes).to_string();
 
             // Simple Regex or string finding for href/src
             // Using a simple regex to avoid adding `scraper` dependency for now if not present,
@@ -91,7 +142,7 @@ impl Spider {
             // Let's assume we can use a basic regex for robustness.
             // Actually, we checked Cargo.toml and `regex` IS there.
             
-            let re = regex::Regex::new(r#"(?:href|src)=["']([^"']+)["']"#).unwrap();
+            let re = &link_regex;
             
             for cap in re.captures_iter(&html) {
                 if let Some(link) = cap.get(1) {
@@ -151,5 +202,33 @@ impl Spider {
         else if ct.contains("audio") { "audio".to_string() }
         else if ct.contains("pdf") || ct.contains("document") { "document".to_string() }
         else { "other".to_string() }
+    }
+
+    /// Returns true if the host resolves to a private/internal IP range (SSRF protection).
+    fn is_private_host(host: &str) -> bool {
+        // Block common private hostnames
+        let h = host.to_lowercase();
+        if h == "localhost" || h.ends_with(".local") || h.ends_with(".internal") {
+            return true;
+        }
+
+        // Try to parse as IP address
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return match ip {
+                std::net::IpAddr::V4(v4) => {
+                    v4.is_loopback()          // 127.0.0.0/8
+                    || v4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                    || v4.is_link_local()      // 169.254.0.0/16 (AWS metadata etc.)
+                    || v4.is_broadcast()
+                    || v4.is_unspecified()
+                    || v4.octets()[0] == 0     // 0.0.0.0/8
+                }
+                std::net::IpAddr::V6(v6) => {
+                    v6.is_loopback() || v6.is_unspecified()
+                }
+            };
+        }
+
+        false
     }
 }

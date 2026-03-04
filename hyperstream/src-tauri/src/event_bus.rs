@@ -27,7 +27,16 @@ impl EventBus {
     }
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static EVENT_BUS_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
 pub fn init_event_bus(app: &AppHandle) {
+    // Prevent duplicate initialization
+    if EVENT_BUS_INITIALIZED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
     let bus = EventBus::new(1024);
     
     // Spawn a background listener that routes events to the frontend
@@ -35,8 +44,20 @@ pub fn init_event_bus(app: &AppHandle) {
     let app_handle = app.clone();
     
     tokio::spawn(async move {
-        while let Ok(event) = receiver.recv().await {
-            let _ = app_handle.emit("system-bus-event", event);
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    let _ = app_handle.emit("system-bus-event", event);
+                }
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    eprintln!("[EventBus] WARNING: Dropped {} events due to slow consumer", count);
+                    // Continue receiving — don't break out of the loop
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    break; // Channel closed, stop listening
+                }
+            }
         }
     });
 

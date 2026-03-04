@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { error as logError } from '../utils/logger';
 import { invoke } from '@tauri-apps/api/core';
 import QRCode from 'react-qr-code';
 import { useToast } from '../contexts/ToastContext';
@@ -18,9 +19,9 @@ export const LanPairing: React.FC = () => {
         try {
             const ip = await invoke<string>('get_local_ip');
             setLocalIp(ip);
-            generateNewCode();
+            await generateNewCode();
         } catch (e) {
-            console.error('Failed to load LAN info:', e);
+            logError('Failed to load LAN info:', e);
             toast.error("Failed to load LAN info");
         }
     };
@@ -32,7 +33,7 @@ export const LanPairing: React.FC = () => {
             const qr = await invoke<string>('get_lan_pairing_qr_data', { port, code });
             setQrData(qr);
         } catch (e) {
-            console.error('Failed to generate pairing code:', e);
+            logError('Failed to generate pairing code:', e);
             toast.error("Failed to generate pairing code");
         }
     };

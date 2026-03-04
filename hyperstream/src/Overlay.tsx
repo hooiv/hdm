@@ -2,51 +2,70 @@ import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { DownloadProgressPayload, SavedDownload } from "./types";
+import type { DownloadProgressPayload, SavedDownload, DownloadTask } from "./types";
+import { toTaskStatus } from "./types";
+import { debug } from "./utils/logger";
+import { formatSpeed } from "./utils/formatters";
 
-interface DownloadTask {
-    id: string;
-    filename: string;
-    progress: number;
-    speed: number;
-    status: string;
-    total: number;
-    downloaded: number;
-    lastUpdate?: number;
-}
-
-const formatSpeed = (bytesPerSec: number) => {
-    if (!bytesPerSec || bytesPerSec <= 0) return '0 B/s';
-    const k = 1024;
-    const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-    const i = Math.min(Math.floor(Math.log(bytesPerSec) / Math.log(k)), sizes.length - 1);
-    return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-};
 
 export default function Overlay() {
     const [tasks, setTasks] = useState<DownloadTask[]>([]);
 
     useEffect(() => {
-        // Initial fetch
-        invoke<SavedDownload[]>('get_downloads').then((data) => {
-            // Basic fetch, mostly relying on events
-            console.log("Overlay initialized", data);
-        });
+        // Initial fetch – populate existing downloads so overlay isn't blank
+        invoke<SavedDownload[]>('get_downloads')
+            .then((data) => {
+                if (data.length > 0) {
+                    const initial: DownloadTask[] = data.map(d => ({
+                        id: d.id,
+                        filename: d.filename,
+                        progress: d.total_size > 0 ? (d.downloaded_bytes / d.total_size) * 100 : 0,
+                        downloaded: d.downloaded_bytes,
+                        total: d.total_size,
+                        speed: 0,
+                        status: toTaskStatus(d.status),
+                    }));
+                    setTasks(initial);
+                }
+            })
+            .catch(e => debug("Overlay load error", e));
 
-        // Listen for progress
+        // Listen for progress updates and patch existing entries, or add new ones
         const unlistenProgress = listen<DownloadProgressPayload>('download_progress', (event) => {
             const { id, downloaded, total } = event.payload;
             setTasks(prev => {
-                // If task doesn't exist, we might need to fetch full list or ignore
-                // For MVP, we only update existing or rely on list sync
+                const exists = prev.some(t => t.id === id);
+                if (!exists) {
+                    // New download appeared — add it
+                    return [...prev, {
+                        id,
+                        filename: id,
+                        downloaded,
+                        total,
+                        progress: total > 0 ? (downloaded / total) * 100 : 0,
+                        speed: 0,
+                        status: 'Downloading' as const,
+                        lastUpdate: Date.now(),
+                    }];
+                }
                 return prev.map(t => {
                     if (t.id === id) {
                         const now = Date.now();
                         const timeDiff = (now - (t.lastUpdate || now)) / 1000;
                         const bytesDiff = downloaded - t.downloaded;
-                        const speed = timeDiff > 0 ? bytesDiff / timeDiff : 0;
-
-                        return { ...t, downloaded, total, progress: (downloaded / total) * 100, speed, lastUpdate: now };
+                        const speed = timeDiff > 0 && bytesDiff > 0 ? bytesDiff / timeDiff : 0;
+                        let status = t.status;
+                        if (total > 0 && downloaded >= total) {
+                            status = 'Done';
+                        }
+                        const updated: DownloadTask = { ...t, downloaded, total, progress: total > 0 ? (downloaded / total) * 100 : 0, speed, lastUpdate: now, status };
+                        if (status === 'Done') {
+                            // schedule removal in overlay as well
+                            setTimeout(() => {
+                                setTasks(curr => curr.filter(x => x.id !== id));
+                            }, 30000);
+                        }
+                        return updated;
                     }
                     return t;
                 });

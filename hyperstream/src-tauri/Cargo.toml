@@ -28,12 +28,6 @@ opt-level = 3
 [profile.dev.package.tokio-boring2]
 opt-level = 3
 
-[profile.dev.package.boring-sys]
-opt-level = 3
-
-[profile.dev.package.boring]
-opt-level = 3
-
 
 # Release Profile Optimization
 [profile.release]
@@ -99,3 +93,4 @@ rumqttc = "0.25.1"
 sha2 = "0.10"
 urlencoding = "2"
 rfd = "0.15"
+dunce = "1"

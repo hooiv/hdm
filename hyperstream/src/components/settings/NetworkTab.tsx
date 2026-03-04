@@ -5,6 +5,7 @@ import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { motion } from "framer-motion";
 import { useToast } from "../../contexts/ToastContext";
+import { error as logError } from "../../utils/logger";
 
 interface NetworkTabProps {
   settings: SettingsData;
@@ -37,6 +38,22 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
           >
             <div>
               <label className="text-sm font-medium text-slate-400 mb-2 block">
+                Proxy Type
+              </label>
+              <select
+                value={settings.proxy_type}
+                onChange={(e) =>
+                  setSettings({ ...settings, proxy_type: e.target.value })
+                }
+                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 text-sm focus:outline-none focus:border-blue-500/50"
+              >
+                <option value="http">HTTP</option>
+                <option value="socks5">SOCKS5</option>
+                <option value="socks4">SOCKS4</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-400 mb-2 block">
                 Proxy Host
               </label>
               <input
@@ -59,6 +76,34 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
                 value={settings.proxy_port}
                 onChange={(e) =>
                   setSettings({ ...settings, proxy_port: parseInt(e.target.value) || settings.proxy_port })
+                }
+                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-400 mb-2 block">
+                Username (optional)
+              </label>
+              <input
+                type="text"
+                placeholder="proxy username"
+                value={settings.proxy_username ?? ''}
+                onChange={(e) =>
+                  setSettings({ ...settings, proxy_username: e.target.value || null })
+                }
+                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-400 mb-2 block">
+                Password (optional)
+              </label>
+              <input
+                type="password"
+                placeholder="proxy password"
+                value={settings.proxy_password ?? ''}
+                onChange={(e) =>
+                  setSettings({ ...settings, proxy_password: e.target.value || null })
                 }
                 className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
               />
@@ -88,11 +133,11 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
               <input
                 type="text"
                 placeholder="e.g. MyVPN"
-                value={settings.vpn_connection_name}
+                value={settings.vpn_connection_name ?? ''}
                 onChange={(e) =>
                   setSettings({
                     ...settings,
-                    vpn_connection_name: e.target.value,
+                    vpn_connection_name: e.target.value || null,
                   })
                 }
                 className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
@@ -123,7 +168,7 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
                   await invoke("init_tor_network");
                   toast.success("Tor network initialized");
                 } catch (err) {
-                  console.error("Tor init failed:", err);
+                  logError("Tor init failed:", err);
                   toast.error(`Failed to initialize Tor: ${err}`);
                   setSettings({ ...settings, use_tor: false });
                 }

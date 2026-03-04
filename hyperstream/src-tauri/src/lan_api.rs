@@ -42,11 +42,15 @@ impl LanApiServer {
         }
     }
 
-    /// Generate a pairing code (6 digits) and store it for verification
+    /// Generate a pairing code (8 alphanumeric chars) and store it for verification
     pub fn generate_pairing_code() -> String {
         use rand::Rng;
         let mut rng = rand::rng();
-        let code = format!("{:06}", rng.random_range(0..1000000));
+        // Use 8 alphanumeric characters (~2.8 trillion possibilities) instead of 6 digits (1M)
+        let charset: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I to avoid confusion
+        let code: String = (0..8)
+            .map(|_| charset[rng.random_range(0..charset.len())] as char)
+            .collect();
         // Store the code synchronously for immediate availability
         if let Ok(mut guard) = CURRENT_PAIRING_CODE.write() {
             *guard = Some(code.clone());
@@ -85,19 +89,31 @@ impl LanApiServer {
                 error: None,
             }));
 
-        // Sync WebSocket
-        // /api/sync
+        // Sync WebSocket (auth via query param since WS can't use headers easily)
+        // /api/sync?token=<TOKEN>
         let sync_route = warp::path!("api" / "sync")
             .and(warp::ws())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
             .and(warp::any().map(move || tx.clone()))
-            .map(|ws: warp::ws::Ws, tx: Arc<tokio::sync::broadcast::Sender<String>>| {
-                ws.on_upgrade(move |socket| handle_sync_socket(socket, tx))
+            .map(|ws: warp::ws::Ws, params: std::collections::HashMap<String, String>, tx: Arc<tokio::sync::broadcast::Sender<String>>| {
+                let token_valid = params.get("token").map_or(false, |t| {
+                    PAIRED_TOKENS.read().unwrap_or_else(|e| e.into_inner()).contains(t.as_str())
+                });
+                ws.on_upgrade(move |socket| async move {
+                    if !token_valid {
+                        // Close unauthorized connections immediately
+                        drop(socket);
+                    } else {
+                        handle_sync_socket(socket, tx).await;
+                    }
+                })
             });
 
-        // Get downloads list
+        // Get downloads list (requires auth)
         let downloads = warp::path!("api" / "downloads")
             .and(warp::get())
-            .map(|| {
+            .and(require_auth())
+            .map(|_| {
                 warp::reply::json(&ApiResponse {
                     success: true,
                     data: Some(Vec::<String>::new()),
@@ -105,12 +121,16 @@ impl LanApiServer {
                 })
             });
 
-        // Add new download
+        // Add new download (requires auth)
         let add_download = warp::path!("api" / "downloads")
             .and(warp::post())
+            .and(require_auth())
+            .and(warp::body::content_length_limit(64 * 1024))
             .and(warp::body::json())
-            .map(|req: DownloadRequest| {
+            .map(|_, req: DownloadRequest| {
                 println!("API: New download request: {}", req.url);
+                // Actually enqueue the download via broadcast
+                broadcast_download(req.url.clone());
                 warp::reply::json(&ApiResponse {
                     success: true,
                     data: Some("Download added"),
@@ -121,6 +141,7 @@ impl LanApiServer {
         // Pair device
         let pair = warp::path!("api" / "pair")
             .and(warp::post())
+            .and(warp::body::content_length_limit(16 * 1024))
             .and(warp::body::json())
             .and(with_devices(devices.clone()))
             .and_then(handle_pair);
@@ -145,6 +166,29 @@ use lazy_static::lazy_static;
 lazy_static! {
     pub static ref BROADCAST_TX: tokio::sync::RwLock<Option<std::sync::Arc<tokio::sync::broadcast::Sender<String>>>> = tokio::sync::RwLock::new(None);
     pub static ref CURRENT_PAIRING_CODE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+    /// Tokens issued during pairing — required for all protected routes
+    static ref PAIRED_TOKENS: std::sync::RwLock<std::collections::HashSet<String>> = std::sync::RwLock::new(std::collections::HashSet::new());
+}
+
+/// Warp filter that rejects requests without a valid paired auth token.
+fn require_auth() -> impl Filter<Extract = ((),), Error = warp::Rejection> + Clone {
+    warp::header::optional::<String>("authorization")
+        .and_then(|auth_header: Option<String>| async move {
+            let token = auth_header
+                .as_deref()
+                .and_then(|h| h.strip_prefix("Bearer "));
+            match token {
+                Some(t) => {
+                    let tokens = PAIRED_TOKENS.read().unwrap_or_else(|e| e.into_inner());
+                    if tokens.contains(t) {
+                        Ok(())
+                    } else {
+                        Err(warp::reject::reject())
+                    }
+                }
+                None => Err(warp::reject::reject()),
+            }
+        })
 }
 
 pub fn broadcast_download(url: String) {
@@ -194,15 +238,16 @@ async fn handle_pair(
     req: PairRequest,
     devices: Arc<RwLock<Vec<PairedDevice>>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    // Verify pairing code
+    // Verify and atomically invalidate the pairing code
     {
-        let valid_code = CURRENT_PAIRING_CODE.read().unwrap();
-        match valid_code.as_deref() {
+        let mut code_guard = CURRENT_PAIRING_CODE.write().unwrap_or_else(|e| e.into_inner());
+        match code_guard.as_deref() {
             Some(expected) if expected == req.code => {
-                // Code matches — proceed
+                // Code matches — invalidate immediately to prevent reuse
+                *code_guard = None;
             }
             _ => {
-                return Ok(warp::reply::json(&ApiResponse::<PairedDevice> {
+                return Ok(warp::reply::json(&ApiResponse::<serde_json::Value> {
                     success: false,
                     data: None,
                     error: Some("Invalid pairing code".to_string()),
@@ -211,9 +256,19 @@ async fn handle_pair(
         }
     }
 
-    // Invalidate the code after successful pairing
-    if let Ok(mut guard) = CURRENT_PAIRING_CODE.write() {
-        *guard = None;
+    // Generate an auth token for this device
+    let auth_token = uuid::Uuid::new_v4().to_string();
+    if let Ok(mut tokens) = PAIRED_TOKENS.write() {
+        // Cap the number of paired devices to prevent unbounded growth
+        const MAX_PAIRED: usize = 20;
+        if tokens.len() >= MAX_PAIRED {
+            return Ok(warp::reply::json(&ApiResponse::<serde_json::Value> {
+                success: false,
+                data: None,
+                error: Some(format!("Maximum paired devices ({}) reached. Unpair a device first.", MAX_PAIRED)),
+            }));
+        }
+        tokens.insert(auth_token.clone());
     }
 
     let device = PairedDevice {
@@ -226,7 +281,10 @@ async fn handle_pair(
 
     Ok(warp::reply::json(&ApiResponse {
         success: true,
-        data: Some(device),
+        data: Some(serde_json::json!({
+            "device": device,
+            "token": auth_token
+        })),
         error: None,
     }))
 }

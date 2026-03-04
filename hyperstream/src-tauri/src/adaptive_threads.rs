@@ -1,6 +1,14 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+/// Internal PID controller state — all fields grouped under a single Mutex
+/// to prevent interleaved reads/writes from concurrent callers.
+struct PidState {
+    integral: f64,
+    last_error: f64,
+    last_update: Instant,
+}
+
 /// PID Controller for adaptive thread tuning
 /// Adjusts thread count based on bandwidth utilization
 pub struct AdaptiveThreadController {
@@ -16,12 +24,8 @@ pub struct AdaptiveThreadController {
     pub kp: f64, // Proportional gain
     pub ki: f64, // Integral gain
     pub kd: f64, // Derivative gain
-    /// Integral accumulator
-    integral: std::sync::Mutex<f64>,
-    /// Last error for derivative
-    last_error: std::sync::Mutex<f64>,
-    /// Last update time
-    last_update: std::sync::Mutex<Instant>,
+    /// Combined PID state under a single lock
+    state: std::sync::Mutex<PidState>,
 }
 
 impl AdaptiveThreadController {
@@ -34,9 +38,11 @@ impl AdaptiveThreadController {
             kp: 2.0,
             ki: 0.1,
             kd: 0.5,
-            integral: std::sync::Mutex::new(0.0),
-            last_error: std::sync::Mutex::new(0.0),
-            last_update: std::sync::Mutex::new(Instant::now()),
+            state: std::sync::Mutex::new(PidState {
+                integral: 0.0,
+                last_error: 0.0,
+                last_update: Instant::now(),
+            }),
         }
     }
 
@@ -50,31 +56,30 @@ impl AdaptiveThreadController {
         let utilization = current_speed as f64 / max_possible_speed as f64;
         let error = self.target_utilization - utilization;
 
-        let mut integral = self.integral.lock().unwrap();
-        let mut last_error = self.last_error.lock().unwrap();
-        let mut last_update = self.last_update.lock().unwrap();
+        let mut pid = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let now = Instant::now();
-        let dt = now.duration_since(*last_update).as_secs_f64();
-        *last_update = now;
+        let dt = now.duration_since(pid.last_update).as_secs_f64();
+        pid.last_update = now;
 
         if dt <= 0.0 {
             return self.current_threads.load(Ordering::Relaxed);
         }
 
         // PID calculation
-        *integral += error * dt;
+        pid.integral += error * dt;
         // Anti-windup: limit integral
-        *integral = integral.clamp(-10.0, 10.0);
+        pid.integral = pid.integral.clamp(-10.0, 10.0);
 
-        let derivative = (error - *last_error) / dt;
-        *last_error = error;
+        let derivative = (error - pid.last_error) / dt;
+        pid.last_error = error;
 
-        let output = self.kp * error + self.ki * *integral + self.kd * derivative;
+        let output = self.kp * error + self.ki * pid.integral + self.kd * derivative;
         
         let current = self.current_threads.load(Ordering::Relaxed) as f64;
-        let new_threads = (current + output).round() as u32;
-        let new_threads = new_threads.clamp(self.min_threads, self.max_threads);
+        // Clamp f64 before casting to u32 to prevent negative-to-u32 saturation issues
+        let new_threads = (current + output).round()
+            .clamp(self.min_threads as f64, self.max_threads as f64) as u32;
 
         self.current_threads.store(new_threads, Ordering::Relaxed);
         new_threads
@@ -88,9 +93,10 @@ impl AdaptiveThreadController {
     /// Reset the controller state
     #[allow(dead_code)]
     pub fn reset(&self) {
-        *self.integral.lock().unwrap() = 0.0;
-        *self.last_error.lock().unwrap() = 0.0;
-        *self.last_update.lock().unwrap() = Instant::now();
+        let mut pid = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        pid.integral = 0.0;
+        pid.last_error = 0.0;
+        pid.last_update = Instant::now();
     }
 }
 
@@ -108,8 +114,10 @@ impl BandwidthMonitor {
         }
     }
 
+    /// Add an incremental bandwidth sample.
+    /// `bytes`: the number of bytes transferred since the last sample (NOT cumulative total).
     pub fn add_sample(&self, bytes: u64) {
-        let mut samples = self.samples.lock().unwrap();
+        let mut samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         samples.push((now, bytes));
 
@@ -119,7 +127,7 @@ impl BandwidthMonitor {
     }
 
     pub fn get_average_speed(&self) -> u64 {
-        let samples = self.samples.lock().unwrap();
+        let samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
         if samples.len() < 2 {
             return 0;
         }

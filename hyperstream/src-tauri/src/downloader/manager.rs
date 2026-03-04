@@ -16,6 +16,7 @@ impl DownloadManager {
     }
 
     pub fn with_config(file_size: u64, parts: u32, config: WorkStealConfig) -> Self {
+        let parts = if parts == 0 { 1 } else { parts };
         let mut segments = Vec::new();
         let part_size = file_size / parts as u64;
 
@@ -125,9 +126,9 @@ impl DownloadManager {
         }
         if let Ok(segments) = self.segments.read() {
             let total_downloaded: u64 = segments.iter()
-                .map(|s| s.downloaded_cursor - s.start_byte)
+                .map(|s| s.downloaded_cursor.saturating_sub(s.start_byte))
                 .sum();
-            (total_downloaded as f64 / self.file_size as f64) * 100.0
+            ((total_downloaded as f64 / self.file_size as f64) * 100.0).min(100.0)
         } else {
             0.0
         }
@@ -137,7 +138,7 @@ impl DownloadManager {
     pub fn total_downloaded(&self) -> u64 {
         if let Ok(segments) = self.segments.read() {
             segments.iter()
-                .map(|s| s.downloaded_cursor - s.start_byte)
+                .map(|s| s.downloaded_cursor.saturating_sub(s.start_byte))
                 .sum()
         } else {
             0
@@ -288,7 +289,7 @@ impl DownloadManager {
                 .map(|s| s.speed_bps)
                 .sum();
             let downloaded: u64 = segments.iter()
-                .map(|s| s.downloaded_cursor - s.start_byte)
+                .map(|s| s.downloaded_cursor.saturating_sub(s.start_byte))
                 .sum();
             
             DownloadStats {
@@ -298,7 +299,11 @@ impl DownloadManager {
                 total_speed_bps: total_speed,
                 downloaded_bytes: downloaded,
                 total_bytes: self.file_size,
-                progress_percent: (downloaded as f64 / self.file_size as f64) * 100.0,
+                progress_percent: if self.file_size > 0 {
+                    ((downloaded as f64 / self.file_size as f64) * 100.0).min(100.0)
+                } else {
+                    0.0
+                },
             }
         } else {
             DownloadStats::default()

@@ -1,6 +1,5 @@
 use sha2::{Sha256, Digest};
 use std::path::Path;
-use tokio::fs;
 use serde::Serialize;
 
 #[derive(Serialize, Clone)]
@@ -17,17 +16,35 @@ pub async fn find_mirrors(file_path: String) -> Result<serde_json::Value, String
         return Err(format!("File not found: {}", file_path));
     }
 
-    let file_bytes = fs::read(path).await.map_err(|e| format!("Failed to read file: {}", e))?;
+    // Restrict to downloads directory to prevent arbitrary file hashing
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canon_path = dunce::canonicalize(path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    if !canon_path.starts_with(&download_dir) {
+        return Err("Only files inside the download directory can be searched for mirrors".to_string());
+    }
 
-    // Compute SHA-256
+    let file_meta = tokio::fs::metadata(path).await
+        .map_err(|e| format!("Failed to read file metadata: {}", e))?;
+    let file_size = file_meta.len();
+
+    // Stream file for hashing to avoid loading entire file into RAM
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await
+        .map_err(|e| format!("Failed to open file: {}", e))?;
     let mut sha256_hasher = Sha256::new();
-    sha256_hasher.update(&file_bytes);
+    let mut md5_ctx = md5::Context::new();
+    let mut buf = vec![0u8; 64 * 1024]; // 64KB chunks
+    loop {
+        let n = file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
+        if n == 0 { break; }
+        sha256_hasher.update(&buf[..n]);
+        md5_ctx.consume(&buf[..n]);
+    }
     let sha256_hash = hex::encode(sha256_hasher.finalize());
-
-    // Compute MD5
-    let md5_hash = format!("{:x}", md5::compute(&file_bytes));
-
-    let file_size = file_bytes.len();
+    let md5_hash = format!("{:x}", md5_ctx.compute());
     let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
     let mut mirrors: Vec<MirrorResult> = Vec::new();

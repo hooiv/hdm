@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     Download,
@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "../contexts/ToastContext";
+import { error as logError } from "../utils/logger";
 import type { DockerImageInfo } from "../types";
 
 interface AddDownloadModalProps {
@@ -30,6 +31,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
 }) => {
     const [url, setUrl] = useState("");
     const [filename, setFilename] = useState("");
+    const userEditedFilename = React.useRef(false);
     const [isForceMode, setIsForceMode] = useState(false);
     const [isWarcMode, setIsWarcMode] = useState(false);
     const [isResolving, setIsResolving] = useState(false);
@@ -45,6 +47,17 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
     const isDocker =
         url.trim().startsWith("docker pull ") || url.trim().startsWith("docker:");
     const isHttp = url.trim().startsWith("http");
+
+    /** Basic URL validation — must be http(s), DOI, or Docker */
+    const isValidUrl = React.useMemo(() => {
+        const trimmed = url.trim();
+        if (!trimmed) return true; // empty is not "invalid", just not ready
+        return /^https?:\/\/.+/.test(trimmed) ||
+               trimmed.startsWith("10.") || trimmed.includes("doi.org/") ||
+               trimmed.startsWith("docker pull ") || trimmed.startsWith("docker:");
+    }, [url]);
+
+    const canSubmit = url.trim() && filename.trim() && isValidUrl;
 
     const handleResolveDoi = async () => {
         if (!url) return;
@@ -63,7 +76,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                 setFilename(`${safeTitle}.pdf`);
             }
         } catch (e) {
-            console.error("DOI Error:", e);
+            logError("DOI Error:", e);
             toast.error(`Failed to resolve DOI: ${e}`);
         } finally {
             setIsResolving(false);
@@ -86,7 +99,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
             setDockerInfo(info);
             setFilename(`${info.name.replace("/", "_")}_${info.tag}.tar`);
         } catch (e) {
-            console.error("Docker Error:", e);
+            logError("Docker Error:", e);
             toast.error("Docker pull failed: " + e);
         } finally {
             setIsFetchingDocker(false);
@@ -100,25 +113,25 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
             const response = await invoke<string>("fetch_with_ja3", { url, browser: "chrome" });
             toast.success("JA3 Spoof Success. Server responded with: " + response.substring(0, 100) + "...");
         } catch (e) {
-            console.error("JA3 Error:", e);
+            logError("JA3 Error:", e);
             toast.error(String(e));
         } finally {
             setIsTestingJa3(false);
         }
     };
 
-    // Auto-extract filename
+    // Auto-extract filename from URL (re-triggers on URL change unless user manually edited)
     React.useEffect(() => {
-        if (url && !filename) {
-            try {
-                const parts = url.split("/");
-                const last = parts[parts.length - 1].split("?")[0];
-                if (last && last.includes(".")) {
-                    setFilename(last);
-                }
-            } catch (e) {
-                /* ignore */
+        if (!url) return;
+        if (userEditedFilename.current) return;
+        try {
+            const parts = url.split("/");
+            const last = parts[parts.length - 1].split("?")[0];
+            if (last && last.includes(".")) {
+                setFilename(last);
             }
+        } catch (e) {
+            /* ignore */
         }
     }, [url]);
 
@@ -132,6 +145,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
             });
             setUrl("");
             setFilename("");
+            userEditedFilename.current = false;
             setDockerInfo(null);
             onClose();
             return;
@@ -139,10 +153,16 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
 
         if (url && filename) {
             if (isWarcMode) {
+                // Sanitize WARC filename: strip path separators, illegal chars, reserved names
+                let safeWarcName = filename.replace(/[/\\]/g, '_').replace(/[<>:"|?*\x00-\x1f]/g, '_').replace(/[\s.]+$/, '');
+                if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(safeWarcName.replace(/\.[^.]*$/, ''))) {
+                    safeWarcName = '_' + safeWarcName;
+                }
+                if (!safeWarcName) safeWarcName = 'archive';
                 // Background task
                 invoke("download_as_warc", {
                     url,
-                    savePath: `${filename}${filename.endsWith(".warc") ? "" : ".warc"}`,
+                    savePath: `${safeWarcName}${safeWarcName.endsWith(".warc") ? "" : ".warc"}`,
                 })
                     .then(() =>
                         toast.success(`Successfully archived to WARC: ${filename} `),
@@ -153,11 +173,27 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
             }
             setUrl("");
             setFilename("");
+            userEditedFilename.current = false;
             setIsForceMode(false);
+            setIsWarcMode(false);
             setBibtex("");
+            setDockerInfo(null);
             onClose();
         }
     };
+
+    // Close on Escape key
+    useEffect(() => {
+        if (!isOpen) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                onClose();
+            }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [isOpen, onClose]);
 
     return (
         <AnimatePresence>
@@ -174,6 +210,9 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
 
                     {/* Modal */}
                     <motion.div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="add-download-title"
                         initial={{ scale: 0.95, opacity: 0, y: 10 }}
                         animate={{ scale: 1, opacity: 1, y: 0 }}
                         exit={{ scale: 0.95, opacity: 0, y: 10 }}
@@ -260,7 +299,10 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                     <input
                                         type="text"
                                         value={filename}
-                                        onChange={(e) => setFilename(e.target.value)}
+                                        onChange={(e) => {
+                                            userEditedFilename.current = true;
+                                            setFilename(e.target.value);
+                                        }}
                                         placeholder="file.zip"
                                         className="w-full bg-slate-800/50 border border-slate-700 rounded-lg py-2.5 pl-10 pr-4 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/50 transition-all font-medium text-sm"
                                     />
@@ -372,14 +414,23 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                 </button>
                                 <button
                                     type="submit"
-                                    className={`flex-1 py-2.5 rounded-lg font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 text-sm ${isForceMode
-                                            ? "bg-gradient-to-r from-amber-600 to-orange-600 shadow-amber-900/20 hover:shadow-amber-900/40"
-                                            : "bg-gradient-to-r from-blue-600 to-violet-600 shadow-blue-900/20 hover:shadow-blue-900/40"
+                                    disabled={!canSubmit}
+                                    className={`flex-1 py-2.5 rounded-lg font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 text-sm ${!canSubmit
+                                            ? "opacity-50 cursor-not-allowed bg-slate-700"
+                                            : isForceMode
+                                                ? "bg-gradient-to-r from-amber-600 to-orange-600 shadow-amber-900/20 hover:shadow-amber-900/40"
+                                                : "bg-gradient-to-r from-blue-600 to-violet-600 shadow-blue-900/20 hover:shadow-blue-900/40"
                                         }`}
                                 >
                                     {isForceMode ? "Force Start" : "Start Download"}
                                 </button>
                             </div>
+
+                            {!isValidUrl && url.trim() && (
+                                <p className="text-center text-xs text-red-400 mt-1">
+                                    URL must start with http:// or https:// (or be a DOI/Docker reference)
+                                </p>
+                            )}
 
                             <p className="text-center text-xs text-slate-600">
                                 Tip: Hold{" "}

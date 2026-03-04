@@ -2,9 +2,12 @@ use reqwest::Client;
 use std::time::Duration;
 
 pub async fn fetch_with_ja3(url: &str, browser_profile: &str) -> Result<String, String> {
-    // To truly mock JA3 at the raw TLS handshake level in Rust, crates like `reqwest-impersonate` 
-    // are standard (since vanilla reqwest uses native-tls / rustls which don't allow deep cipher order tweaking).
-    // For this module, we construct a custom reqwest client to simulate the behavior as per requirements.
+    // Validate URL scheme to prevent SSRF against non-HTTP endpoints
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
+    match parsed.scheme() {
+        "http" | "https" => {},
+        s => return Err(format!("Unsupported URL scheme '{}': only http/https allowed", s)),
+    }
 
     let user_agent = match browser_profile.to_lowercase().as_str() {
         "chrome" => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -16,8 +19,6 @@ pub async fn fetch_with_ja3(url: &str, browser_profile: &str) -> Result<String, 
     let client = Client::builder()
         .user_agent(user_agent)
         .timeout(Duration::from_secs(30))
-        // Simulated JA3 customization flags:
-        .danger_accept_invalid_certs(true)
         .build()
         .map_err(|e| format!("Failed to build JA3 spoofing client: {}", e))?;
 
@@ -33,7 +34,15 @@ pub async fn fetch_with_ja3(url: &str, browser_profile: &str) -> Result<String, 
         .map_err(|e| format!("JA3 Request failed: {}", e))?;
 
     let status = response.status();
+    // Cap response body to 10 MB to prevent OOM from malicious servers
+    let content_length = response.content_length().unwrap_or(0);
+    if content_length > 10 * 1024 * 1024 {
+        return Err(format!("Response too large: {} bytes", content_length));
+    }
     let text = response.text().await.unwrap_or_default();
+    if text.len() > 10 * 1024 * 1024 {
+        return Err("Response body exceeded 10 MB limit".to_string());
+    }
 
     if status.is_success() {
         Ok(text)

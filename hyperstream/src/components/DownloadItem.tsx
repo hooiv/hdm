@@ -1,23 +1,13 @@
 import React, { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { error as logError } from '../utils/logger';
+import { formatBytes, formatSpeed, formatETA } from '../utils/formatters';
 import { ZipPreviewModal } from './ZipPreviewModal';
-import { Segment } from '../types';
+import type { DownloadTask } from '../types';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Folder, Play, Pause, Trash2, ChevronDown, FileText, ArrowUp, ArrowDown, Share2 } from 'lucide-react';
 import P2PShareModal from './P2PShareModal';
 import { DownloadExpandedPanel } from './DownloadExpandedPanel';
-
-export interface DownloadTask {
-    id: string;
-    filename: string;
-    url: string;
-    progress: number; // 0-100
-    downloaded: number; // bytes
-    total: number; // bytes
-    speed: number; // bytes/sec
-    status: 'Downloading' | 'Paused' | 'Error' | 'Done';
-    segments?: Segment[];
-}
 
 interface DownloadItemProps {
     task: DownloadTask;
@@ -28,32 +18,6 @@ interface DownloadItemProps {
     onMoveDown?: (id: string) => void;
     downloadDir: string;
 }
-
-const formatBytes = (bytes: number) => {
-    if (!bytes || bytes <= 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-};
-
-const formatSpeed = (bytesPerSec: number) => {
-    return formatBytes(bytesPerSec) + '/s';
-};
-
-const formatETA = (remainingBytes: number, speed: number) => {
-    if (speed <= 0) return '--:--';
-    const seconds = Math.floor(remainingBytes / speed);
-    if (seconds < 60) return `${seconds}s`;
-    if (seconds < 3600) {
-        const mins = Math.floor(seconds / 60);
-        const secs = seconds % 60;
-        return `${mins}m ${secs}s`;
-    }
-    const hours = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    return `${hours}h ${mins}m`;
-};
 
 // File type categories
 const getFileCategory = (filename: string): { icon: string; label: string; color: string; bgColor: string } => {
@@ -107,15 +71,21 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
     const [isExpanded, setIsExpanded] = useState(false);
     const [showP2PShare, setShowP2PShare] = useState(false);
 
+    // Sanitize filename: strip any path separators to prevent path traversal in display/path construction
+    const safeFilename = React.useMemo(() => {
+        const name = task.filename || 'unknown';
+        return name.replace(/[\\/]/g, '_');
+    }, [task.filename]);
+
     // Compute full file path from settings-based download directory
-    const filePath = `${downloadDir}/${task.filename}`;
+    const filePath = `${downloadDir}/${safeFilename}`;
 
     // Derived values
     const remainingBytes = task.total - task.downloaded;
     const eta = task.status === 'Downloading' ? formatETA(remainingBytes, task.speed) : '--:--';
 
     // Memoize category calculation
-    const category = React.useMemo(() => getFileCategory(task.filename), [task.filename]);
+    const category = React.useMemo(() => getFileCategory(safeFilename), [safeFilename]);
 
     // Helper to check if mountable
     // --- derived state for expanded panel passed via props or contained inside it ---
@@ -124,7 +94,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
         try {
             await invoke('open_folder', { path: filePath });
         } catch (err) {
-            console.error('Failed to open folder:', filePath, err);
+            logError('Failed to open folder:', filePath, err);
         }
     }, [filePath]);
 
@@ -184,12 +154,12 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                             </motion.div>
                         </div>
                         <div className="text-[10px] font-bold text-slate-400 w-10 text-right">
-                            {task.progress.toFixed(1)}%
+                            {task.total > 0 ? `${task.progress.toFixed(1)}%` : '—'}
                         </div>
                     </div>
 
                     <div className="flex justify-between mt-1 text-[10px] text-slate-500 font-medium tracking-wide">
-                        <span>{formatBytes(task.downloaded)} <span className="text-slate-600">/</span> {formatBytes(task.total)}</span>
+                        <span>{task.total > 0 ? <>{formatBytes(task.downloaded)} <span className="text-slate-600">/</span> {formatBytes(task.total)}</> : <>{formatBytes(task.downloaded)} <span className="text-slate-600">(unknown size)</span></>}</span>
                         <span className="text-cyan-600/70">ETA: {eta}</span>
                     </div>
                 </div>
@@ -209,23 +179,23 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
 
                     <div className="w-px h-4 bg-white/10 mx-1"></div>
 
-                    <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-slate-400 hover:text-cyan-400 rounded-md transition-colors" onClick={handleOpenFolder} title="Open Folder">
+                    <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-slate-400 hover:text-cyan-400 rounded-md transition-colors" onClick={handleOpenFolder} title="Open Folder" aria-label="Open folder">
                         <Folder size={16} />
                     </motion.button>
 
                     {task.status === 'Downloading' && (
-                        <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-amber-400 hover:text-amber-300 rounded-md transition-colors" onClick={() => onPause(task.id)} title="Pause">
+                        <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-amber-400 hover:text-amber-300 rounded-md transition-colors" onClick={() => onPause(task.id)} title="Pause" aria-label="Pause download">
                             <Pause size={16} />
                         </motion.button>
                     )}
 
                     {(task.status === 'Paused' || task.status === 'Error') && (
-                        <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-emerald-400 hover:text-emerald-300 rounded-md transition-colors" onClick={() => onResume(task.id)} title="Resume">
+                        <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(255,255,255,0.1)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-emerald-400 hover:text-emerald-300 rounded-md transition-colors" onClick={() => onResume(task.id)} title="Resume" aria-label="Resume download">
                             <Play size={16} />
                         </motion.button>
                     )}
 
-                    <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(220,38,38,0.2)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-slate-500 hover:text-red-400 rounded-md transition-colors" onClick={() => onDelete && onDelete(task.id)} title="Cancel">
+                    <motion.button whileHover={{ scale: 1.1, backgroundColor: "rgba(220,38,38,0.2)" }} whileTap={{ scale: 0.9 }} className="p-1.5 text-slate-500 hover:text-red-400 rounded-md transition-colors" onClick={() => onDelete && window.confirm(`Delete "${task.filename}"?`) && onDelete(task.id)} title="Cancel" aria-label="Delete download">
                         <Trash2 size={16} />
                     </motion.button>
 
@@ -237,6 +207,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                             className="p-1.5 text-slate-500 hover:text-cyan-400 rounded-md transition-colors"
                             onClick={() => setShowP2PShare(true)}
                             title="Share via P2P"
+                            aria-label="Share via P2P"
                         >
                             <Share2 size={16} />
                         </motion.button>
@@ -285,12 +256,14 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                 />
             )}
 
-            <P2PShareModal
-                isOpen={showP2PShare}
-                onClose={() => setShowP2PShare(false)}
-                downloadId={task.id}
-                downloadName={task.filename}
-            />
+            {showP2PShare && (
+                <P2PShareModal
+                    isOpen={showP2PShare}
+                    onClose={() => setShowP2PShare(false)}
+                    downloadId={task.id}
+                    downloadName={task.filename}
+                />
+            )}
         </motion.div>
     );
 });

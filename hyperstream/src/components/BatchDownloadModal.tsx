@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface LinkItem {
     url: string;
@@ -40,6 +40,11 @@ export const BatchDownloadModal: React.FC<BatchDownloadModalProps> = ({
     );
     const [filter, setFilter] = useState('');
     const [typeFilter, setTypeFilter] = useState<string>('all');
+
+    // Sync items when links prop changes (e.g., new batch from extension)
+    useEffect(() => {
+        setItems(links.map(l => ({ ...l, selected: true })));
+    }, [links]);
 
     if (!isOpen) return null;
 
@@ -87,7 +92,7 @@ export const BatchDownloadModal: React.FC<BatchDownloadModalProps> = ({
     };
 
     return (
-        <div className="batch-overlay">
+        <div className="batch-overlay" role="dialog" aria-modal="true">
             <div className="batch-modal">
                 <div className="batch-header">
                     <h2>📦 Batch Download</h2>
@@ -125,9 +130,9 @@ export const BatchDownloadModal: React.FC<BatchDownloadModalProps> = ({
                     {filteredItems.length === 0 ? (
                         <div className="batch-empty">No files found</div>
                     ) : (
-                        filteredItems.map((item, index) => (
+                        filteredItems.map((item, idx) => (
                             <div
-                                key={index}
+                                key={`${item.url}-${idx}`}
                                 className={`batch-item ${item.selected ? 'selected' : ''}`}
                                 onClick={() => toggleItem(item.url)}
                             >

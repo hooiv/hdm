@@ -62,8 +62,10 @@ pub fn setup_file(path: &str, resume_from: u64, total_size: u64) -> Result<Arc<M
 pub fn setup_manager(
     total_size: u64, 
     saved: Option<&SavedDownload>, 
-    resume_from: u64
+    resume_from: u64,
+    segment_count: u32,
 ) -> Arc<Mutex<DownloadManager>> {
+    let parts = if segment_count == 0 { 8 } else { segment_count };
     if let Some(saved_dl) = saved.filter(|s| s.segments.is_some()) {
         let segments = saved_dl.segments.as_ref().unwrap().clone();
         Arc::new(Mutex::new(DownloadManager::new_with_segments(total_size, segments)))
@@ -77,6 +79,6 @@ pub fn setup_manager(
         }
         Arc::new(Mutex::new(mgr))
     } else {
-        Arc::new(Mutex::new(DownloadManager::new(total_size, 8)))
+        Arc::new(Mutex::new(DownloadManager::new(total_size, parts)))
     }
 }

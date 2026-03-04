@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
-import { DownloadItem, DownloadTask } from './DownloadItem';
+import { DownloadItem } from './DownloadItem';
+import type { DownloadTask } from '../types';
 import { Virtuoso } from 'react-virtuoso';
 import { Inbox } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -56,7 +57,7 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
             style={{ height: '100%', width: '100%' }}
             data={tasks}
             itemContent={itemContent}
-            // followOutput={'auto'} // Can be annoying if user scrolled up
+            computeItemKey={(_, task) => task.id}
             alignToBottom={false}
             overscan={200}
         />

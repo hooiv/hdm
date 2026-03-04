@@ -1,4 +1,4 @@
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::protocol::{Message, WebSocketConfig}};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;
@@ -18,10 +18,33 @@ lazy_static! {
 }
 
 pub async fn connect_to_workspace(host_ip: String) -> Result<(), String> {
-    let url = format!("ws://{}:8765/api/sync", host_ip);
+    // Validate host_ip — must be a valid IP address or hostname
+    if host_ip.contains('/') || host_ip.contains('\\') || host_ip.contains(' ') || host_ip.contains('@') || host_ip.contains('\0') {
+        return Err("Invalid host IP format".to_string());
+    }
+    // Additional validation: must parse as an IP or be a simple hostname
+    if host_ip.parse::<std::net::IpAddr>().is_err() {
+        // Not a raw IP — validate as hostname (alphanumeric + dots + hyphens only)
+        if !host_ip.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == ':') {
+            return Err("Invalid hostname format".to_string());
+        }
+    }
+    // Use wss:// for encrypted sync; fall back to ws:// only for localhost
+    let scheme = if host_ip == "127.0.0.1" || host_ip == "localhost" || host_ip == "::1" {
+        "ws"
+    } else {
+        "wss"
+    };
+    let url = format!("{}://{}:8765/api/sync", scheme, host_ip);
     println!("Connecting to Workspace: {}", url);
 
-    let (ws_stream, _) = connect_async(&url).await.map_err(|e| e.to_string())?;
+    // Limit message sizes to prevent OOM from a malicious server
+    let ws_config = WebSocketConfig {
+        max_message_size: Some(16 * 1024 * 1024),  // 16 MB max message
+        max_frame_size: Some(4 * 1024 * 1024),      // 4 MB max frame
+        ..Default::default()
+    };
+    let (ws_stream, _) = connect_async_with_config(&url, Some(ws_config), false).await.map_err(|e| e.to_string())?;
     println!("Connected to Workspace!");
 
     IS_CONNECTED.store(true, Ordering::Relaxed);

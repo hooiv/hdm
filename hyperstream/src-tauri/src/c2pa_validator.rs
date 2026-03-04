@@ -5,6 +5,16 @@ use tokio::fs;
 /// C2PA embeds provenance data (creator, edits, AI generation) as a JUMBF box in JPEG/PNG/MP4.
 /// We look for the C2PA JUMBF marker and extract basic metadata.
 pub async fn validate_c2pa(file_path: String) -> Result<serde_json::Value, String> {
+    // Validate path is within download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canon = dunce::canonicalize(&file_path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    if !canon.starts_with(&download_dir) {
+        return Err("File must be within the download directory".to_string());
+    }
+
     let path = Path::new(&file_path);
     if !path.exists() {
         return Err(format!("File not found: {}", file_path));
@@ -15,8 +25,14 @@ pub async fn validate_c2pa(file_path: String) -> Result<serde_json::Value, Strin
         return Err("C2PA validation only supports image/video files (JPEG, PNG, WebP, MP4, TIFF).".to_string());
     }
 
+    // Guard against OOM: check file size via metadata BEFORE reading into memory
+    let metadata = fs::metadata(path).await.map_err(|e| format!("Failed to read file metadata: {}", e))?;
+    let file_size = metadata.len() as usize;
+    if file_size > 500 * 1024 * 1024 {
+        return Err("File too large for C2PA validation (max 500MB)".to_string());
+    }
+
     let file_bytes = fs::read(path).await.map_err(|e| format!("Failed to read file: {}", e))?;
-    let file_size = file_bytes.len();
 
     // C2PA manifests are stored in JUMBF (ISO 19566-5) boxes.
     // The JUMBF box starts with a type UUID for C2PA:
@@ -94,7 +110,7 @@ pub async fn validate_c2pa(file_path: String) -> Result<serde_json::Value, Strin
     }
 
     let status = if has_c2pa_jumbf {
-        "C2PA_VERIFIED"
+        "C2PA_MANIFEST_FOUND"
     } else if has_c2pa_xmp {
         "C2PA_XMP_FOUND"
     } else if has_adobe_provenance {
@@ -104,7 +120,7 @@ pub async fn validate_c2pa(file_path: String) -> Result<serde_json::Value, Strin
     };
 
     let description = match status {
-        "C2PA_VERIFIED" => "✅ C2PA JUMBF manifest found! This file contains verifiable content provenance data.",
+        "C2PA_MANIFEST_FOUND" => "✅ C2PA JUMBF manifest structure found. Note: full cryptographic verification requires a dedicated C2PA SDK.",
         "C2PA_XMP_FOUND" => "⚠️ C2PA metadata references found in XMP, but no full JUMBF manifest detected.",
         "ADOBE_PROVENANCE" => "📋 Adobe Content Credentials (legacy provenance) data detected.",
         _ => "❌ No C2PA content authenticity data found. This file has no embedded provenance.",

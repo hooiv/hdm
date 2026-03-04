@@ -42,7 +42,7 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
                 // Pause immediately
                 // We cannot "prevent" creation, but we can cancel.
                 chrome.downloads.cancel(downloadItem.id, async () => {
-                    if (chrome.runtime.lastError) console.error(chrome.runtime.lastError);
+                    if (chrome.runtime.lastError) console.warn(chrome.runtime.lastError);
 
                     // Send to HyperStream
                     const success = await sendToHyperStream(downloadItem.url, getFilename(downloadItem));
@@ -50,7 +50,7 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
                     if (!success) {
                         // Fallback: If failed, we could re-download, but that's tricky since we just cancelled.
                         // Ideally we warn user.
-                        console.log("HyperStream failed, user must download manually.");
+                        // HyperStream failed; user must download manually
                         // Optional: Create a notification?
                     }
                 });
@@ -80,18 +80,18 @@ async function sendToHyperStream(url, filename = null) {
         });
 
         if (response.ok) {
-            console.log("Sent to HyperStream:", url);
+            // sent to HyperStream
             // Badge
             chrome.action.setBadgeText({ text: "HS" });
             chrome.action.setBadgeBackgroundColor({ color: "#06b6d4" });
             setTimeout(() => chrome.action.setBadgeText({ text: "" }), 3000);
             return true;
         } else {
-            console.error("HyperStream returned error");
+            // hyperstream returned error
             return false;
         }
     } catch (error) {
-        console.error("HyperStream connection error:", error);
+        // hyperstream connection error
         return false;
     }
 }

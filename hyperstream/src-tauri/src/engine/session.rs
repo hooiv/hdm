@@ -27,18 +27,21 @@ pub(crate) async fn start_download_impl(
     // Play start sound
     crate::media::sounds::play_startup();
     
+    // Load settings once for the entire download initialization
+    let settings = settings::load_settings();
+    
     // VPN Auto-Connect (Tier 1)
     {
-        let settings = settings::load_settings();
         if settings.vpn_auto_connect {
             if let Some(ref vpn_name) = settings.vpn_connection_name {
                 if !vpn_name.trim().is_empty() {
                     println!("DEBUG: Auto-connecting to VPN: {}", vpn_name);
                     #[cfg(target_os = "windows")]
                     {
-                        let status = std::process::Command::new("rasdial")
+                        let status = tokio::process::Command::new("rasdial")
                             .arg(vpn_name)
                             .status()
+                            .await
                             .map_err(|e| format!("Failed to execute rasdial: {}", e))?;
                         
                         if !status.success() {
@@ -49,9 +52,10 @@ pub(crate) async fn start_download_impl(
                     }
                     #[cfg(target_os = "linux")]
                     {
-                        let status = std::process::Command::new("nmcli")
+                        let status = tokio::process::Command::new("nmcli")
                             .args(["connection", "up", vpn_name])
                             .status()
+                            .await
                             .map_err(|e| format!("Failed to execute nmcli: {}", e))?;
                         
                         if !status.success() {
@@ -62,9 +66,10 @@ pub(crate) async fn start_download_impl(
                     }
                     #[cfg(target_os = "macos")]
                     {
-                        let status = std::process::Command::new("networksetup")
+                        let status = tokio::process::Command::new("networksetup")
                             .args(["-connectpppoeservice", vpn_name])
                             .status()
+                            .await
                             .map_err(|e| format!("Failed to execute networksetup: {}", e))?;
                         
                         if !status.success() {
@@ -80,10 +85,9 @@ pub(crate) async fn start_download_impl(
     
     // Trigger webhooks for download start
     {
-        let settings = settings::load_settings();
-        if let Some(webhooks) = settings.webhooks {
+        if let Some(ref webhooks) = settings.webhooks {
             let manager = webhooks::WebhookManager::new();
-            manager.load_configs(webhooks).await;
+            manager.load_configs(webhooks.clone()).await;
             let payload = webhooks::WebhookPayload {
                 event: "DownloadStart".to_string(),
                 download_id: id.clone(),
@@ -117,8 +121,6 @@ pub(crate) async fn start_download_impl(
     if resume_from > 0 {
         println!("DEBUG: Resuming from byte {}", resume_from);
     }
-    
-    let settings = settings::load_settings();
 
     // AUTO-SORT / CATEGORY LOGIC
     // We only change path if it's a new download (not resuming) OR if we force checks (safer to only do new)
@@ -147,8 +149,17 @@ pub(crate) async fn start_download_impl(
                         std::path::PathBuf::from(&settings.download_dir).join(&rule.path)
                     };
                     
-                    // Create dir if needed
+                    // Create dir so canonicalize works, then validate path is within download dir
                     std::fs::create_dir_all(&category_path).ok();
+                    if let (Ok(canon_dl), Ok(canon_cat)) = (
+                        dunce::canonicalize(&settings.download_dir),
+                        dunce::canonicalize(&category_path),
+                    ) {
+                        if !canon_cat.starts_with(&canon_dl) {
+                            eprintln!("WARNING: Category path {:?} escapes download dir, ignoring rule", category_path);
+                            continue;
+                        }
+                    }
                     
                     new_path_buf = category_path.join(&filename);
                     break; 
@@ -164,7 +175,6 @@ pub(crate) async fn start_download_impl(
     let path = final_path;
 
     // 2. Get Content Length
-    let settings = settings::load_settings(); // reload settings fresh
     
     // Ensure Tor is ready if enabled (Idempotent call)
     if settings.use_tor {
@@ -240,13 +250,13 @@ pub(crate) async fn start_download_impl(
 
     // Register P2P
     {
-        let mut map = state.p2p_file_map.lock().unwrap();
+        let mut map = state.p2p_file_map.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(id.clone(), StreamingSource::FileSystem(std::path::PathBuf::from(&path)));
     }
     // P2P file advertising removed (not needed in simplified P2P)
 
     // 4. Initialize Manager
-    let manager = downloader::initialization::setup_manager(total_size, saved, resume_from);
+    let manager = downloader::initialization::setup_manager(total_size, saved, resume_from, settings.segments);
     let downloaded_total = Arc::new(AtomicU64::new(resume_from));
     // let last_progress_emit = Arc::new(Mutex::new(std::time::Instant::now())); // Removed
 
@@ -255,7 +265,7 @@ pub(crate) async fn start_download_impl(
 
     // 6. Store Session
     {
-        let mut downloads = state.downloads.lock().unwrap();
+        let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         downloads.insert(id.clone(), DownloadSession {
             manager: manager.clone(),
             stop_tx: stop_tx.clone(),
@@ -283,6 +293,7 @@ pub(crate) async fn start_download_impl(
     let etag_monitor = etag.clone();
     let md5_monitor = md5.clone();
     let mut stop_rx_monitor = stop_tx.subscribe();
+    let stop_tx_monitor = stop_tx.clone();
     let chatops_monitor = state.chatops_manager.clone();
     
     tokio::spawn(async move {
@@ -296,7 +307,7 @@ pub(crate) async fn start_download_impl(
                     // Get segment snapshot for visualization
                     // We only lock here, once per 33ms, instead of per-chunk
                     // Note: get_segments_snapshot internally locks.
-                    let segments = manager_monitor.lock().unwrap().get_segments_snapshot();
+                    let segments = manager_monitor.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
                     
                     // Compress to tuple format
                     let slim_segments: Vec<SlimSegment> = segments.iter().map(|s| (
@@ -315,7 +326,7 @@ pub(crate) async fn start_download_impl(
                         segments: slim_segments
                     });
 
-                    if d >= total_size {
+                    if total_size > 0 && d >= total_size {
                         crate::media::sounds::play_complete();
                         crate::cas_manager::register_cas(etag_monitor.as_deref(), md5_monitor.as_deref(), &path_monitor);
                         
@@ -392,6 +403,21 @@ pub(crate) async fn start_download_impl(
                             }
                         });
                         
+                        // Persist final "Complete" status
+                        let saved = persistence::SavedDownload {
+                            id: id_monitor.clone(),
+                            url: url_monitor.clone(),
+                            path: path_monitor.clone(),
+                            filename: extract_filename(&path_monitor).to_string(),
+                            total_size,
+                            downloaded_bytes: total_size,
+                            status: "Complete".to_string(),
+                            segments: None,
+                        };
+                        let _ = persistence::upsert_download(saved);
+                        // Signal save loop and workers to stop
+                        let _ = stop_tx_monitor.send(());
+                        
                         break;
                     }
                 }
@@ -403,11 +429,11 @@ pub(crate) async fn start_download_impl(
     let mut handles = Vec::new();
     
     // We need to clone manager segments to iterate
-    let segments_count = manager.lock().unwrap().segments.read().unwrap().len();
+    let segments_count = manager.lock().unwrap_or_else(|e| e.into_inner()).segments.read().unwrap_or_else(|e| e.into_inner()).len();
 
     for i in 0..segments_count {
         let manager_clone = manager.clone();
-        let url_clone = url.clone();
+        let url_clone = actual_url.clone();
         let tx_clone = tx.clone();
         let client_clone = client.clone();
         // let window_clone = window.clone(); // Not needed in worker
@@ -423,12 +449,12 @@ pub(crate) async fn start_download_impl(
         let total_size_worker = total_size; // u64 is Copy
 
         let handle = tokio::spawn(async move {
-            let (start, end) = {
-                let m = manager_clone.lock().unwrap();
-                let mut segs = m.segments.write().unwrap();
+            let (start, end, seg_id) = {
+                let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
                 let seg = &mut segs[i];
                 seg.state = crate::downloader::structures::SegmentState::Downloading;
-                (seg.start_byte, seg.end_byte)
+                (seg.start_byte, seg.end_byte, seg.id)
             };
 
             if end == 0 || start >= end { return; }
@@ -436,28 +462,34 @@ pub(crate) async fn start_download_impl(
             let mut current_pos = start;
             let mut retry_count = 0;
             const MAX_RETRIES: u32 = 5;
+            let mut bytes_since_cursor_update: u64 = 0;
+            const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024; // Update cursor every 256KB
 
             loop {
                 // Check for stop signal
                 if stop_rx.try_recv().is_ok() {
-                    let m = manager_clone.lock().unwrap();
-                    let mut segs = m.segments.write().unwrap();
-                    segs[i].downloaded_cursor = current_pos;
-                    segs[i].state = crate::downloader::structures::SegmentState::Paused;
+                    let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                        seg.downloaded_cursor = current_pos;
+                        seg.state = crate::downloader::structures::SegmentState::Paused;
+                    }
                     break;
                 }
 
                 if current_pos >= end {
-                    let m = manager_clone.lock().unwrap();
-                    let mut segs = m.segments.write().unwrap();
-                    segs[i].state = crate::downloader::structures::SegmentState::Complete;
+                    let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                        seg.state = crate::downloader::structures::SegmentState::Complete;
+                    }
                     break;
                 }
 
                 let range_header = format!("bytes={}-{}", current_pos, end - 1);
                 
                 // Acquire permit via ConnectionManager
-                let _permit = cm_clone.acquire(&url_clone).await;
+                let _permit = cm_clone.acquire(&url_clone).await.ok();
 
                 // Chaos Mode Check: Inject latency or failure here
                 if let Err(_e) = crate::network::chaos::check_chaos().await {
@@ -473,10 +505,12 @@ pub(crate) async fn start_download_impl(
                 
                 let res = tokio::select! {
                     _ = stop_rx.recv() => {
-                        let m = manager_clone.lock().unwrap();
-                        let mut segs = m.segments.write().unwrap();
-                        segs[i].downloaded_cursor = current_pos;
-                        segs[i].state = crate::downloader::structures::SegmentState::Paused;
+                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                        if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                            seg.downloaded_cursor = current_pos;
+                            seg.state = crate::downloader::structures::SegmentState::Paused;
+                        }
                         break;
                     }
                     r = res_future => r
@@ -485,9 +519,17 @@ pub(crate) async fn start_download_impl(
                 let response = match res {
                     Ok(r) => r,
                     Err(e) => {
-                        println!("DEBUG: Thread {} error: {}", i, e);
+                        println!("DEBUG: Thread (seg {}) error: {}", seg_id, e);
                         retry_count += 1;
                         if retry_count > MAX_RETRIES { 
+                            {
+                                let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                                    seg.downloaded_cursor = current_pos;
+                                    seg.state = crate::downloader::structures::SegmentState::Error;
+                                }
+                            }
                             crate::media::sounds::play_error();
                             break; 
                         }
@@ -498,14 +540,14 @@ pub(crate) async fn start_download_impl(
 
                 // Check for 403 Forbidden / 410 Gone (Link Expired)
                 if response.status() == rquest::StatusCode::FORBIDDEN || response.status() == rquest::StatusCode::GONE {
-                     println!("Thread {} error: Link Expired (403/410). Requesting Hot-Swap.", i);
+                     println!("Thread (seg {}) error: Link Expired (403/410). Requesting Hot-Swap.", seg_id);
                      
                      // 1. Stop all threads
                      let _ = stop_tx_clone.send(());
 
                      // 2. Persist status as "WaitingForRefresh"
-                     let segments = manager_clone.lock().unwrap().get_segments_snapshot();
-                     let total_downloaded = segments.iter().map(|s| s.downloaded_cursor - s.start_byte).sum();
+                     let segments = manager_clone.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
+                     let total_downloaded = segments.iter().map(|s| s.downloaded_cursor.saturating_sub(s.start_byte)).sum();
                      
                      let filename_s = std::path::Path::new(&path_worker).file_name()
                         .map(|f| f.to_string_lossy().to_string())
@@ -589,24 +631,45 @@ pub(crate) async fn start_download_impl(
                 loop {
                     tokio::select! {
                         _ = stop_rx.recv() => {
-                            let m = manager_clone.lock().unwrap();
-                            let mut segs = m.segments.write().unwrap();
-                            segs[i].downloaded_cursor = current_pos;
-                            segs[i].state = crate::downloader::structures::SegmentState::Paused;
+                            let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                            if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                                seg.downloaded_cursor = current_pos;
+                                seg.state = crate::downloader::structures::SegmentState::Paused;
+                            }
                             return; // Exit thread
                         }
                         item = stream.next() => {
                             match item {
                                 Some(Ok(chunk)) => {
-                                    let len = chunk.len() as u64;
-                                    if tx_clone.send(WriteRequest { offset: current_pos, data: chunk.to_vec(), segment_id: i as u32 }).is_err() {
-                                        eprintln!("Thread {}: Disk writer channel closed, stopping segment.", i);
+                                    // Truncate chunk to segment boundary to prevent writing into adjacent segments
+                                    let remaining = end.saturating_sub(current_pos) as usize;
+                                    let safe_chunk = if chunk.len() > remaining {
+                                        &chunk[..remaining]
+                                    } else {
+                                        &chunk[..]
+                                    };
+                                    let len = safe_chunk.len() as u64;
+                                    if len == 0 { break; }
+                                    if tx_clone.send(WriteRequest { offset: current_pos, data: safe_chunk.to_vec(), segment_id: seg_id }).is_err() {
+                                        eprintln!("Thread (seg {}): Disk writer channel closed, stopping segment.", seg_id);
                                         return; // Exit worker gracefully instead of panicking
                                     }
                                     current_pos += len;
                                     
                                     // Update global progress ATOMICALLY (Lock-Free)
                                     downloaded_clone.fetch_add(len, Ordering::Relaxed);
+                                    
+                                    // Periodically update segment cursor for accurate progress/resume
+                                    bytes_since_cursor_update += len;
+                                    if bytes_since_cursor_update >= CURSOR_UPDATE_THRESHOLD {
+                                        bytes_since_cursor_update = 0;
+                                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                        if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                                            seg.downloaded_cursor = current_pos;
+                                        }
+                                    }
                                     
                                     // NO EMISSION HERE!
                                     // Emission is handled by monitor_task
@@ -647,8 +710,8 @@ pub(crate) async fn start_download_impl(
             tokio::select! {
                 _ = stop_rx_save.recv() => break,
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
-                    let segments = manager_save.lock().unwrap().get_segments_snapshot();
-                    let total_downloaded = segments.iter().map(|s| s.downloaded_cursor - s.start_byte).sum();
+                    let segments = manager_save.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
+                    let total_downloaded = segments.iter().map(|s| s.downloaded_cursor.saturating_sub(s.start_byte)).sum();
                     
                     let saved = persistence::SavedDownload {
                         id: id_save.clone(),

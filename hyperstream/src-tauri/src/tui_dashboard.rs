@@ -99,9 +99,10 @@ while ($true) {
 }
 "#;
 
-    // Write the script to a temp file
+    // Write the script to a temp file with random name to avoid predictable paths
     let temp_dir = std::env::temp_dir();
-    let script_path = temp_dir.join("hyperstream_tui.ps1");
+    let random_id: u64 = rand::random();
+    let script_path = temp_dir.join(format!("hyperstream_tui_{}.ps1", random_id));
     std::fs::write(&script_path, ps_script)
         .map_err(|e| format!("Failed to write TUI script: {}", e))?;
 

@@ -161,7 +161,7 @@ pub fn calculate_backoff(
         next
     };
 
-    // Add jitter
+    // Add jitter (within the capped range, not on top of it)
     let jitter_range = (capped.as_millis() as f64 * config.jitter_factor) as u64;
     let jitter = if jitter_range > 0 {
         rand_jitter(jitter_range)
@@ -169,17 +169,19 @@ pub fn calculate_backoff(
         0
     };
 
-    capped + Duration::from_millis(jitter)
+    // Subtract jitter from capped value so total stays within max_delay
+    if capped.as_millis() as u64 > jitter {
+        capped - Duration::from_millis(jitter)
+    } else {
+        capped
+    }
 }
 
-/// Simple pseudo-random jitter (no external rand dependency)
+/// Random jitter for retry backoff
 fn rand_jitter(max: u64) -> u64 {
-    use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    nanos % max
+    use rand::Rng;
+    if max == 0 { return 0; }
+    rand::rng().random_range(0..max)
 }
 
 /// Check if content type indicates an error page (captive portal, login page)

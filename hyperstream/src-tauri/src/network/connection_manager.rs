@@ -22,20 +22,18 @@ impl ConnectionManager {
 
     /// Acquire a permit for the given URL's domain.
     /// The permit is held until the returned `OwnedSemaphorePermit` is dropped.
-    pub async fn acquire(&self, url_str: &str) -> OwnedSemaphorePermit {
+    pub async fn acquire(&self, url_str: &str) -> Result<OwnedSemaphorePermit, String> {
         let domain = self.extract_domain(url_str);
         
         // Get or create semaphore for this domain
-        // We use a two-step approach to avoid holding write locks too long
-        // straightforward with DashMap's entry API though.
         let semaphore = self.semaphores
             .entry(domain)
             .or_insert_with(|| Arc::new(Semaphore::new(self.default_limit)))
             .clone();
 
         // Acquire permit (waits if limit reached)
-        semaphore.acquire_owned().await.unwrap() 
-        // unwrap is safe because we never close the semaphores
+        semaphore.acquire_owned().await
+            .map_err(|_| "Semaphore closed unexpectedly".to_string())
     }
 
     fn extract_domain(&self, url_str: &str) -> String {

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use lazy_static::lazy_static;
-use regex::Regex;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GeofenceRule {
@@ -13,8 +12,14 @@ pub struct GeofenceRule {
     pub enabled: bool,
 }
 
+/// Internal rule with pre-compiled regex to avoid recompilation on every match
+struct CompiledRule {
+    rule: GeofenceRule,
+    compiled_re: regex::Regex,
+}
+
 lazy_static! {
-    static ref GEOFENCE_RULES: Mutex<Vec<GeofenceRule>> = Mutex::new(Vec::new());
+    static ref GEOFENCE_RULES: Mutex<Vec<CompiledRule>> = Mutex::new(Vec::new());
 }
 
 /// Add or update a geofence rule — route specific URL patterns through specific proxies/regions.
@@ -24,10 +29,16 @@ pub fn set_geofence_rule(
     proxy_type: String,
     proxy_address: String,
 ) -> Result<String, String> {
-    // Validate the regex pattern
-    Regex::new(&url_pattern).map_err(|e| format!("Invalid URL pattern regex: {}", e))?;
+    // Reject excessively long patterns to mitigate ReDoS
+    if url_pattern.len() > 512 {
+        return Err("URL pattern too long (max 512 characters)".to_string());
+    }
 
     let id = uuid::Uuid::new_v4().to_string();
+    let compiled_re = regex::RegexBuilder::new(&url_pattern)
+        .size_limit(1 << 20)
+        .build()
+        .map_err(|e| format!("Invalid URL pattern regex: {}", e))?;
     let rule = GeofenceRule {
         id: id.clone(),
         url_pattern,
@@ -37,24 +48,23 @@ pub fn set_geofence_rule(
         enabled: true,
     };
 
-    if let Ok(mut rules) = GEOFENCE_RULES.lock() {
-        rules.push(rule);
-    }
+    let mut rules = GEOFENCE_RULES.lock().unwrap_or_else(|e| e.into_inner());
+    rules.push(CompiledRule { rule, compiled_re });
 
     Ok(format!("Geofence rule added for region '{}' (ID: {})", region, id))
 }
 
 /// Get all configured geofence rules.
 pub fn get_geofence_rules() -> Result<Vec<GeofenceRule>, String> {
-    let rules = GEOFENCE_RULES.lock().map_err(|e| format!("Lock error: {}", e))?;
-    Ok(rules.clone())
+    let rules = GEOFENCE_RULES.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(rules.iter().map(|cr| cr.rule.clone()).collect())
 }
 
 /// Remove a geofence rule by ID.
 pub fn remove_geofence_rule(rule_id: String) -> Result<String, String> {
-    let mut rules = GEOFENCE_RULES.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut rules = GEOFENCE_RULES.lock().unwrap_or_else(|e| e.into_inner());
     let before = rules.len();
-    rules.retain(|r| r.id != rule_id);
+    rules.retain(|cr| cr.rule.id != rule_id);
     let after = rules.len();
 
     if before == after {
@@ -66,11 +76,11 @@ pub fn remove_geofence_rule(rule_id: String) -> Result<String, String> {
 
 /// Toggle a geofence rule on/off.
 pub fn toggle_geofence_rule(rule_id: String) -> Result<String, String> {
-    let mut rules = GEOFENCE_RULES.lock().map_err(|e| format!("Lock error: {}", e))?;
-    for rule in rules.iter_mut() {
-        if rule.id == rule_id {
-            rule.enabled = !rule.enabled;
-            return Ok(format!("Rule {} is now {}", rule_id, if rule.enabled { "enabled" } else { "disabled" }));
+    let mut rules = GEOFENCE_RULES.lock().unwrap_or_else(|e| e.into_inner());
+    for cr in rules.iter_mut() {
+        if cr.rule.id == rule_id {
+            cr.rule.enabled = !cr.rule.enabled;
+            return Ok(format!("Rule {} is now {}", rule_id, if cr.rule.enabled { "enabled" } else { "disabled" }));
         }
     }
     Err(format!("Rule not found: {}", rule_id))
@@ -79,14 +89,11 @@ pub fn toggle_geofence_rule(rule_id: String) -> Result<String, String> {
 /// Match a URL against geofence rules and return the matching proxy config.
 /// Returns None if no rule matches (use direct connection).
 pub fn match_geofence(url: &str) -> Option<GeofenceRule> {
-    if let Ok(rules) = GEOFENCE_RULES.lock() {
-        for rule in rules.iter() {
-            if !rule.enabled { continue; }
-            if let Ok(re) = Regex::new(&rule.url_pattern) {
-                if re.is_match(url) {
-                    return Some(rule.clone());
-                }
-            }
+    let rules = GEOFENCE_RULES.lock().unwrap_or_else(|e| e.into_inner());
+    for cr in rules.iter() {
+        if !cr.rule.enabled { continue; }
+        if cr.compiled_re.is_match(url) {
+            return Some(cr.rule.clone());
         }
     }
     None

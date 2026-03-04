@@ -94,6 +94,18 @@ impl DiskWriter {
             // Try to receive without blocking first to batch writes
             match self.receiver.try_recv() {
                 Ok(request) => {
+                    // Enforce max_pending_writes to prevent unbounded buffer growth on I/O failure
+                    if pending_buffer.len() >= self.config.max_pending_writes {
+                        eprintln!("[DiskWriter] WARNING: Buffer at capacity ({} entries), forcing flush before accepting new data.", pending_buffer.len());
+                        self.flush_buffer(&mut pending_buffer);
+                        // If flush couldn't drain (persistent I/O failure), drop oldest entries to prevent OOM
+                        while pending_buffer.len() >= self.config.max_pending_writes {
+                            if let Some(dropped) = pending_buffer.pop_front() {
+                                eprintln!("[DiskWriter] CRITICAL: Dropping write at offset {} ({} bytes) due to persistent I/O failure.", dropped.offset, dropped.data.len());
+                            }
+                        }
+                    }
+
                     pending_buffer.push_back(BufferEntry {
                         offset: request.offset,
                         data: request.data,
@@ -141,6 +153,13 @@ impl DiskWriter {
 
         println!("[DiskWriter] Finished. Total writes: {}, Bytes: {}", 
             self.write_count, self.bytes_written);
+        
+        // Ensure all data is flushed to stable storage before reporting completion
+        if let Ok(f) = self.file.lock() {
+            if let Err(e) = f.sync_all() {
+                eprintln!("[DiskWriter] WARNING: sync_all failed: {}", e);
+            }
+        }
     }
 
     /// Sort and merge adjacent buffer entries
@@ -176,14 +195,29 @@ impl DiskWriter {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("[DiskWriter] Lock error: {}", e);
-                return;
+                return; // Keep entries in buffer for retry on next flush
             }
         };
+
+        let mut consecutive_failures = 0u32;
+        const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 
         while let Some(entry) = buffer.pop_front() {
             if Self::perform_write(&mut file, &entry) {
                 self.write_count += 1;
                 self.bytes_written += entry.data.len() as u64;
+                consecutive_failures = 0;
+            } else {
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    eprintln!("[DiskWriter] CRITICAL: {} consecutive write failures, pausing flush. {} entries remaining in buffer.", consecutive_failures, buffer.len() + 1);
+                    // Re-queue the failed entry at the front for retry
+                    buffer.push_front(entry);
+                    break;
+                }
+                // Re-queue for retry on next flush cycle
+                buffer.push_front(entry);
+                break;
             }
         }
     }

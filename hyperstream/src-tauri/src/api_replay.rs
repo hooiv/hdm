@@ -12,6 +12,33 @@ pub struct ReplayResult {
     pub body_size: usize,
 }
 
+/// Check if a URL targets a private/loopback/link-local address (SSRF protection).
+pub fn validate_url_not_private(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
+    let host = parsed.host_str().ok_or("URL has no host")?;
+    let lower = host.to_lowercase();
+    if lower == "localhost" || lower == "[::1]" {
+        return Err("Requests to localhost are not allowed".to_string());
+    }
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        if ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified() {
+            return Err(format!("Requests to private/loopback IP {} are not allowed", ip));
+        }
+    }
+    if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
+        if ip.is_loopback() || ip.is_unspecified() {
+            return Err(format!("Requests to loopback IPv6 {} are not allowed", ip));
+        }
+        // Check IPv4-mapped addresses like ::ffff:127.0.0.1 or ::ffff:10.0.0.1
+        if let Some(v4) = ip.to_ipv4_mapped() {
+            if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() {
+                return Err(format!("Requests to private mapped IP {} are not allowed", v4));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Replay an HTTP request with the given parameters.
 pub async fn replay_request(
     url: String,
@@ -19,6 +46,9 @@ pub async fn replay_request(
     headers: Option<HashMap<String, String>>,
     body: Option<String>,
 ) -> Result<ReplayResult, String> {
+    // SSRF protection: block requests to private/loopback addresses
+    validate_url_not_private(&url)?;
+
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -56,8 +86,21 @@ pub async fn replay_request(
         }
     }
 
+    // Guard against excessive response bodies — check Content-Length before reading
+    const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+    if let Some(cl) = response.content_length() {
+        if cl as usize > MAX_BODY_SIZE {
+            return Err(format!("Response body too large ({} bytes, max {} bytes)", cl, MAX_BODY_SIZE));
+        }
+    }
+
     let body_bytes = response.bytes().await.map_err(|e| format!("Body read error: {}", e))?;
     let body_size = body_bytes.len();
+
+    if body_size > MAX_BODY_SIZE {
+        return Err(format!("Response body too large ({} bytes, max {} bytes)", body_size, MAX_BODY_SIZE));
+    }
+
     let body_preview = String::from_utf8_lossy(&body_bytes[..body_size.min(2000)]).to_string();
 
     Ok(ReplayResult {
@@ -87,6 +130,9 @@ pub struct FuzzMutation {
 
 /// Fuzz a URL by mutating query parameters and path segments.
 pub async fn fuzz_url(url: String) -> Result<FuzzResult, String> {
+    // SSRF protection: block requests to private/loopback addresses
+    validate_url_not_private(&url)?;
+
     let parsed = reqwest::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -151,10 +197,13 @@ pub async fn fuzz_url(url: String) -> Result<FuzzResult, String> {
 
     // Mutation 3: Path traversal probes
     let path = parsed.path().to_string();
+    let host_with_port = match parsed.port() {
+        Some(p) => format!("{}:{}", parsed.host_str().unwrap_or(""), p),
+        None => parsed.host_str().unwrap_or("").to_string(),
+    };
     let traversal_suffixes = vec!["/../", "/./", "/%2e%2e/", "/..;/"];
     for suffix in traversal_suffixes {
-        let mutated = format!("{}{}{}", parsed.scheme(), "://", 
-            format!("{}{}{}", parsed.host_str().unwrap_or(""), &path, suffix));
+        let mutated = format!("{}://{}{}{}", parsed.scheme(), host_with_port, &path, suffix);
         if let Ok(result) = probe_url(&client, &mutated).await {
             mutations.push(FuzzMutation {
                 mutated_url: mutated,
@@ -178,6 +227,10 @@ async fn probe_url(client: &Client, url: &str) -> Result<(u16, u64, usize), Stri
     let res = client.get(url).send().await.map_err(|e| e.to_string())?;
     let elapsed = start.elapsed().as_millis() as u64;
     let status = res.status().as_u16();
-    let size = res.bytes().await.map_err(|e| e.to_string())?.len();
-    Ok((status, elapsed, size))
+    let body = res.bytes().await.map_err(|e| e.to_string())?;
+    // Cap body size to prevent memory issues during fuzzing
+    if body.len() > 10 * 1024 * 1024 {
+        return Err("Response too large".to_string());
+    }
+    Ok((status, elapsed, body.len()))
 }

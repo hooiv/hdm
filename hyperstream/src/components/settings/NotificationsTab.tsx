@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { error as logError } from '../../utils/logger';
 import {
   Volume2,
   Home,
@@ -41,16 +42,52 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
     null,
   );
 
+  // Webhook form state (replaces document.getElementById usage)
+  const [webhookName, setWebhookName] = useState('');
+  const [webhookUrl, setWebhookUrl] = useState('');
+  const [webhookTemplate, setWebhookTemplate] = useState('Discord');
+  const [eventStart, setEventStart] = useState(true);
+  const [eventComplete, setEventComplete] = useState(true);
+  const [eventError, setEventError] = useState(true);
+
+  // Custom sound file paths (replaces DOM manipulation)
+  const [customSoundPaths, setCustomSoundPaths] = useState<Record<string, string>>({
+    start: '',
+    complete: '',
+    error: '',
+  });
+
   useEffect(() => {
     loadWebhooks();
   }, []);
+
+  // Initialize custom sound paths from settings
+  useEffect(() => {
+    setCustomSoundPaths({
+      start: settings.custom_sound_start ?? '',
+      complete: settings.custom_sound_complete ?? '',
+      error: settings.custom_sound_error ?? '',
+    });
+  }, [settings.custom_sound_start, settings.custom_sound_complete, settings.custom_sound_error]);
+
+  // Reset webhook form when modal opens
+  useEffect(() => {
+    if (showWebhookModal && !editingWebhook) {
+      setWebhookName('');
+      setWebhookUrl('');
+      setWebhookTemplate('Discord');
+      setEventStart(true);
+      setEventComplete(true);
+      setEventError(true);
+    }
+  }, [showWebhookModal, editingWebhook]);
 
   const loadWebhooks = async () => {
     try {
       const hooks = await invoke<WebhookConfig[]>("get_webhooks");
       setWebhooks(hooks);
     } catch (e) {
-      console.error("Failed to load webhooks", e);
+      logError("Failed to load webhooks", e);
       toast.error("Failed to load webhooks");
     }
   };
@@ -89,7 +126,7 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
     try {
       await invoke("play_test_sound", { soundType });
     } catch (e) {
-      console.error("Failed to play test sound", e);
+      logError("Failed to play test sound", e);
       toast.error("Failed to play test sound");
     }
   };
@@ -183,7 +220,7 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                       readOnly
                       placeholder="Default (embedded)"
                       className="flex-1 bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-1.5 text-slate-300 text-xs font-mono truncate"
-                      id={`custom-sound-${eventType}`}
+                      value={customSoundPaths[eventType] || ''}
                     />
                     <button
                       onClick={async () => {
@@ -196,13 +233,10 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                               eventType,
                               path,
                             });
-                            const input = document.getElementById(
-                              `custom-sound-${eventType}`,
-                            ) as HTMLInputElement;
-                            if (input) input.value = path;
+                            setCustomSoundPaths(prev => ({ ...prev, [eventType]: path }));
                           }
                         } catch (e) {
-                          console.error(e);
+                          logError(e);
                           toast.error("Failed to set custom sound");
                         }
                       }}
@@ -216,12 +250,9 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                           await invoke("clear_custom_sound_path", {
                             eventType,
                           });
-                          const input = document.getElementById(
-                            `custom-sound-${eventType}`,
-                          ) as HTMLInputElement;
-                          if (input) input.value = "";
+                          setCustomSoundPaths(prev => ({ ...prev, [eventType]: '' }));
                         } catch (e) {
-                          console.error(e);
+                          logError(e);
                           toast.error("Failed to clear custom sound");
                         }
                       }}
@@ -357,7 +388,8 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                     type="text"
                     placeholder="My Discord Webhook"
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:border-blue-500 focus:outline-none"
-                    id="webhook-name"
+                    value={webhookName}
+                    onChange={(e) => setWebhookName(e.target.value)}
                   />
                 </div>
                 <div>
@@ -368,7 +400,8 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                     type="url"
                     placeholder="https://discord.com/api/webhooks/..."
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-sm focus:border-blue-500 focus:outline-none"
-                    id="webhook-url"
+                    value={webhookUrl}
+                    onChange={(e) => setWebhookUrl(e.target.value)}
                   />
                 </div>
                 <div>
@@ -377,7 +410,8 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                   </label>
                   <select
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:border-blue-500 focus:outline-none"
-                    id="webhook-template"
+                    value={webhookTemplate}
+                    onChange={(e) => setWebhookTemplate(e.target.value)}
                   >
                     <option value="Discord">Discord</option>
                     <option value="Slack">Slack</option>
@@ -395,8 +429,8 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                       <input
                         type="checkbox"
                         className="rounded"
-                        id="event-start"
-                        defaultChecked
+                        checked={eventStart}
+                        onChange={(e) => setEventStart(e.target.checked)}
                       />{" "}
                       Download Start
                     </label>
@@ -404,8 +438,8 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                       <input
                         type="checkbox"
                         className="rounded"
-                        id="event-complete"
-                        defaultChecked
+                        checked={eventComplete}
+                        onChange={(e) => setEventComplete(e.target.checked)}
                       />{" "}
                       Download Complete
                     </label>
@@ -413,8 +447,8 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                       <input
                         type="checkbox"
                         className="rounded"
-                        id="event-error"
-                        defaultChecked
+                        checked={eventError}
+                        onChange={(e) => setEventError(e.target.checked)}
                       />{" "}
                       Download Error
                     </label>
@@ -424,48 +458,12 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                 <div className="flex gap-3 pt-2">
                   <button
                     onClick={async () => {
-                      const name = (
-                        document.getElementById(
-                          "webhook-name",
-                        ) as HTMLInputElement
-                      ).value;
-                      const url = (
-                        document.getElementById(
-                          "webhook-url",
-                        ) as HTMLInputElement
-                      ).value;
-                      const template = (
-                        document.getElementById(
-                          "webhook-template",
-                        ) as HTMLSelectElement
-                      ).value;
                       const events = [];
-                      if (
-                        (
-                          document.getElementById(
-                            "event-start",
-                          ) as HTMLInputElement
-                        ).checked
-                      )
-                        events.push("DownloadStart");
-                      if (
-                        (
-                          document.getElementById(
-                            "event-complete",
-                          ) as HTMLInputElement
-                        ).checked
-                      )
-                        events.push("DownloadComplete");
-                      if (
-                        (
-                          document.getElementById(
-                            "event-error",
-                          ) as HTMLInputElement
-                        ).checked
-                      )
-                        events.push("DownloadError");
+                      if (eventStart) events.push("DownloadStart");
+                      if (eventComplete) events.push("DownloadComplete");
+                      if (eventError) events.push("DownloadError");
 
-                      if (!name || !url || events.length === 0) {
+                      if (!webhookName || !webhookUrl || events.length === 0) {
                         toast.warning(
                           "Please fill all fields and select at least one event",
                         );
@@ -476,10 +474,10 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                         await invoke("add_webhook", {
                           config: {
                             id: `webhook_${Date.now()}`,
-                            name,
-                            url,
+                            name: webhookName,
+                            url: webhookUrl,
                             events,
-                            template,
+                            template: webhookTemplate,
                             enabled: true,
                             max_retries: 3,
                           },
@@ -487,11 +485,12 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                         setShowWebhookModal(false);
                         await loadWebhooks();
                       } catch (e) {
-                        console.error("Failed to add webhook", e);
+                        logError("Failed to add webhook", e);
                         toast.error("Failed to add webhook");
                       }
                     }}
-                    className="flex-1 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+                    disabled={!webhookName.trim() || !webhookUrl.trim()}
+                    className="flex-1 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Save Webhook
                   </button>

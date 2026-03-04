@@ -36,14 +36,26 @@ fn save_cas_data(data: &CasData) {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(content) = serde_json::to_string_pretty(data) {
-        let _ = fs::write(get_cas_path(), content);
+        let cas_path = get_cas_path();
+        let tmp_path = cas_path.with_extension("json.tmp");
+        if let Err(e) = fs::write(&tmp_path, &content) {
+            eprintln!("[CAS] Failed to write temp file {:?}: {}", tmp_path, e);
+            return;
+        }
+        if let Err(e) = fs::rename(&tmp_path, &cas_path) {
+            eprintln!("[CAS] rename failed ({}), falling back to copy", e);
+            if let Err(e2) = fs::copy(&tmp_path, &cas_path) {
+                eprintln!("[CAS] copy fallback also failed: {}", e2);
+            }
+            let _ = fs::remove_file(&tmp_path);
+        }
     }
 }
 
 /// Check if we already have a file matching this ETag or MD5.
 /// Returns the absolute path of the local file if a match exists.
 pub fn check_cas(etag: Option<&str>, md5: Option<&str>) -> Option<String> {
-    let data = CAS_MUTEX.lock().unwrap();
+    let data = CAS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     
     if let Some(e) = etag {
         if let Some(path) = data.entries.get(e) {
@@ -70,7 +82,21 @@ pub fn register_cas(etag: Option<&str>, md5: Option<&str>, path: &str) {
         return; // Nothing to index
     }
     
-    let mut data = CAS_MUTEX.lock().unwrap();
+    let mut data = CAS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Cap at 10,000 entries to prevent unbounded memory growth.
+    // When exceeding, remove oldest entries (arbitrary eviction since HashMap is unordered).
+    const MAX_CAS_ENTRIES: usize = 10_000;
+    if data.entries.len() >= MAX_CAS_ENTRIES {
+        let keys_to_remove: Vec<String> = data.entries.keys()
+            .take(data.entries.len() - MAX_CAS_ENTRIES + 2)
+            .cloned()
+            .collect();
+        for key in keys_to_remove {
+            data.entries.remove(&key);
+        }
+    }
+
     let mut changed = false;
     
     if let Some(e) = etag {

@@ -41,7 +41,13 @@ export interface SavedDownload {
     filename: string;
     total_size: number;
     downloaded_bytes: number;
-    status: string;
+    status: string; // Rust sends "Paused" | "Error" | "Done" | "Downloading"
+}
+
+/** Safely coerce a backend status string to a DownloadTask status union */
+export function toTaskStatus(s: string): DownloadTask['status'] {
+    if (s === 'Downloading' || s === 'Paused' || s === 'Error' || s === 'Done') return s;
+    return 'Paused'; // safe default for unknown values
 }
 
 /** Matches the Rust Settings struct from settings.rs */
@@ -150,4 +156,19 @@ export interface UpscaleResult {
     success: boolean;
     upscaled_path?: string;
     message?: string;
+}
+
+// Represents an active download inside the UI (including segments when available)
+export interface DownloadTask {
+    id: string;
+    filename: string;
+    url?: string;
+    progress: number; // 0-100
+    downloaded: number; // bytes
+    total: number; // bytes
+    speed: number; // bytes/sec
+    status: 'Downloading' | 'Paused' | 'Error' | 'Done';
+    segments?: Segment[];
+    // used by overlays/trackers for internal timing, not persisted
+    lastUpdate?: number;
 }

@@ -20,6 +20,16 @@ pub async fn arbitrage_probe(urls: Vec<String>) -> Result<Vec<ProbeResult>, Stri
         return Err("No URLs provided".to_string());
     }
 
+    // Cap concurrent probes to prevent resource exhaustion
+    if urls.len() > 50 {
+        return Err(format!("Too many URLs: {} (max 50)", urls.len()));
+    }
+
+    // SSRF protection: validate all URLs before probing
+    for u in &urls {
+        crate::api_replay::validate_url_not_private(u)?;
+    }
+
     let mut handles = Vec::new();
 
     for url in urls {

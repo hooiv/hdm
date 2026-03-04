@@ -1,17 +1,19 @@
-import React, { useState, useEffect, useRef, Suspense } from "react";
+import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { debug, error as logError } from "./utils/logger";
+import { Window } from "@tauri-apps/api/window";
 import "./App.css";
 import { Layout } from "./components/Layout";
 import { DownloadList } from "./components/DownloadList";
-import { DownloadTask } from "./components/DownloadItem";
 import { ClipboardToast } from "./components/ClipboardToast";
 import { DropTarget } from "./components/DropTarget";
 import { ToastManager, ToastRef } from "./components/ToastManager";
 import { TorrentList } from "./components/TorrentList";
 import { FeedsTab } from "./components/FeedsTab";
 import { SearchTab } from "./components/SearchTab";
-import type { DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings } from "./types";
+import type { DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings, DownloadTask } from "./types";
+import { toTaskStatus } from "./types";
 
 // Lazy load modals to improve initial render time
 const AddDownloadModal = React.lazy(() => import("./components/AddDownloadModal").then(m => ({ default: m.AddDownloadModal })));
@@ -47,33 +49,58 @@ function App() {
   const [activeTab, setActiveTab] = useState<'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins'>('downloads');
   const [downloadDir, setDownloadDir] = useState<string>('');
 
-  const [isOverlayVisible, setIsOverlayVisible] = useState(false);
+  const [, setIsOverlayVisible] = useState(false);
+  const isOverlayVisibleRef = useRef(false);
 
-  const toggleOverlay = async () => {
-    // Lazy import to avoid issues in non-tauri env or initial load
-    const { Window } = await import("@tauri-apps/api/window");
+  const toggleOverlay = useCallback(async () => {
+    // toggling overlay visibility using the statically imported Window API
     const overlay = await Window.getByLabel("overlay");
     if (overlay) {
-      if (isOverlayVisible) {
+      if (isOverlayVisibleRef.current) {
         await overlay.hide();
       } else {
         await overlay.show();
       }
-      setIsOverlayVisible(!isOverlayVisible);
+      isOverlayVisibleRef.current = !isOverlayVisibleRef.current;
+      setIsOverlayVisible(isOverlayVisibleRef.current);
     }
-  };
+  }, []);
+
+  // keyboard shortcut: Ctrl+Shift+O toggles overlay
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        toggleOverlay();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [toggleOverlay]);
 
   // Use useRef for mutable state that doesn't trigger re-renders
   const lastUpdate = useRef<Map<string, { time: number, bytes: number, speed: number }>>(new Map());
   const toastRef = useRef<ToastRef>(null);
   // Track completed IDs to avoid duplicate toasts
   const completedIds = useRef<Set<string>>(new Set());
+  // Track auto-remove timers so they can be cleaned on unmount
+  const autoRemoveTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // Stable ref for startDownload to avoid stale closures in event listeners
+  const startDownloadRef = useRef<(url: string, filename: string, force?: boolean, customHeaders?: Record<string,string>) => Promise<void>>(null!);
 
   useEffect(() => {
     const unlistenPromise = listen<DownloadProgressPayload>('download_progress', (event) => {
       const { id, downloaded, total } = event.payload;
 
       setTasks(prevTasks => {
+        // detect new task arrival
+        const exists = prevTasks.some(t => t.id === id);
+        if (!exists) {
+          // show overlay window if hidden
+          Window.getByLabel("overlay").then(o => o?.show());
+          setIsOverlayVisible(true);
+        }
+
         return prevTasks.map(task => {
           if (task.id === id) {
             const now = Date.now();
@@ -118,6 +145,14 @@ function App() {
             if (newTask.status === 'Done' && !completedIds.current.has(id)) {
               completedIds.current.add(id);
               toastRef.current?.addToast(`Download Complete: ${task.filename}`, 'success');
+              // auto-remove after 30 seconds to keep overlay/queue tidy
+              const timer = setTimeout(() => {
+                setTasks(curr => curr.filter(t => t.id !== id));
+                lastUpdate.current.delete(id);
+                completedIds.current.delete(id);
+                autoRemoveTimers.current.delete(id);
+              }, 30000);
+              autoRemoveTimers.current.set(id, timer);
             }
 
             return newTask;
@@ -129,6 +164,11 @@ function App() {
 
     return () => {
       unlistenPromise.then(unlisten => unlisten());
+      // Clear all pending auto-remove timers
+      for (const timer of autoRemoveTimers.current.values()) {
+        clearTimeout(timer);
+      }
+      autoRemoveTimers.current.clear();
     };
   }, []);
 
@@ -141,7 +181,7 @@ function App() {
         const dir = settings?.download_dir || 'Downloads';
         setDownloadDir(dir);
       } catch (e) {
-        console.error('Failed to load settings:', e);
+        logError('Failed to load settings:', e);
         toastRef.current?.addToast('Failed to load settings', 'error');
         setDownloadDir('Downloads');
       }
@@ -156,12 +196,12 @@ function App() {
             downloaded: d.downloaded_bytes,
             total: d.total_size,
             speed: 0,
-            status: d.status as 'Paused' | 'Done' | 'Error' | 'Downloading'
+            status: toTaskStatus(d.status)
           }));
           setTasks(loadedTasks);
         }
       } catch (error) {
-        console.error('Failed to load saved downloads:', error);
+        logError('Failed to load saved downloads:', error);
         toastRef.current?.addToast('Failed to load saved downloads', 'error');
       }
     };
@@ -172,9 +212,9 @@ function App() {
   useEffect(() => {
     const unlistenPromise = listen<ExtensionDownloadPayload>('extension_download', (event) => {
       const { url, filename } = event.payload;
-      console.log('Extension download received:', url, filename);
+      debug('Extension download received:', url, filename);
       const extractedFilename = filename || url.split('/').pop()?.split('?')[0] || 'download';
-      startDownload(url, extractedFilename);
+      startDownloadRef.current(url, extractedFilename);
     });
 
     return () => {
@@ -187,7 +227,7 @@ function App() {
     let dismissTimer: ReturnType<typeof setTimeout> | null = null;
     const unlistenPromise = listen<ClipboardUrlPayload>('clipboard_url', (event) => {
       const { url, filename } = event.payload;
-      console.log('Clipboard URL detected:', url, filename);
+      debug('Clipboard URL detected:', url, filename);
       setClipboardData({ url, filename });
 
       // Clear previous timer to avoid stale dismissals
@@ -208,7 +248,7 @@ function App() {
   useEffect(() => {
     const unlistenPromise = listen<BatchLink[]>('batch_links', (event) => {
       const links = event.payload;
-      console.log('Batch links received:', links.length);
+      debug('Batch links received:', links.length);
       setBatchLinks(links);
     });
 
@@ -221,8 +261,8 @@ function App() {
   useEffect(() => {
     const unlistenPromise = listen<ScheduledDownloadPayload>('scheduled_download_start', (event) => {
       const { url, filename } = event.payload;
-      console.log('Scheduled download starting:', url, filename);
-      startDownload(url, filename);
+      debug('Scheduled download starting:', url, filename);
+      startDownloadRef.current(url, filename);
     });
 
     return () => {
@@ -234,7 +274,7 @@ function App() {
   useEffect(() => {
     const unlistenPromise = listen<{ id: string; url: string }>('download_refreshed', (event) => {
       const { id, url } = event.payload;
-      console.log('Download URL refreshed:', id, url);
+      debug('Download URL refreshed:', id, url);
       setTasks(prev => prev.map(t => {
         if (t.id !== id) return t;
         // Only reset Error status to Paused; leave Done/Downloading/Paused as-is
@@ -251,15 +291,32 @@ function App() {
 
   /* ------------------ Memoized Handlers ------------------ */
 
+  /** Sanitize a filename to prevent path traversal and Windows reserved name issues. */
+  const sanitizeFilename = (name: string): string => {
+    // Strip directory separators and parent-directory traversal
+    let safe = name.replace(/[/\\]/g, '_').replace(/\.\./g, '_');
+    // Remove leading dots (hidden files on unix) and control characters
+    safe = safe.replace(/^\.+/, '').replace(/[\x00-\x1f\x7f]/g, '');
+    // Remove Windows illegal filename characters
+    safe = safe.replace(/[<>:"|?*]/g, '_');
+    // Strip trailing dots and spaces (Windows silently drops them, causing mismatches)
+    safe = safe.replace(/[\s.]+$/, '');
+    // Block Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    const reserved = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i;
+    if (reserved.test(safe)) {
+      safe = '_' + safe;
+    }
+    // Fallback if nothing remains
+    return safe.trim() || 'download';
+  };
+
   const startDownload = async (url: string, filename: string, force: boolean = false, customHeaders?: Record<string, string>) => {
-    // startDownload touches state heavily, we can keep it as is or memoize if needed.
-    // It's usually called from modals so it's not passed to list items directly.
-    // But consistent style is good.
+    const safeFilename = sanitizeFilename(filename);
     const downloadId = generateId();
 
     const newTask: DownloadTask = {
       id: downloadId,
-      filename,
+      filename: safeFilename,
       url,
       progress: 0,
       downloaded: 0,
@@ -277,17 +334,19 @@ function App() {
       await invoke("start_download", {
         id: downloadId,
         url,
-        path: `${downloadDir}/${filename}`,
+        path: `${downloadDir}/${safeFilename}`,
         force,
         customHeaders: customHeaders || null
       });
     } catch (error) {
-      console.error(error);
+      logError(error);
       toastRef.current?.addToast(`Failed to start download: ${error}`, 'error');
       setTasks(prev => prev.map(t => t.id === downloadId ? { ...t, status: 'Error' } : t));
     }
   };
 
+  // Keep startDownloadRef in sync so event listeners always have latest closure
+  startDownloadRef.current = startDownload;
 
   // Stable ref for tasks to avoid dependency cycles in memoized callbacks
   const tasksRef = useRef(tasks);
@@ -307,7 +366,7 @@ function App() {
       });
       setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Paused', speed: 0 } : t));
     } catch (error) {
-      console.error("Failed to pause:", error);
+      logError("Failed to pause:", error);
       toastRef.current?.addToast('Failed to pause download', 'error');
     }
   }, []); // Stable!
@@ -315,6 +374,10 @@ function App() {
   const resumeDownloadMemo = React.useCallback(async (id: string) => {
     const task = tasksRef.current.find(t => t.id === id);
     if (task) {
+      if (!task.url) {
+        toastRef.current?.addToast('Cannot resume: download has no URL', 'error');
+        return;
+      }
       setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Downloading' } : t));
       try {
         await invoke("start_download", {
@@ -323,7 +386,7 @@ function App() {
           path: `${downloadDirRef.current}/${task.filename}`
         });
       } catch (error) {
-        console.error("Failed to resume:", error);
+        logError("Failed to resume:", error);
         toastRef.current?.addToast('Failed to resume download', 'error');
         setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Error' } : t));
       }
@@ -335,8 +398,9 @@ function App() {
       await invoke("remove_download_entry", { id });
       setTasks(prev => prev.filter(t => t.id !== id));
       lastUpdate.current.delete(id);
+      completedIds.current.delete(id);
     } catch (error) {
-      console.error("Failed to delete:", error);
+      logError("Failed to delete:", error);
       toastRef.current?.addToast('Failed to delete download', 'error');
     }
   }, []); // Stable
@@ -359,37 +423,69 @@ function App() {
     try {
       await invoke("move_download_item", { id, direction });
     } catch (error) {
-      console.error("Failed to persist move:", error);
+      logError("Failed to persist move:", error);
       toastRef.current?.addToast('Failed to move download', 'error');
     }
   }, []); // Stable
 
+  const moveUpMemo = React.useCallback((id: string) => moveTaskMemo(id, 'up'), [moveTaskMemo]);
+  const moveDownMemo = React.useCallback((id: string) => moveTaskMemo(id, 'down'), [moveTaskMemo]);
+
   const handleStream = async (id: number) => {
     try {
       const url = await invoke<string>('play_torrent', { id });
-      console.log("Streaming URL:", url);
+      debug("Streaming URL:", url);
       // Open the URL in default player/browser
       await invoke('open_file', { path: url });
     } catch (e) {
-      console.error("Stream failed", e);
+      logError("Stream failed", e);
       // toastRef might be null if not using conditional, but typically safe inside handler
       toastRef.current?.addToast("Stream error: " + e, 'error');
     }
   };
 
-  // Calculate stats
-  const stats = {
+  // Calculate stats (memoized to avoid re-computation at 30fps progress updates)
+  const stats = React.useMemo(() => ({
     total: tasks.length,
     downloading: tasks.filter(t => t.status === 'Downloading').length,
     completed: tasks.filter(t => t.status === 'Done').length,
     totalBytes: tasks.reduce((sum, t) => sum + t.downloaded, 0),
-  };
+  }), [tasks]);
 
   const handleSpeedLimitChange = (limit: number) => {
     // Layout sends values in KB/s (512, 1024, 5120, 10240), backend expects KB/s
     invoke("set_speed_limit", { limitKbps: limit }).catch((err) => {
-      console.error("Failed to set speed limit:", err);
+      logError("Failed to set speed limit:", err);
       toastRef.current?.addToast("Failed to set speed limit", "error");
+    });
+  };
+
+  const pauseAll = () => {
+    const toPause = tasks.filter(t => t.status === 'Downloading');
+    if (toPause.length === 0) return;
+    setTasks(prev => prev.map(x =>
+      toPause.some(p => p.id === x.id) ? { ...x, status: 'Paused' as const, speed: 0 } : x
+    ));
+    toPause.forEach(t => {
+      invoke('pause_download', { id: t.id }).catch((err) => logError('Failed to pause:', t.id, err));
+    });
+  };
+
+  const resumeAll = () => {
+    const toResume = tasks.filter(t => (t.status === 'Paused' || t.status === 'Error') && t.url);
+    if (toResume.length === 0) return;
+    setTasks(prev => prev.map(x =>
+      toResume.some(r => r.id === x.id) ? { ...x, status: 'Downloading' as const } : x
+    ));
+    toResume.forEach(t => {
+      invoke('start_download', {
+        id: t.id,
+        url: t.url,
+        path: `${downloadDirRef.current}/${t.filename}`
+      }).catch((err) => {
+        logError('Failed to resume:', t.id, err);
+        setTasks(prev => prev.map(x => x.id === t.id ? { ...x, status: 'Error' as const } : x));
+      });
     });
   };
 
@@ -398,9 +494,9 @@ function App() {
     setClipboardData(null);
   };
 
-  const globalSpeed = tasks
+  const globalSpeed = React.useMemo(() => tasks
     .filter(d => d.status === 'Downloading')
-    .reduce((acc, curr) => acc + (curr.speed || 0), 0);
+    .reduce((acc, curr) => acc + (curr.speed || 0), 0), [tasks]);
 
   return (
     <>
@@ -410,10 +506,10 @@ function App() {
             try {
               const text = await navigator.clipboard.readText();
               if (text && (text.startsWith('http') || text.startsWith('magnet:'))) {
-                console.log("Force Download Key detected. Adding:", text);
+                debug("Force Download Key detected. Adding:", text);
                 if (text.startsWith('magnet:')) {
                   invoke("add_magnet_link", { magnet: text }).catch((err) => {
-                    console.error("Magnet link failed:", err);
+                    logError("Magnet link failed:", err);
                     toastRef.current?.addToast(`Failed to add magnet link: ${err}`, 'error');
                   });
                 } else {
@@ -425,7 +521,7 @@ function App() {
                 toastRef.current?.addToast(`Clipboard does not contain a valid URL`, 'error');
               }
             } catch (err) {
-              console.error("Failed to read clipboard:", err);
+              logError("Failed to read clipboard:", err);
               toastRef.current?.addToast(`Failed to read clipboard`, 'error');
             }
           } else {
@@ -446,14 +542,34 @@ function App() {
         {activeTab === 'downloads' ? (
           <div className="flex flex-col h-full">
             <GlobalTelemetry tasks={tasks} />
+            {stats.completed > 0 && (
+              <div className="px-4 pb-2 flex flex-col sm:flex-row sm:items-center sm:gap-4">
+                <button
+                  onClick={() => setTasks(prev => prev.filter(t => t.status !== 'Done'))}
+                  className="text-xs text-red-400 hover:text-red-200 underline"
+                >
+                  Clear completed ({stats.completed})
+                </button>
+                <div className="flex gap-2 mt-2 sm:mt-0">
+                  <button
+                    onClick={pauseAll}
+                    className="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-500 rounded text-white"
+                  >Pause All</button>
+                  <button
+                    onClick={resumeAll}
+                    className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-500 rounded text-white"
+                  >Resume All</button>
+                </div>
+              </div>
+            )}
             {tasks.length > 0 ? (
               <DownloadList
                 tasks={tasks}
                 onPause={pauseDownloadMemo}
                 onResume={resumeDownloadMemo}
                 onDelete={deleteDownloadMemo}
-                onMoveUp={(id) => moveTaskMemo(id, 'up')}
-                onMoveDown={(id) => moveTaskMemo(id, 'down')}
+                onMoveUp={moveUpMemo}
+                onMoveDown={moveDownMemo}
                 downloadDir={downloadDir}
               />
             ) : (
@@ -489,9 +605,9 @@ function App() {
             isOpen={isTorrentModalOpen}
             onClose={() => setIsTorrentModalOpen(false)}
             onAdd={(magnet) => {
-              console.log("Adding magnet:", magnet);
+              debug("Adding magnet:", magnet);
               invoke("add_magnet_link", { magnet }).catch((err) => {
-                console.error("Magnet link failed:", err);
+                logError("Magnet link failed:", err);
                 toastRef.current?.addToast(`Failed to add magnet: ${err}`, 'error');
               });
             }}
@@ -537,10 +653,9 @@ function App() {
           onDismiss={() => setClipboardData(null)}
         />
       )}
-      <DropTarget onDrop={(_url) => {
+      <DropTarget onDrop={React.useCallback((_url: string) => {
         setIsModalOpen(true);
-        // Could auto-fill URL here if modal supports it
-      }} />
+      }, [])} />
       <ToastManager ref={toastRef} />
     </>
   );

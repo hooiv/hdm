@@ -32,6 +32,16 @@ fn detect_file_type(path: &str) -> Option<&'static str> {
 
 /// Scrub metadata from a file (auto-detects type)
 pub fn scrub_file(path: &str) -> Result<ScrubResult, String> {
+    // Validate path is within download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canon = dunce::canonicalize(path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    if !canon.starts_with(&download_dir) {
+        return Err("File must be within the download directory".to_string());
+    }
+
     let file_type = detect_file_type(path)
         .ok_or_else(|| format!("Unsupported file type for metadata scrubbing: {}", path))?;
     
@@ -45,6 +55,16 @@ pub fn scrub_file(path: &str) -> Result<ScrubResult, String> {
 
 /// Get metadata info from a file without modifying it
 pub fn get_metadata_info(path: &str) -> Result<MetadataInfo, String> {
+    // Validate path is within download directory (same as scrub_file)
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canon = dunce::canonicalize(path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    if !canon.starts_with(&download_dir) {
+        return Err("File must be within the download directory".to_string());
+    }
+
     let file_type = detect_file_type(path)
         .unwrap_or("unknown");
     
@@ -79,6 +99,11 @@ fn is_metadata_marker(marker: u8) -> bool {
 }
 
 fn scrub_jpeg(path: &str) -> Result<ScrubResult, String> {
+    // Guard against OOM: check file size before reading
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if file_size > 500 * 1024 * 1024 {
+        return Err("File too large for metadata scrubbing (max 500 MB)".to_string());
+    }
     let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
     
     if data.len() < 2 || data[0] != 0xFF || data[1] != JPEG_SOI {
@@ -124,7 +149,17 @@ fn scrub_jpeg(path: &str) -> Result<ScrubResult, String> {
         }
         
         let seg_len = ((data[i + 2] as usize) << 8) | (data[i + 3] as usize);
+        if seg_len < 2 {
+            // Invalid segment length (must be >= 2 to include the length field itself)
+            output.extend_from_slice(&data[i..]);
+            break;
+        }
         let total_seg_len = seg_len + 2; // +2 for the FF XX marker bytes
+        if i + total_seg_len > data.len() {
+            // Segment extends past end of file — emit remainder and stop
+            output.extend_from_slice(&data[i..]);
+            break;
+        }
         
         if is_metadata_marker(marker) {
             // Strip this segment
@@ -139,15 +174,21 @@ fn scrub_jpeg(path: &str) -> Result<ScrubResult, String> {
             bytes_removed += total_seg_len as u64;
         } else {
             // Keep this segment
-            let end = (i + total_seg_len).min(data.len());
-            output.extend_from_slice(&data[i..end]);
+            output.extend_from_slice(&data[i..i + total_seg_len]);
         }
         
         i += total_seg_len;
     }
     
     if bytes_removed > 0 {
-        std::fs::write(path, &output).map_err(|e| format!("Failed to write file: {}", e))?;
+        // Atomic write: write to temp file then rename to prevent data loss on crash
+        let tmp_path = format!("{}.scrub_tmp", path);
+        std::fs::write(&tmp_path, &output).map_err(|e| format!("Failed to write temp file: {}", e))?;
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            // Clean up tmp on rename failure
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("Failed to rename temp file: {}", e)
+        })?;
     }
     
     Ok(ScrubResult {
@@ -159,6 +200,11 @@ fn scrub_jpeg(path: &str) -> Result<ScrubResult, String> {
 }
 
 fn get_jpeg_metadata_info(path: &str) -> Result<MetadataInfo, String> {
+    // Guard against OOM: check file size before reading
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if file_size > 500 * 1024 * 1024 {
+        return Err("File too large for metadata inspection (max 500 MB)".to_string());
+    }
     let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
     
     if data.len() < 2 || data[0] != 0xFF || data[1] != JPEG_SOI {
@@ -180,7 +226,13 @@ fn get_jpeg_metadata_info(path: &str) -> Result<MetadataInfo, String> {
         if i + 3 >= data.len() { break; }
         
         let seg_len = ((data[i + 2] as usize) << 8) | (data[i + 3] as usize);
+        if seg_len < 2 {
+            break;
+        }
         let total_seg_len = seg_len + 2;
+        if i + total_seg_len > data.len() {
+            break;
+        }
         
         if is_metadata_marker(marker) {
             let name = match marker {
@@ -217,6 +269,11 @@ fn is_critical_png_chunk(chunk_type: &[u8; 4]) -> bool {
 }
 
 fn scrub_png(path: &str) -> Result<ScrubResult, String> {
+    // Guard against OOM: check file size before reading
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if file_size > 500 * 1024 * 1024 {
+        return Err("File too large for metadata scrubbing (max 500 MB)".to_string());
+    }
     let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
     
     // Check PNG signature
@@ -261,7 +318,13 @@ fn scrub_png(path: &str) -> Result<ScrubResult, String> {
     }
     
     if bytes_removed > 0 {
-        std::fs::write(path, &output).map_err(|e| format!("Failed to write file: {}", e))?;
+        // Atomic write: write to temp file then rename to prevent data loss on crash
+        let tmp_path = format!("{}.scrub_tmp", path);
+        std::fs::write(&tmp_path, &output).map_err(|e| format!("Failed to write temp file: {}", e))?;
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("Failed to rename temp file: {}", e)
+        })?;
     }
     
     Ok(ScrubResult {
@@ -273,6 +336,11 @@ fn scrub_png(path: &str) -> Result<ScrubResult, String> {
 }
 
 fn get_png_metadata_info(path: &str) -> Result<MetadataInfo, String> {
+    // Guard against OOM: check file size before reading
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if file_size > 500 * 1024 * 1024 {
+        return Err("File too large for metadata inspection (max 500 MB)".to_string());
+    }
     let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
     
     if data.len() < 8 || &data[0..8] != b"\x89PNG\r\n\x1a\n" {

@@ -93,13 +93,10 @@ impl TorrentManager {
     
     #[allow(dead_code)]
     pub fn get_main_file_path(&self, id: usize) -> Option<PathBuf> {
-         let fid = self.get_largest_file_id(id)?;
-         // Return a virtual path that http_server can parse.
-         // e.g. "stream:<tid>:<fid>"
-         // But PathBuf expects valid path.
-         // We can return a fake path "C:\Stream\{id}\{fid}".
-         let s = format!("C:\\Stream\\{l}\\{r}", l=id, r=fid);
-         Some(PathBuf::from(s))
+         let _fid = self.get_largest_file_id(id)?;
+         // TODO: Return actual file path from torrent output directory once librqbit exposes it.
+         // Returning None instead of a fake path to prevent downstream consumers from acting on non-existent files.
+         None
     }
 
     pub fn get_torrents(&self) -> Vec<TorrentStatus> {

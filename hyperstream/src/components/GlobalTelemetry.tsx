@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useMemo } from 'react';
-import { DownloadTask } from './DownloadItem';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
+import type { DownloadTask } from '../types';
+import { formatSpeed } from '../utils/formatters';
 import { Activity, Server } from 'lucide-react';
 
 interface GlobalTelemetryProps {
@@ -17,25 +18,20 @@ export const GlobalTelemetry: React.FC<GlobalTelemetryProps> = ({ tasks }) => {
     // Active connection count (number of downloading tasks)
     const activeConnections = tasks.filter(t => t.status === 'Downloading').length;
 
-    // Update history every 500ms
+    // Keep a ref in sync so the interval closure always reads the latest speed
+    const speedRef = useRef(currentSpeed);
+    useEffect(() => { speedRef.current = currentSpeed; }, [currentSpeed]);
+
+    // Update history every 500ms — stable interval, never restarted
     useEffect(() => {
         const interval = setInterval(() => {
             setHistory(prev => {
-                const next = [...prev.slice(1), currentSpeed];
+                const next = [...prev.slice(1), speedRef.current];
                 return next;
             });
         }, 500);
         return () => clearInterval(interval);
-    }, [currentSpeed]);
-
-    // Format speed Helper
-    const formatSpeed = (bps: number) => {
-        if (!bps || bps <= 0) return '0 B/s';
-        const k = 1024;
-        const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-        const i = Math.min(Math.floor(Math.log(bps) / Math.log(k)), sizes.length - 1);
-        return parseFloat((bps / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-    };
+    }, []);
 
     // Calculate SVG Path for Sparkline
     const maxSpeed = Math.max(...history, 1024 * 1024); // Minimum scale 1MB/s
@@ -100,22 +96,6 @@ export const GlobalTelemetry: React.FC<GlobalTelemetryProps> = ({ tasks }) => {
             {/* Bottom Axis Label */}
             <div className="absolute bottom-1 left-2 text-[8px] font-mono text-cyan-800/80">T-25 SECONDS</div>
             <div className="absolute bottom-1 right-2 w-2 h-2 rounded-full bg-cyan-500 shadow-[0_0_10px_#06b6d4] animate-pulse" />
-
-            <style>{`
-                .telemetry-bg {
-                    background-image: 
-                        linear-gradient(rgba(6, 182, 212, 0.1) 1px, transparent 1px),
-                        linear-gradient(90deg, rgba(6, 182, 212, 0.1) 1px, transparent 1px);
-                    background-size: 20px 20px;
-                }
-                .crt-scanlines {
-                    background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0.3));
-                    background-size: 100% 4px;
-                }
-                .text-glow {
-                    text-shadow: 0 0 10px rgba(6, 182, 212, 0.6), 0 0 20px rgba(6, 182, 212, 0.4);
-                }
-            `}</style>
         </div>
     );
 };

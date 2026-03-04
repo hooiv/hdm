@@ -2,20 +2,13 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { Zap, Activity, HardDrive } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { formatBytes } from '../utils/formatters';
 
 interface DashboardStatsProps {
     globalSpeed: number; // bytes per second
     activeCount: number;
     totalDownloaded: number; // bytes
 }
-
-const formatBytes = (bytes: number) => {
-    if (!bytes || bytes <= 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-};
 
 export const DashboardStats: React.FC<DashboardStatsProps> = ({ globalSpeed, activeCount, totalDownloaded }) => {
     return (

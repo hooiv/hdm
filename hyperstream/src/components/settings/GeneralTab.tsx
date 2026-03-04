@@ -5,6 +5,7 @@ import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { motion } from "framer-motion";
 import { useToast } from "../../contexts/ToastContext";
+import { error as logError } from "../../utils/logger";
 
 interface GeneralTabProps {
   settings: SettingsData;
@@ -24,7 +25,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
         setSettings({ ...settings, download_dir: selected });
       }
     } catch (e) {
-      console.error("Failed to select directory", e);
+      logError("Failed to select directory", e);
       toast.error("Failed to select directory");
     }
   };
@@ -68,7 +69,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               onChange={(e) =>
                 setSettings({
                   ...settings,
-                  segments: parseInt(e.target.value) || 1,
+                  segments: Math.min(32, Math.max(1, parseInt(e.target.value, 10) || 1)),
                 })
               }
               className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-blue-500/50"
@@ -94,7 +95,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               onChange={(e) =>
                 setSettings({
                   ...settings,
-                  speed_limit_kbps: parseInt(e.target.value) || 0,
+                  speed_limit_kbps: Math.max(0, parseInt(e.target.value, 10) || 0),
                 })
               }
               className={`w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-blue-500/50 transition-opacity ${settings.speed_limit_kbps === 0 ? "opacity-50" : ""}`}

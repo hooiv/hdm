@@ -222,17 +222,44 @@ fn get_settings_path() -> PathBuf {
 pub fn load_settings() -> Settings {
     let path = get_settings_path();
     
-    if !path.exists() {
-        return Settings::default();
+    let mut settings = match fs::read_to_string(&path) {
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("WARNING: Settings file corrupted, using defaults: {}", e);
+                Settings::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+        Err(e) => {
+            eprintln!("WARNING: Could not read settings file, using defaults: {}", e);
+            Settings::default()
+        }
+    };
+
+    // Defensive clamping: protect against manually edited settings with invalid values
+    if settings.segments == 0 || settings.segments > 64 {
+        settings.segments = 8;
     }
-    
-    match fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => Settings::default(),
-    }
+
+    settings
 }
 
 pub fn save_settings(settings: &Settings) -> Result<(), String> {
+    // Validate critical numeric settings
+    if settings.segments == 0 || settings.segments > 64 {
+        return Err("Segments must be between 1 and 64".to_string());
+    }
+    if settings.min_threads > 0 && settings.max_threads > 0 && settings.min_threads > settings.max_threads {
+        return Err("min_threads cannot exceed max_threads".to_string());
+    }
+    // Validate category rule regexes
+    for rule in &settings.category_rules {
+        if let Err(e) = regex::Regex::new(&rule.pattern) {
+            return Err(format!("Invalid regex in category rule '{}': {}", rule.name, e));
+        }
+    }
+
     let path = get_settings_path();
     
     if let Some(parent) = path.parent() {
@@ -242,7 +269,15 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
     let json = serde_json::to_string_pretty(settings)
         .map_err(|e| e.to_string())?;
     
-    fs::write(&path, json).map_err(|e| e.to_string())?;
+    // Write to temp file first, then rename for crash-safe atomicity
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &json).map_err(|e| e.to_string())?;
+    if let Err(_rename_err) = fs::rename(&tmp_path, &path) {
+        // Rename can fail cross-device; fall back to direct write
+        fs::write(&path, &json).map_err(|e| format!("Failed to write settings: {}", e))?;
+        // Clean up orphaned temp file
+        let _ = fs::remove_file(&tmp_path);
+    }
     
     eprintln!("[settings] Saved to {:?}", path);
     Ok(())

@@ -14,8 +14,12 @@ lazy_static! {
 }
 
 pub async fn init_tor() -> Result<u16, String> {
-    if TOR_BOOTSTRAPPED.load(Ordering::Relaxed) {
-        return Ok(SOCKS_PORT.load(Ordering::Relaxed));
+    // Use the TOR_CLIENT mutex as the single synchronization point to prevent double-bootstrap
+    let mut guard = TOR_CLIENT.lock().await;
+    
+    if guard.is_some() {
+        let port = SOCKS_PORT.load(Ordering::Acquire);
+        return Ok(port);
     }
 
     println!("Initializing Tor...");
@@ -25,23 +29,23 @@ pub async fn init_tor() -> Result<u16, String> {
         .map_err(|e| format!("Failed to bootstrap Tor: {}", e))?;
 
     println!("Tor Bootstrapped Successfully!");
-    
-    // Store Client
-    {
-        let mut guard = TOR_CLIENT.lock().await;
-        *guard = Some(client.clone());
-    }
-    TOR_BOOTSTRAPPED.store(true, Ordering::Relaxed);
 
-    // Start SOCKS5 Proxy
-    let port = start_socks_proxy(client).await?;
-    SOCKS_PORT.store(port, Ordering::Relaxed);
+    // Start SOCKS5 Proxy BEFORE signaling readiness
+    let port = start_socks_proxy(client.clone()).await?;
+    SOCKS_PORT.store(port, Ordering::Release);
+    
+    // Store Client — must be last so get_socks_port sees valid port
+    *guard = Some(client);
+    TOR_BOOTSTRAPPED.store(true, Ordering::Release);
     
     Ok(port)
 }
 
 pub fn get_socks_port() -> Option<u16> {
-    let port = SOCKS_PORT.load(Ordering::Relaxed);
+    if !TOR_BOOTSTRAPPED.load(Ordering::Acquire) {
+        return None;
+    }
+    let port = SOCKS_PORT.load(Ordering::Acquire);
     if port > 0 { Some(port) } else { None }
 }
 

@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::process::Command;
+use tokio::process::Command;
 
 /// Generate SRT subtitles from a video file.
 /// Uses ffmpeg to extract audio, then sends it to a local or cloud Whisper API for transcription.
@@ -8,6 +8,16 @@ pub async fn generate_subtitles(video_path: String) -> Result<serde_json::Value,
     let path = Path::new(&video_path);
     if !path.exists() {
         return Err(format!("Video not found: {}", video_path));
+    }
+
+    // Restrict to downloads directory to prevent arbitrary file access
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canon_path = dunce::canonicalize(path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    if !canon_path.starts_with(&download_dir) {
+        return Err("Only files inside the download directory can be processed".to_string());
     }
 
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
@@ -31,7 +41,8 @@ pub async fn generate_subtitles(video_path: String) -> Result<serde_json::Value,
             "-y",                 // Overwrite
             &audio_path.to_string_lossy(),
         ])
-        .output();
+        .output()
+        .await;
 
     let has_audio = match ffmpeg_result {
         Ok(output) => output.status.success(),
@@ -52,14 +63,15 @@ pub async fn generate_subtitles(video_path: String) -> Result<serde_json::Value,
             "--output_format", "srt",
             "--output_dir", &parent.to_string_lossy(),
         ])
-        .output();
+        .output()
+        .await;
 
     if let Ok(output) = whisper_result {
         if output.status.success() {
             // Clean up audio
-            let _ = std::fs::remove_file(&audio_path);
+            let _ = tokio::fs::remove_file(&audio_path).await;
 
-            let srt_content = std::fs::read_to_string(&srt_path)
+            let srt_content = tokio::fs::read_to_string(&srt_path).await
                 .unwrap_or_else(|_| "Subtitles generated.".to_string());
             let line_count = srt_content.lines().count();
 
@@ -105,7 +117,7 @@ pub async fn generate_subtitles(video_path: String) -> Result<serde_json::Value,
                 .map_err(|e| format!("Write SRT error: {}", e))?;
 
             // Clean up
-            let _ = std::fs::remove_file(&audio_path);
+            let _ = tokio::fs::remove_file(&audio_path).await;
 
             let line_count = srt_content.lines().count();
             return Ok(serde_json::json!({
@@ -119,7 +131,7 @@ pub async fn generate_subtitles(video_path: String) -> Result<serde_json::Value,
     }
 
     // Clean up audio
-    let _ = std::fs::remove_file(&audio_path);
+    let _ = tokio::fs::remove_file(&audio_path).await;
 
     // Fallback: generate placeholder
     generate_placeholder_srt(&srt_path, &video_path).await
@@ -158,7 +170,7 @@ async fn generate_placeholder_srt(srt_path: &Path, video_path: &str) -> Result<s
 }
 
 fn get_video_duration(path: &str) -> Option<f64> {
-    let output = Command::new("ffprobe")
+    let output = std::process::Command::new("ffprobe")
         .args([
             "-v", "error",
             "-show_entries", "format=duration",

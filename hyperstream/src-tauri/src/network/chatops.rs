@@ -40,14 +40,17 @@ impl ChatOpsManager {
     pub fn new(settings: Arc<Mutex<settings::Settings>>) -> Self {
         Self {
             settings,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             pending_urls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Take all pending URLs (called from Tauri command to drain the queue)
     pub fn take_pending_urls(&self) -> Vec<String> {
-        let mut urls = self.pending_urls.lock().unwrap();
+        let mut urls = self.pending_urls.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *urls)
     }
 
@@ -64,7 +67,7 @@ impl ChatOpsManager {
         loop {
             // Check configuration
             let (token, enabled) = {
-                let s = self.settings.lock().unwrap();
+                let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
                 (s.telegram_bot_token.clone(), s.chatops_enabled)
             };
 
@@ -108,14 +111,26 @@ impl ChatOpsManager {
         let chat_id = msg.chat.id;
         let text = msg.text.unwrap_or_default();
         
-        // Auto-save chat_id if not set
+        // Only process messages from the configured chat_id — reject unknown senders
         {
-            let mut s = self.settings.lock().unwrap();
-            if s.telegram_chat_id.is_none() {
-                s.telegram_chat_id = Some(chat_id.to_string());
-                // Persist via save_settings
-                let _ = settings::save_settings(&s);
-                println!("[ChatOps] Auto-detected Chat ID: {}", chat_id);
+            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            match &s.telegram_chat_id {
+                Some(configured_id) => {
+                    if configured_id != &chat_id.to_string() {
+                        eprintln!("[ChatOps] Ignoring message from unconfigured chat_id: {}", chat_id);
+                        return;
+                    }
+                }
+                None => {
+                    // Auto-register first sender — log prominently so user is aware
+                    drop(s);
+                    let mut s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+                    if s.telegram_chat_id.is_none() {
+                        s.telegram_chat_id = Some(chat_id.to_string());
+                        let _ = settings::save_settings(&s);
+                        println!("[ChatOps] ⚠️  Auto-registered Chat ID: {}. Verify this in Settings > Notifications.", chat_id);
+                    }
+                }
             }
         }
 
@@ -127,10 +142,17 @@ impl ChatOpsManager {
             let url = text.strip_prefix("/add ").unwrap_or("").trim();
             if url.is_empty() {
                 "❌ Provide a URL: /add https://example.com/file.zip".to_string()
+            } else if let Ok(parsed) = url::Url::parse(url) {
+                match parsed.scheme() {
+                    "http" | "https" => {
+                        // Queue URL for the frontend to pick up
+                        self.pending_urls.lock().unwrap_or_else(|e| e.into_inner()).push(url.to_string());
+                        format!("✅ Queued for download:\n{}", url)
+                    }
+                    _ => "❌ Only http:// and https:// URLs are allowed".to_string(),
+                }
             } else {
-                // Queue URL for the frontend to pick up
-                self.pending_urls.lock().unwrap().push(url.to_string());
-                format!("✅ Queued for download:\n{}", url)
+                "❌ Invalid URL format".to_string()
             }
         } else if text.starts_with("/status") {
             // Read current downloads from persistence
@@ -181,7 +203,7 @@ impl ChatOpsManager {
     /// Notify download completion via Telegram
     pub async fn notify_completion(&self, filename: &str) {
         let (token, chat_id, enabled) = {
-            let s = self.settings.lock().unwrap();
+            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
             (s.telegram_bot_token.clone(), s.telegram_chat_id.clone(), s.chatops_enabled)
         };
 

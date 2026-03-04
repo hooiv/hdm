@@ -42,7 +42,7 @@ export const CloudTab: React.FC<CloudTabProps> = ({
               </label>
               <input
                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm"
-                value={settings.cloud_endpoint}
+                value={settings.cloud_endpoint ?? ''}
                 onChange={(e) =>
                   setSettings({
                     ...settings,
@@ -58,7 +58,7 @@ export const CloudTab: React.FC<CloudTabProps> = ({
               </label>
               <input
                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm"
-                value={settings.cloud_bucket}
+                value={settings.cloud_bucket ?? ''}
                 onChange={(e) =>
                   setSettings({
                     ...settings,
@@ -74,7 +74,7 @@ export const CloudTab: React.FC<CloudTabProps> = ({
               </label>
               <input
                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm"
-                value={settings.cloud_access_key}
+                value={settings.cloud_access_key ?? ''}
                 onChange={(e) =>
                   setSettings({
                     ...settings,
@@ -90,7 +90,7 @@ export const CloudTab: React.FC<CloudTabProps> = ({
               </label>
               <input
                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm"
-                value={settings.cloud_secret_key}
+                value={settings.cloud_secret_key ?? ''}
                 onChange={(e) =>
                   setSettings({
                     ...settings,
@@ -98,6 +98,22 @@ export const CloudTab: React.FC<CloudTabProps> = ({
                   })
                 }
                 type="password"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-500 uppercase">
+                Region
+              </label>
+              <input
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm"
+                value={settings.cloud_region ?? ''}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    cloud_region: e.target.value,
+                  })
+                }
+                placeholder="us-east-1"
               />
             </div>
           </motion.div>

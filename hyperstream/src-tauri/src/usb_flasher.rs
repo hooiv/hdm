@@ -68,9 +68,29 @@ pub async fn flash_to_usb(iso_path: String, drive_number: u32) -> Result<String,
         return Err(format!("File not found: {}", iso_path));
     }
 
+    // Validate iso_path is within the download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+    let canonical_iso = dunce::canonicalize(&iso_path)
+        .map_err(|e| format!("Cannot resolve ISO path: {}", e))?;
+    if !canonical_iso.starts_with(&download_dir) {
+        return Err("ISO/IMG file must be within the download directory".to_string());
+    }
+
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if ext != "iso" && ext != "img" {
         return Err("Only .iso and .img files can be flashed.".to_string());
+    }
+
+    // SAFETY: Validate that the target drive is actually a USB drive
+    let usb_drives = list_usb_drives()?;
+    if !usb_drives.iter().any(|d| d.number == drive_number) {
+        return Err(format!(
+            "Drive {} is not a USB drive. Refusing to flash. Available USB drives: {:?}",
+            drive_number,
+            usb_drives.iter().map(|d| d.number).collect::<Vec<_>>()
+        ));
     }
 
     // Step 1: Clean the disk via diskpart
@@ -79,9 +99,9 @@ pub async fn flash_to_usb(iso_path: String, drive_number: u32) -> Result<String,
         drive_number
     );
 
-    // Write diskpart script to temp file
+    // Write diskpart script to temp file with random name to avoid race conditions
     let temp_dir = std::env::temp_dir();
-    let script_path = temp_dir.join("hyperstream_diskpart.txt");
+    let script_path = temp_dir.join(format!("hyperstream_diskpart_{}.txt", uuid::Uuid::new_v4()));
     std::fs::write(&script_path, &diskpart_script)
         .map_err(|e| format!("Failed to write diskpart script: {}", e))?;
 
@@ -97,27 +117,32 @@ pub async fn flash_to_usb(iso_path: String, drive_number: u32) -> Result<String,
     }
 
     // Step 2: Write the ISO/IMG directly to the physical drive
-    // Use PowerShell to copy the file content
-    let ps_script = format!(
-        r#"
-        $source = [System.IO.File]::OpenRead('{}')
-        $target = [System.IO.File]::OpenWrite('\\.\PhysicalDrive{}')
+    // Use PowerShell with parameterized script to avoid injection
+    let ps_script = r#"
+        param([string]$IsoPath, [int]$DriveNum)
+        $source = [System.IO.File]::OpenRead($IsoPath)
+        $target = [System.IO.File]::OpenWrite("\\.\PhysicalDrive$DriveNum")
         $buffer = New-Object byte[] 1048576
         $totalRead = 0
-        while (($bytesRead = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {{
+        while (($bytesRead = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
             $target.Write($buffer, 0, $bytesRead)
             $totalRead += $bytesRead
-        }}
+        }
         $source.Close()
         $target.Close()
         Write-Output "Written $totalRead bytes"
-        "#,
-        iso_path.replace("\\", "\\\\"),
-        drive_number
-    );
+    "#;
 
     let flash_result = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps_script])
+        .args([
+            "-NoProfile",
+            "-Command",
+            ps_script,
+            "-IsoPath",
+            &iso_path,
+            "-DriveNum",
+            &drive_number.to_string(),
+        ])
         .output()
         .map_err(|e| format!("Flash failed: {}", e))?;
 

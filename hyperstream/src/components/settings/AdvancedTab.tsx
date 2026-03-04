@@ -4,6 +4,7 @@ import { Activity, ShieldAlert } from "lucide-react";
 import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { useToast } from "../../contexts/ToastContext";
+import { error as logError } from "../../utils/logger";
 
 interface ChaosConfig {
   enabled: boolean;
@@ -24,26 +25,26 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
   const [isWfpProcessing, setIsWfpProcessing] = useState(false);
   const [chaos, setChaos] = useState<ChaosConfig>({ enabled: false, latency_ms: 0, error_rate: 0 });
   const toast = useToast();
+  const toastRef = React.useRef(toast);
+  toastRef.current = toast;
 
   useEffect(() => {
     invoke<ChaosConfig>("get_chaos_config").then(setChaos).catch((err) => {
-      console.error("Failed to load chaos config:", err);
-      toast.error("Failed to load chaos config");
+      logError("Failed to load chaos config:", err);
+      toastRef.current.error("Failed to load chaos config");
     });
   }, []);
 
   const updateChaos = async (update: Partial<ChaosConfig>) => {
-    const newChaos = { ...chaos, ...update };
-    setChaos(newChaos);
-    try {
-      await invoke("set_chaos_config", {
+    setChaos(prev => {
+      const newChaos = { ...prev, ...update };
+      invoke("set_chaos_config", {
         latencyMs: newChaos.latency_ms,
         errorRate: newChaos.error_rate,
         enabled: newChaos.enabled,
-      });
-    } catch (e) {
-      toast.error("Failed to update chaos config: " + e);
-    }
+      }).catch(e => toast.error("Failed to update chaos config: " + e));
+      return newChaos;
+    });
   };
 
   const handleWfpChange = async (blocked: boolean) => {
@@ -53,7 +54,6 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
     }
     setIsWfpProcessing(true);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke<string>("set_app_firewall_rule", {
         exePath: wfpAppPath,
         blocked,

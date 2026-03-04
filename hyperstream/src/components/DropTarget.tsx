@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { debug } from '../utils/logger';
 
 interface DropTargetProps {
     onDrop: (url: string) => void;
@@ -7,14 +8,18 @@ interface DropTargetProps {
 
 export const DropTarget: React.FC<DropTargetProps> = ({ onDrop }) => {
     const [isDragging, setIsDragging] = useState(false);
+    const onDropRef = useRef(onDrop);
+    useEffect(() => { onDropRef.current = onDrop; }, [onDrop]);
 
     useEffect(() => {
-        // Listen for global drag events (if Tauri supports it, or use window events)
+        // Listen for Tauri file-drop events and forward to handler
         const unlisten = listen<string[]>('tauri://file-drop', (event) => {
             const files = event.payload;
             if (files && files.length > 0) {
-                // Handle file drop (e.g., .torrent or .meta)
-                console.log('Dropped files:', files);
+                debug('Dropped files:', files);
+                files.forEach(file => {
+                    onDropRef.current(file);
+                });
             }
         });
 

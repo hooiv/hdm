@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { DownloadTask } from "./DownloadItem";
+import type { DownloadTask, Segment } from "../types";
 import { useDownloadActions } from "../hooks/useDownloadActions";
 import { useToast } from "../contexts/ToastContext";
 import { ThreadVisualizer } from "./ThreadVisualizer";
@@ -328,7 +328,8 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
             </button>
           )}
 
-          {/* QoS Priority */}
+          {/* QoS Priority (only for active/paused downloads) */}
+          {task.status !== "Done" && (
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -338,6 +339,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           >
             <ArrowUp size={14} /> Priority
           </button>
+          )}
 
           {/* Mod Optimizer */}
           <button
@@ -401,7 +403,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           Threads:{" "}
           <span className="text-slate-300 ml-1">
             {
-              (task.segments || []).filter((s) => s.state === "Downloading")
+              (task.segments || []).filter((s: Segment) => s.state === "Downloading")
                 .length
             }
           </span>

@@ -124,30 +124,44 @@ function createItemElement(item) {
     };
     cbWrapper.appendChild(cb);
 
-    div.innerHTML = `
-        ${cbWrapper.outerHTML}
-        <div class="item-info">
-            <div class="item-name" title="${item.name}">${item.name}</div>
-            <div class="item-type">${item.type}</div>
-        </div>
-        <button class="btn-download" title="Download">⬇</button>
-    `;
+    // Build DOM safely — no innerHTML with user-controlled data
+    const infoDiv = document.createElement('div');
+    infoDiv.className = 'item-info';
 
-    // Re-attach event listeners because innerHTML kills them (except onclick attr but cleaner here)
-    div.querySelector('.checkbox').onclick = (e) => {
+    const nameDiv = document.createElement('div');
+    nameDiv.className = 'item-name';
+    nameDiv.title = item.name;
+    nameDiv.textContent = item.name;
+
+    const typeDiv = document.createElement('div');
+    typeDiv.className = 'item-type';
+    typeDiv.textContent = item.type;
+
+    infoDiv.appendChild(nameDiv);
+    infoDiv.appendChild(typeDiv);
+
+    const downloadBtn = document.createElement('button');
+    downloadBtn.className = 'btn-download';
+    downloadBtn.title = 'Download';
+    downloadBtn.textContent = '\u2B07'; // ⬇
+
+    div.appendChild(cbWrapper);
+    div.appendChild(infoDiv);
+    div.appendChild(downloadBtn);
+
+    // Attach event listeners
+    cb.onclick = (e) => {
         e.stopPropagation();
         toggleSelection(item.id, e.target.checked);
     };
 
     div.onclick = () => {
-        // Toggle selection on row click too? Or just download? 
-        // Better UX: Row click toggles selection
         const newChecked = !selectedIds.has(item.id);
         toggleSelection(item.id, newChecked);
         div.querySelector('.checkbox').checked = newChecked;
     };
 
-    div.querySelector('.btn-download').onclick = (e) => {
+    downloadBtn.onclick = (e) => {
         e.stopPropagation();
         triggerDownload(item.url, item.name);
     };

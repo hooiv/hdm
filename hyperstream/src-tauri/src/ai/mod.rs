@@ -92,6 +92,16 @@ fn get_embedding(text: &str) -> Result<Vec<f32>, String> {
 pub fn index_file(path: &str) -> Result<(), String> {
     let path_obj = Path::new(path);
     if !path_obj.exists() { return Err("File not found".into()); }
+
+    // Validate path is within download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&settings.download_dir));
+    if let Ok(canon) = dunce::canonicalize(path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("File must be within the download directory".to_string());
+        }
+    }
     
     // 1. Extract Text
     let ext = path_obj.extension().unwrap_or_default().to_string_lossy().to_lowercase();
@@ -99,7 +109,11 @@ pub fn index_file(path: &str) -> Result<(), String> {
         "txt" | "md" | "json" | "csv" | "log" => std::fs::read_to_string(path).unwrap_or_default(),
         "pdf" => {
             lopdf::Document::load(path)
-                .map(|doc| doc.extract_text(&[1]).unwrap_or_default()) // First page only for speed
+                .map(|doc| {
+                    // Extract first 5 pages for better context (not just page 1)
+                    let pages: Vec<u32> = (1..=5).collect();
+                    doc.extract_text(&pages).unwrap_or_default()
+                })
                 .unwrap_or_default()
         },
         _ => return Ok(()), // Skip unknown types
@@ -115,10 +129,15 @@ pub fn index_file(path: &str) -> Result<(), String> {
     let vector = get_embedding(&text_to_embed)?;
 
     // 3. Store
-    let mut engine = AI_ENGINE.index.lock().unwrap();
+    let mut engine = AI_ENGINE.index.lock().unwrap_or_else(|e| e.into_inner());
     // Remove existing
     engine.retain(|f| f.path != path);
     
+    // Cap index size to prevent unbounded memory growth
+    if engine.len() >= 10_000 {
+        engine.remove(0); // Remove oldest entry
+    }
+
     engine.push(IndexedFile {
         path: path.to_string(),
         embedding: vector,
@@ -132,7 +151,7 @@ pub fn index_file(path: &str) -> Result<(), String> {
 
 pub fn semantic_search(query: &str) -> Result<Vec<SearchResult>, String> {
     let query_vec = get_embedding(query)?;
-    let engine = AI_ENGINE.index.lock().unwrap();
+    let engine = AI_ENGINE.index.lock().unwrap_or_else(|e| e.into_inner());
     
     let mut results = Vec::new();
     
@@ -148,7 +167,7 @@ pub fn semantic_search(query: &str) -> Result<Vec<SearchResult>, String> {
     }
     
     // Sort by score desc
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     Ok(results)
 }
 
@@ -156,5 +175,8 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot_product: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
     dot_product / (norm_a * norm_b)
 }

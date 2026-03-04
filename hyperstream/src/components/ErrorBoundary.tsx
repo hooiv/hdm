@@ -1,4 +1,5 @@
 import React from 'react';
+import { error as logError } from '../utils/logger';
 
 interface ErrorBoundaryProps {
     children: React.ReactNode;
@@ -15,10 +16,12 @@ interface ErrorBoundaryState {
  * Global error boundary to prevent the entire app from crashing.
  * Catches React rendering errors and displays a recovery UI.
  */
-export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+const MAX_RESET_RETRIES = 3;
+
+export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState & { resetCount: number }> {
     constructor(props: ErrorBoundaryProps) {
         super(props);
-        this.state = { hasError: false, error: null, errorInfo: null };
+        this.state = { hasError: false, error: null, errorInfo: null, resetCount: 0 };
     }
 
     static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
@@ -27,11 +30,16 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
     componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
         this.setState({ errorInfo });
-        console.error('[ErrorBoundary] Uncaught error:', error, errorInfo);
+        logError('[ErrorBoundary] Uncaught error:', error, errorInfo);
     }
 
     handleReset = () => {
-        this.setState({ hasError: false, error: null, errorInfo: null });
+        if (this.state.resetCount >= MAX_RESET_RETRIES) {
+            // Too many retries — force full reload
+            window.location.reload();
+            return;
+        }
+        this.setState((prev) => ({ hasError: false, error: null, errorInfo: null, resetCount: prev.resetCount + 1 }));
     };
 
     render() {

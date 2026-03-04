@@ -34,13 +34,15 @@ pub fn publish_event(event_type: &str, download_id: &str, filename: &str, status
 
     // Spawn a thread to handle the publishing so we don't block the async runtime or caller
     thread::spawn(move || {
-        // Parse the broker URL (format: mqtt://host:port)
-        // A simple URL parser or string split since url crate might not be in scope for this specifically
+        // Parse the broker URL (format: mqtt://host:port or mqtts://host:port)
         let mut host = "localhost".to_string();
         let mut port = 1883;
+        let mut use_tls = false;
 
         let url_parts: Vec<&str> = broker_url.split("://").collect();
         if url_parts.len() == 2 {
+            let scheme = url_parts[0].to_lowercase();
+            use_tls = scheme == "mqtts" || scheme == "ssl" || scheme == "tls";
             let host_port: Vec<&str> = url_parts[1].split(':').collect();
             if !host_port.is_empty() {
                 host = host_port[0].to_string();
@@ -48,12 +50,27 @@ pub fn publish_event(event_type: &str, download_id: &str, filename: &str, status
                     if let Ok(p) = host_port[1].parse::<u16>() {
                         port = p;
                     }
+                } else if use_tls {
+                    port = 8883; // Default MQTTS port
                 }
             }
         }
 
-        let mut mqttoptions = MqttOptions::new("hyperstream_client", host, port);
+        // SECURITY: Warn when using plaintext MQTT. Event data (filenames, URLs) is visible on the wire.
+        if !use_tls {
+            eprintln!("⚠️  MQTT: Connecting without TLS to {}:{}. Event data will be sent in plaintext.", host, port);
+        }
+
+        let mut mqttoptions = MqttOptions::new("hyperstream_client", &host, port);
         mqttoptions.set_keep_alive(Duration::from_secs(5));
+
+        // Enable TLS for secure connections
+        // Note: rumqttc TLS requires the "use-native-tls" feature to be enabled.
+        // Currently not compiled in — refuse to silently downgrade to plaintext.
+        if use_tls {
+            eprintln!("ERROR: MQTT TLS requested (mqtts://) but TLS support not compiled in. Refusing to send credentials/data in plaintext.");
+            return; // Do NOT fall back to plaintext when user explicitly requested TLS
+        }
 
         let (client, mut connection) = Client::new(mqttoptions, 10);
 

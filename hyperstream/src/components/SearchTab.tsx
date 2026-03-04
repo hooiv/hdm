@@ -1,11 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
+import { error as logError } from '../utils/logger';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
 import { Search, Download, Database, Loader2, HardDrive, ArrowDown, ArrowUp, Brain } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
 import { AppSettings } from '../types';
-
-let searchNextId = 0;
 
 interface SearchResult {
     title: string;
@@ -18,6 +17,7 @@ interface SearchResult {
 
 export const SearchTab: React.FC = () => {
     const toast = useToast();
+    const searchNextId = useRef(0);
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<SearchResult[]>([]);
     const [loading, setLoading] = useState(false);
@@ -37,7 +37,7 @@ export const SearchTab: React.FC = () => {
             const data = await invoke<SearchResult[]>(command, { query });
             setResults(data);
         } catch (err) {
-            console.error("Search failed", err);
+            logError("Search failed", err);
             toast.error("Search failed");
         }
         setLoading(false);
@@ -45,17 +45,19 @@ export const SearchTab: React.FC = () => {
 
     const handleDownload = async (url: string, title: string) => {
         try {
-            // Basic filename sanitization
-            const filename = title.replace(/[^a-zA-Z0-9.-]/g, "_") + ".iso";
+            // Extract extension from URL, or leave as-is
+            const urlParts = url.split('/').pop()?.split('?')[0] || '';
+            const urlExt = urlParts.match(/\.[a-zA-Z0-9]+$/)?.[0] || '';
+            const filename = title.replace(/[^a-zA-Z0-9.-]/g, "_") + urlExt;
             const settings = await invoke<AppSettings>('get_settings');
-            const downloadId = `search_${Date.now()}_${searchNextId++}`;
+            const downloadId = `search_${Date.now()}_${searchNextId.current++}`;
             await invoke('start_download', {
                 id: downloadId,
                 url,
                 path: `${settings.download_dir}/${filename}`,
             });
         } catch (e) {
-            console.error("Failed to start download", e);
+            logError("Failed to start download", e);
             toast.error("Failed to start download");
         }
     };
@@ -123,7 +125,7 @@ export const SearchTab: React.FC = () => {
                     <div className="divide-y divide-slate-800">
                         {results.map((item, idx) => (
                             <motion.div
-                                key={idx}
+                                key={`${item.link || item.title}-${idx}`}
                                 initial={{ opacity: 0, x: -10 }}
                                 animate={{ opacity: 1, x: 0 }}
                                 transition={{ delay: idx * 0.05 }}

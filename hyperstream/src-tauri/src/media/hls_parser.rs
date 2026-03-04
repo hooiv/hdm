@@ -55,6 +55,9 @@ impl HlsParser {
     }
 
     async fn fetch_manifest(&self, url: &str) -> Result<Vec<u8>, String> {
+        // SSRF protection: block requests to private/loopback addresses
+        crate::api_replay::validate_url_not_private(url)?;
+
         let response = self.client.get(url)
             .send()
             .await

@@ -52,7 +52,7 @@ pub fn set_download_priority(download_id: String, priority_str: String) -> Resul
     };
 
     let weight = priority_weight(&priority);
-    let global_limit = GLOBAL_BANDWIDTH_LIMIT.lock().map(|g| *g).unwrap_or(0);
+    let global_limit = *GLOBAL_BANDWIDTH_LIMIT.lock().unwrap_or_else(|e| e.into_inner());
 
     let max_bps = if global_limit > 0 {
         (global_limit as f64 * weight) as u64
@@ -68,9 +68,13 @@ pub fn set_download_priority(download_id: String, priority_str: String) -> Resul
         total_downloaded: 0,
     };
 
-    if let Ok(mut table) = QOS_TABLE.lock() {
+    {
+        let mut table = QOS_TABLE.lock().unwrap_or_else(|e| e.into_inner());
         table.insert(download_id.clone(), entry);
     }
+
+    // Rebalance all active limits so total never exceeds global limit
+    rebalance_limits();
 
     Ok(format!("Priority set to {:?} for download {}", priority, download_id))
 }
@@ -78,7 +82,7 @@ pub fn set_download_priority(download_id: String, priority_str: String) -> Resul
 /// Get the current QoS stats for all tracked downloads.
 pub fn get_qos_stats() -> Result<QosStats, String> {
     let table = QOS_TABLE.lock().map_err(|e| format!("Lock error: {}", e))?;
-    let global_limit = GLOBAL_BANDWIDTH_LIMIT.lock().map(|g| *g).unwrap_or(0);
+    let global_limit = *GLOBAL_BANDWIDTH_LIMIT.lock().unwrap_or_else(|e| e.into_inner());
 
     Ok(QosStats {
         total_bandwidth_limit: global_limit,
@@ -89,28 +93,47 @@ pub fn get_qos_stats() -> Result<QosStats, String> {
 
 /// Get the bandwidth limit (bytes/sec) for a specific download. Returns 0 for unlimited.
 pub fn get_download_limit(download_id: &str) -> u64 {
-    if let Ok(table) = QOS_TABLE.lock() {
-        if let Some(entry) = table.get(download_id) {
-            return entry.max_bytes_per_sec;
-        }
+    let table = QOS_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = table.get(download_id) {
+        return entry.max_bytes_per_sec;
     }
     0 // No limit set
 }
 
 /// Update the current speed measurement for a download.
 pub fn update_download_speed(download_id: &str, bytes_per_sec: u64, total: u64) {
-    if let Ok(mut table) = QOS_TABLE.lock() {
-        if let Some(entry) = table.get_mut(download_id) {
-            entry.current_bytes_per_sec = bytes_per_sec;
-            entry.total_downloaded = total;
-        }
+    let mut table = QOS_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = table.get_mut(download_id) {
+        entry.current_bytes_per_sec = bytes_per_sec;
+        entry.total_downloaded = total;
     }
 }
 
 /// Remove a download from QoS tracking.
 pub fn remove_download(download_id: &str) {
-    if let Ok(mut table) = QOS_TABLE.lock() {
+    {
+        let mut table = QOS_TABLE.lock().unwrap_or_else(|e| e.into_inner());
         table.remove(download_id);
+    }
+    // Rebalance remaining downloads to reclaim freed bandwidth
+    rebalance_limits();
+}
+
+/// Rebalance all active download limits proportionally so total never exceeds global limit.
+fn rebalance_limits() {
+    let global_limit = *GLOBAL_BANDWIDTH_LIMIT.lock().unwrap_or_else(|e| e.into_inner());
+    if global_limit == 0 { return; } // unlimited — nothing to rebalance
+
+    let mut table = match QOS_TABLE.lock() {
+        Ok(t) => t,
+        Err(e) => e.into_inner(),
+    };
+    let total_weight: f64 = table.values().map(|e| priority_weight(&e.priority)).sum();
+    if total_weight == 0.0 { return; }
+
+    for entry in table.values_mut() {
+        let weight = priority_weight(&entry.priority);
+        entry.max_bytes_per_sec = ((global_limit as f64 * weight) / total_weight) as u64;
     }
 }
 

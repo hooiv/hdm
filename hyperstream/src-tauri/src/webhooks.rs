@@ -123,9 +123,58 @@ impl WebhookManager {
         config: WebhookConfig,
         payload: WebhookPayload,
     ) {
+        // SSRF protection: resolve hostname and reject private/loopback IPs
+        if let Ok(parsed) = url::Url::parse(&config.url) {
+            if let Some(host) = parsed.host_str() {
+                // Resolve the hostname to actual IP addresses to prevent DNS rebinding
+                let port = parsed.port_or_known_default().unwrap_or(443);
+                let addr_str = format!("{}:{}", host, port);
+                let is_private = match tokio::net::lookup_host(&addr_str).await {
+                    Ok(addrs) => {
+                        let addrs: Vec<_> = addrs.collect();
+                        if addrs.is_empty() {
+                            true // Unresolvable → block
+                        } else {
+                            addrs.iter().any(|addr| {
+                                let ip = addr.ip();
+                                ip.is_loopback()
+                                    || ip.is_unspecified()
+                                    || match ip {
+                                        std::net::IpAddr::V4(v4) => {
+                                            v4.is_private()
+                                                || v4.is_link_local()
+                                                || v4.octets()[0] == 0  // 0.0.0.0/8
+                                        }
+                                        std::net::IpAddr::V6(v6) => {
+                                            // Block IPv4-mapped IPv6 (::ffff:x.x.x.x)
+                                            if let Some(v4) = v6.to_ipv4_mapped() {
+                                                v4.is_private() || v4.is_loopback() || v4.is_link_local()
+                                            } else {
+                                                // Block loopback (::1), link-local (fe80::), and other non-routable IPv6
+                                                let segs = v6.segments();
+                                                v6.is_loopback()
+                                                    || v6.is_unspecified()
+                                                    || (segs[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                                                    || (segs[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                                                    || segs[0] == 0x0100            // discard 0100::/64
+                                            }
+                                        }
+                                    }
+                            })
+                        }
+                    }
+                    Err(_) => true, // DNS failure → block
+                };
+                if is_private {
+                    eprintln!("⚠️  Webhook '{}' blocked: URL resolves to private/loopback address", config.name);
+                    return;
+                }
+            }
+        }
+
         let body = Self::render_template(&config.template, &payload);
 
-        for attempt in 0..=config.max_retries {
+        for attempt in 0..=config.max_retries.min(10) {
             match client
                 .post(&config.url)
                 .header("Content-Type", "application/json")
@@ -209,7 +258,7 @@ impl WebhookManager {
                     }
                 ],
                 "timestamp": chrono::DateTime::from_timestamp(payload.timestamp, 0)
-                    .unwrap()
+                    .unwrap_or_else(|| chrono::Utc::now())
                     .to_rfc3339(),
             }]
         })
@@ -263,10 +312,5 @@ impl WebhookManager {
 
 // Utility to generate unique IDs
 pub fn generate_webhook_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    format!("webhook_{}", timestamp)
+    format!("webhook_{}", uuid::Uuid::new_v4())
 }

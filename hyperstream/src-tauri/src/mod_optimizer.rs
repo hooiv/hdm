@@ -28,7 +28,18 @@ pub async fn optimize_mods(paths: Vec<String>) -> Result<OptimizeResult, String>
     let mut total_files = 0usize;
     let mut total_size = 0u64;
 
+    // Validate all paths are within the download directory
+    let settings = crate::settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+
     for path_str in &paths {
+        let canon = dunce::canonicalize(path_str)
+            .map_err(|e| format!("Cannot resolve path '{}': {}", path_str, e))?;
+        if !canon.starts_with(&download_dir) {
+            return Err(format!("Path must be within the download directory: {}", path_str));
+        }
+
         let path = Path::new(path_str);
         if path.is_file() {
             if let Ok((hash, size)) = hash_file(path).await {
@@ -74,10 +85,19 @@ pub async fn optimize_mods(paths: Vec<String>) -> Result<OptimizeResult, String>
 }
 
 async fn hash_file(path: &Path) -> Result<(String, u64), String> {
-    let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
-    let size = bytes.len() as u64;
+    let metadata = tokio::fs::metadata(path).await.map_err(|e| e.to_string())?;
+    let size = metadata.len();
+    
+    // Stream the file to avoid loading large files entirely into memory
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await.map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf).await.map_err(|e| e.to_string())?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+    }
     let hash = hex::encode(hasher.finalize());
     Ok((hash, size))
 }
@@ -88,12 +108,22 @@ async fn scan_directory_recursive(
     total_files: &mut usize,
     total_size: &mut u64,
 ) {
+    const MAX_FILES: usize = 50_000;
     let mut dirs_to_scan = vec![dir.to_path_buf()];
 
     while let Some(current_dir) = dirs_to_scan.pop() {
         if let Ok(mut entries) = tokio::fs::read_dir(&current_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
+                if *total_files >= MAX_FILES {
+                    return; // Prevent runaway scans
+                }
                 let path = entry.path();
+                // Skip symlinks to avoid cycles and escaping the directory boundary
+                if let Ok(meta) = tokio::fs::symlink_metadata(&path).await {
+                    if meta.file_type().is_symlink() {
+                        continue;
+                    }
+                }
                 if path.is_file() {
                     if let Ok((hash, size)) = hash_file(&path).await {
                         hashes.entry(hash).or_default().push((path.to_string_lossy().to_string(), size));

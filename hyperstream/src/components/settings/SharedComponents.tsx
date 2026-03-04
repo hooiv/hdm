@@ -7,8 +7,17 @@ export const Toggle: React.FC<{
   label?: string;
 }> = ({ checked, onChange, label }) => (
   <div
+    role="switch"
+    aria-checked={checked}
+    tabIndex={0}
     className="flex items-center justify-between py-2 group cursor-pointer"
     onClick={() => onChange(!checked)}
+    onKeyDown={(e) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        onChange(!checked);
+      }
+    }}
   >
     {label && (
       <span className="text-sm font-medium text-slate-300 group-hover:text-white transition-colors">

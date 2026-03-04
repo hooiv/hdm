@@ -1,12 +1,18 @@
-import React, { useState, useEffect } from "react"; // Added React import
+import React, { useState, useEffect, useRef } from "react"; // Added React import
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "../contexts/ToastContext";
+import { error as logError } from '../utils/logger';
 import { Save, Plus, Trash2, FileCode, Puzzle, Zap } from "lucide-react";
 
 interface PluginMetadata {
   name: string;
   version: string;
   domains: string[];
+}
+
+interface OutputLine {
+  id: number;
+  text: string;
 }
 
 const PluginEditor: React.FC = () => {
@@ -16,7 +22,9 @@ const PluginEditor: React.FC = () => {
   const [code, setCode] = useState<string>("");
   const [isDirty, setIsDirty] = useState(false);
   const [, setIsLoading] = useState(false);
-  const [output, setOutput] = useState<string[]>([]); // Mock console
+  const MAX_OUTPUT_LINES = 200;
+  const [output, setOutput] = useState<OutputLine[]>([]);
+  const outputIdRef = useRef(0);
 
   useEffect(() => {
     loadPlugins();
@@ -30,26 +38,31 @@ const PluginEditor: React.FC = () => {
       const list = await invoke<PluginMetadata[]>("get_all_plugins");
       setPlugins(list);
     } catch (e) {
-      console.error(e);
+      logError(e);
       toast.error('Failed to load plugins');
     }
   };
+
+  const sanitizeName = (name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "");
 
   const handleSelectPlugin = async (name: string) => {
     if (isDirty && selectedPlugin) {
       if (!confirm("Unsaved changes. Discard?")) return;
     }
 
+    const safeName = sanitizeName(name);
+    if (!safeName) return;
+
     try {
       setIsLoading(true);
       const content = await invoke<string>("get_plugin_source", {
-        filename: name,
+        filename: safeName,
       });
       setCode(content);
-      setSelectedPlugin(name);
+      setSelectedPlugin(safeName);
       setIsDirty(false);
     } catch (e) {
-      console.error(e);
+      logError(e);
       toast.error("Failed to load plugin source: " + e);
     } finally {
       setIsLoading(false);
@@ -64,12 +77,11 @@ const PluginEditor: React.FC = () => {
         content: code,
       });
       setIsDirty(false);
-      // alert("Saved!");
       // Better UI than alert
       setOutput((prev) => [
-        `[${new Date().toLocaleTimeString()}] Saved ${selectedPlugin}.lua`,
+        { id: ++outputIdRef.current, text: `[${new Date().toLocaleTimeString()}] Saved ${selectedPlugin}.lua` },
         ...prev,
-      ]);
+      ].slice(0, MAX_OUTPUT_LINES));
     } catch (e) {
       toast.error("Save failed: " + e);
     }
@@ -95,10 +107,12 @@ const PluginEditor: React.FC = () => {
   };
 
   const handleDelete = async (name: string) => {
-    if (!confirm(`Delete plugin ${name}?`)) return;
+    const safeName = sanitizeName(name);
+    if (!safeName) return;
+    if (!confirm(`Delete plugin ${safeName}?`)) return;
     try {
-      await invoke("delete_plugin", { filename: name });
-      if (selectedPlugin === name) {
+      await invoke("delete_plugin", { filename: safeName });
+      if (selectedPlugin === safeName) {
         setSelectedPlugin(null);
         setCode("");
       }
@@ -128,7 +142,7 @@ const PluginEditor: React.FC = () => {
             <div
               key={p.name}
               onClick={() => handleSelectPlugin(p.name)}
-              className={`p-3 rounded-xl cursor-pointer transition-all border ${
+              className={`group p-3 rounded-xl cursor-pointer transition-all border ${
                 selectedPlugin === p.name
                   ? "bg-cyan-500/10 border-cyan-500/30 text-cyan-300 shadow-lg shadow-cyan-900/20"
                   : "hover:bg-white/5 border-transparent text-slate-400 hover:text-slate-200"
@@ -240,12 +254,12 @@ const PluginEditor: React.FC = () => {
             </button>
           </div>
           <div className="flex-1 overflow-y-auto p-2 font-mono text-xs space-y-1 custom-scrollbar">
-            {output.map((line, i) => (
+            {output.map((line) => (
               <div
-                key={i}
+                key={line.id}
                 className="text-slate-400 border-b border-white/5 last:border-0 pb-1"
               >
-                {line}
+                {line.text}
               </div>
             ))}
             {output.length === 0 && (

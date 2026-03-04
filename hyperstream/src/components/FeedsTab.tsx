@@ -1,11 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { error as logError } from '../utils/logger';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { RefreshCw, Plus, Trash2, Download, Rss, ExternalLink } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
 import { AppSettings } from '../types';
-
-let feedNextId = 0;
 
 interface FeedConfig {
     id: string;
@@ -27,6 +26,7 @@ interface FeedItem {
 
 export const FeedsTab: React.FC = () => {
     const toast = useToast();
+    const feedNextId = useRef(0);
     const [feeds, setFeeds] = useState<FeedConfig[]>([]);
     const [selectedFeedId, setSelectedFeedId] = useState<string | null>(null);
     const [items, setItems] = useState<FeedItem[]>([]);
@@ -42,15 +42,21 @@ export const FeedsTab: React.FC = () => {
     }, []);
 
     useEffect(() => {
+        let cancelled = false;
         if (selectedFeedId) {
             const feed = feeds.find(f => f.id === selectedFeedId);
             if (feed) {
-                fetchItems(feed.url);
+                setLoading(true);
+                invoke<FeedItem[]>('fetch_feed', { url: feed.url })
+                    .then(fetched => { if (!cancelled) setItems(fetched); })
+                    .catch(e => { if (!cancelled) { logError("Failed to fetch feed items", e); toast.error("Failed to fetch feed items"); } })
+                    .finally(() => { if (!cancelled) setLoading(false); });
             }
         } else {
             setItems([]);
         }
-    }, [selectedFeedId]);
+        return () => { cancelled = true; };
+    }, [selectedFeedId, feeds]);
 
     const loadFeeds = async () => {
         try {
@@ -60,7 +66,7 @@ export const FeedsTab: React.FC = () => {
                 setSelectedFeedId(list[0].id);
             }
         } catch (e) {
-            console.error("Failed to load feeds", e);
+            logError("Failed to load feeds", e);
             toast.error("Failed to load feeds");
         }
     };
@@ -71,7 +77,7 @@ export const FeedsTab: React.FC = () => {
             const fetchedItems = await invoke<FeedItem[]>('fetch_feed', { url });
             setItems(fetchedItems);
         } catch (e) {
-            console.error("Failed to fetch feed items", e);
+            logError("Failed to fetch feed items", e);
             toast.error("Failed to fetch feed items");
         }
         setLoading(false);
@@ -96,7 +102,7 @@ export const FeedsTab: React.FC = () => {
             setIsAddModalOpen(false);
             loadFeeds();
         } catch (e) {
-            console.error("Failed to add feed", e);
+            logError("Failed to add feed", e);
             toast.error("Failed to add feed");
         }
     };
@@ -109,23 +115,24 @@ export const FeedsTab: React.FC = () => {
             if (selectedFeedId === id) setSelectedFeedId(null);
             loadFeeds();
         } catch (err) {
-            console.error("Failed to remove feed", err);
+            logError("Failed to remove feed", err);
             toast.error("Failed to remove feed");
         }
     };
 
     const handleDownload = async (url: string, title: string) => {
         try {
-            const filename = title.replace(/[^a-zA-Z0-9.-]/g, "_");
+            const urlExt = url.split('/').pop()?.split('?')[0]?.match(/\.[a-zA-Z0-9]+$/)?.[0] || '';
+            const filename = title.replace(/[^a-zA-Z0-9.-]/g, "_") + urlExt;
             const settings = await invoke<AppSettings>('get_settings');
-            const downloadId = `feed_${Date.now()}_${feedNextId++}`;
+            const downloadId = `feed_${Date.now()}_${feedNextId.current++}`;
             await invoke('start_download', {
                 id: downloadId,
                 url,
                 path: `${settings.download_dir}/${filename}`,
             });
         } catch (e) {
-            console.error("Failed to start download", e);
+            logError("Failed to start download", e);
             toast.error("Failed to start download");
         }
     };
@@ -214,7 +221,7 @@ export const FeedsTab: React.FC = () => {
                                 <AnimatePresence mode="popLayout">
                                     {items.map((item, idx) => (
                                         <motion.div
-                                            key={idx}
+                                            key={`${item.link || item.title}-${idx}`}
                                             initial={{ opacity: 0, y: 10 }}
                                             animate={{ opacity: 1, y: 0 }}
                                             transition={{ delay: idx * 0.05 }}
@@ -237,7 +244,7 @@ export const FeedsTab: React.FC = () => {
 
                                             {item.description && (
                                                 <p className="text-sm text-slate-400 leading-relaxed mb-4 line-clamp-3">
-                                                    {item.description.replace(/<[^>]*>?/gm, '')}
+                                                    {item.description.replace(/<[^>]*>?/gm, '').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim()}
                                                 </p>
                                             )}
 

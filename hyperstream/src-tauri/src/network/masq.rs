@@ -34,13 +34,14 @@ pub fn build_impersonator_client(
     };
 
     // 2. Build Client with BoringSSL (default in rquest 5.x)
-    // TODO: Phase L2b - Add specific HTTP/2 window sizes and priority frames here using .http2_* methods
+    // rquest currently lacks APIs for configuring HTTP/2 window/priority settings;
+    // the code below shows where such options would go if added in the future.
     let mut builder = Client::builder()
         .user_agent(user_agent)
-        .cookie_store(true);
-        // .http2_initial_stream_window_size(6 * 1024 * 1024)      // 6MB - Removed as not supported in current rquest
-
-        // .http2_initial_connection_window_size(15 * 1024 * 1024); // 15MB - Removed as not supported
+        .cookie_store(true)
+        .connect_timeout(std::time::Duration::from_secs(30));
+        // .http2_initial_stream_window_size(6 * 1024 * 1024)      // 6MB
+        // .http2_initial_connection_window_size(15 * 1024 * 1024); // 15MB
 
     // Apply Proxy
     if let Some(config) = proxy {

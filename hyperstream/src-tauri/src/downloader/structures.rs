@@ -53,8 +53,8 @@ impl Segment {
         if len == 0 {
             return 100.0;
         }
-        let downloaded = self.downloaded_cursor - self.start_byte;
-        (downloaded as f64 / len as f64) * 100.0
+        let downloaded = self.downloaded_cursor.saturating_sub(self.start_byte);
+        ((downloaded as f64 / len as f64) * 100.0).min(100.0)
     }
 
     pub fn is_complete(&self) -> bool {

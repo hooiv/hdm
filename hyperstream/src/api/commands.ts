@@ -143,8 +143,8 @@ export const api = {
     // --- Settings ---
     getSettings: () =>
         invoke<import('../types').AppSettings>('get_settings'),
-    saveSettings: (json: Partial<import('../types').AppSettings>) =>
-        invoke<void>('save_settings', { json }),
+    saveSettings: (settings: Partial<import('../types').AppSettings>) =>
+        invoke<void>('save_settings', { settings }),
 
     // --- File Operations ---
     openFile: (path: string) =>
@@ -172,7 +172,7 @@ export const api = {
     startEphemeralShare: (path: string, timeoutMins: number) =>
         invoke<EphemeralShareResult>('start_ephemeral_share', { path, timeoutMins }),
     checkWayback: (url: string) =>
-        invoke<WaybackResult>('check_wayback', { url }),
+        invoke<WaybackResult>('check_wayback_availability', { url }),
     apiFuzzUrl: (url: string) =>
         invoke<ApiFuzzResult>('fuzz_url', { url }),
     bandwidthArbitrage: (urls: string[]) =>

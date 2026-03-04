@@ -16,10 +16,16 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
     const [extensions, setExtensions] = useState({
         jpg: true,
         png: true,
+        gif: false,
         mp4: true,
+        mp3: false,
         zip: true,
+        rar: false,
         pdf: false,
+        exe: false,
+        iso: false,
     });
+    const [customExt, setCustomExt] = useState('');
     const [isCrawling, setIsCrawling] = useState(false);
     const [results, setResults] = useState<GrabbedFile[]>([]);
     const [selectedUrls, setSelectedUrls] = useState<Set<string>>(new Set());
@@ -34,6 +40,12 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
         const activeExtensions = Object.entries(extensions)
             .filter(([_, active]) => active)
             .map(([ext]) => ext);
+
+        // Add custom extensions (comma-separated)
+        if (customExt.trim()) {
+            const custom = customExt.split(',').map(e => e.trim().replace(/^\./, '').toLowerCase()).filter(Boolean);
+            activeExtensions.push(...custom);
+        }
 
         try {
             const files = await invoke<GrabbedFile[]>('crawl_website', {
@@ -71,7 +83,7 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" role="dialog" aria-modal="true">
             <motion.div
                 className="w-full max-w-4xl h-[85vh] bg-slate-900 border border-slate-700/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
                 initial={{ scale: 0.95, opacity: 0 }}
@@ -132,6 +144,13 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
                                     <span className="text-xs font-bold text-slate-300 uppercase">{ext}</span>
                                 </label>
                             ))}
+                            <input
+                                type="text"
+                                value={customExt}
+                                onChange={e => setCustomExt(e.target.value)}
+                                placeholder="Custom (e.g. docx, 7z)"
+                                className="px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-300 focus:outline-none focus:border-red-500/50 w-44 placeholder-slate-600"
+                            />
 
                             <button
                                 onClick={handleCrawl}
@@ -177,7 +196,7 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
                                     const isSelected = selectedUrls.has(file.url);
                                     return (
                                         <div
-                                            key={idx}
+                                            key={file.url}
                                             onClick={() => toggleSelection(file.url)}
                                             className={`p-3 rounded-lg border cursor-pointer transition-all flex items-start gap-3 group ${isSelected
                                                 ? 'bg-blue-500/10 border-blue-500/30'

@@ -9,6 +9,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 pub struct ChromeHeaders;
 
 impl ChromeHeaders {
+    #[allow(dead_code)]
     pub fn build() -> HeaderMap {
         let mut headers = HeaderMap::with_capacity(15);
         

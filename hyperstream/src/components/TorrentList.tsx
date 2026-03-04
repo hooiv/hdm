@@ -2,20 +2,14 @@ import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { TorrentStatus } from '../types';
 import { Magnet, Play } from 'lucide-react';
+import { formatSpeed } from '../utils/formatters';
+import { error as logError } from '../utils/logger';
 
 interface TorrentListProps {
     onPlay: (id: number) => void;
 }
 
 const TorrentItem: React.FC<{ status: TorrentStatus, onPlay: (id: number) => void }> = ({ status, onPlay }) => {
-    const formatSpeed = (bytes: number) => {
-        if (!bytes || bytes <= 0) return '0 B/s';
-        const k = 1024;
-        const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-        const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-    };
-
     return (
         <div className="relative mb-3 bg-slate-800/50 border border-slate-700/50 rounded-xl p-4 flex items-center hover:bg-slate-800/80 transition-colors">
 
@@ -71,18 +65,22 @@ export const TorrentList: React.FC<TorrentListProps> = ({ onPlay }) => {
     const [torrents, setTorrents] = useState<TorrentStatus[]>([]);
 
     useEffect(() => {
+        let mounted = true;
         const fetchTorrents = async () => {
             try {
                 const list = await invoke<TorrentStatus[]>('get_torrents');
-                setTorrents(list);
+                if (mounted) setTorrents(list);
             } catch (e) {
-                console.error("Failed to fetch torrents", e);
+                logError("Failed to fetch torrents", e);
             }
         };
 
         fetchTorrents();
-        const interval = setInterval(fetchTorrents, 1000);
-        return () => clearInterval(interval);
+        const interval = setInterval(() => {
+            // Skip polling when tab is hidden to save resources
+            if (!document.hidden) fetchTorrents();
+        }, 1000);
+        return () => { mounted = false; clearInterval(interval); };
     }, []);
 
     return (

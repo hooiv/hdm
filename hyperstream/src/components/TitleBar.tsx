@@ -1,13 +1,23 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 
 import { X, Minus, Square, Copy } from 'lucide-react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+
+// Safely get appWindow — getCurrentWindow() may fail outside Tauri webview
+function getAppWindow() {
+    try {
+        const { getCurrentWindow } = require('@tauri-apps/api/window');
+        return getCurrentWindow();
+    } catch {
+        return null;
+    }
+}
 
 export const TitleBar: React.FC = () => {
     const [isMaximized, setIsMaximized] = useState(false);
-    const appWindow = getCurrentWindow();
+    const appWindow = useMemo(() => getAppWindow(), []);
 
     useEffect(() => {
+        if (!appWindow) return;
         const checkMaximized = async () => {
             setIsMaximized(await appWindow.isMaximized());
         };
@@ -24,8 +34,9 @@ export const TitleBar: React.FC = () => {
         }
     }, []);
 
-    const handleMinimize = () => appWindow.minimize();
+    const handleMinimize = () => appWindow?.minimize();
     const handleMaximize = async () => {
+        if (!appWindow) return;
         if (await appWindow.isMaximized()) {
             appWindow.unmaximize();
             setIsMaximized(false);
@@ -34,7 +45,7 @@ export const TitleBar: React.FC = () => {
             setIsMaximized(true);
         }
     };
-    const handleClose = () => appWindow.close();
+    const handleClose = () => appWindow?.close();
 
     return (
         <div

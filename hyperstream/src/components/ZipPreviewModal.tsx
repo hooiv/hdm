@@ -1,13 +1,14 @@
 
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { debug, warn, error as logError } from '../utils/logger';
 
 interface ZipEntry {
-    name: String;
+    name: string;
     is_directory: boolean;
     compressed_size: number;
     uncompressed_size: number;
-    compression_method: String;
+    compression_method: string;
 }
 
 interface ZipPreviewData {
@@ -29,13 +30,13 @@ interface ZipPreviewModalProps {
 export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url, isOpen, onClose, isPartial = false }) => {
     const [data, setData] = useState<ZipPreviewData | null>(null);
     const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [errMsg, setError] = useState<string | null>(null);
 
     useEffect(() => {
         if (isOpen) {
             loadPreview();
         }
-    }, [isOpen, filePath, url]);
+    }, [isOpen, filePath, url, isPartial]);
 
     const loadPreview = async () => {
         setLoading(true);
@@ -44,12 +45,12 @@ export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url,
             if (isPartial && url) {
                 // Try Remote Preview first for partial files
                 try {
-                    console.log("Attempting remote ZIP preview...");
+                    debug("Attempting remote ZIP preview...");
                     const result = await invoke<ZipPreviewData>('preview_zip_remote', { url });
                     setData(result);
                     return;
                 } catch (remoteErr) {
-                    console.warn("Remote preview failed, falling back to local partial read:", remoteErr);
+                    warn("Remote preview failed, falling back to local partial read:", remoteErr);
                 }
             }
 
@@ -63,7 +64,7 @@ export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url,
                 setData(result);
             }
         } catch (err) {
-            console.error('Failed to preview ZIP:', err);
+            logError('Failed to preview ZIP:', err);
             setError(typeof err === 'string' ? err : 'Failed to load preview');
         } finally {
             setLoading(false);
@@ -73,7 +74,7 @@ export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url,
     if (!isOpen) return null;
 
     return (
-        <div className="modal-overlay" onClick={onClose}>
+        <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true">
             <div className="modal-content zip-preview-modal" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
                     <h3>📦 ZIP Preview {isPartial && '(Partial)'}</h3>
@@ -83,9 +84,9 @@ export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url,
                 <div className="modal-body">
                     {loading && <div className="loading-spinner">Loading archive structure...</div>}
 
-                    {error && (
+                    {errMsg && (
                         <div className="error-message">
-                            <p>⚠️ {error}</p>
+                            <p>⚠️ {errMsg}</p>
                             {isPartial && <small>Partial preview requires the end of the file to be downloaded.</small>}
                         </div>
                     )}

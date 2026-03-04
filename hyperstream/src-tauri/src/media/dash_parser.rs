@@ -43,10 +43,14 @@ pub fn parse_mpd(content: &str, _base_url: &str) -> Result<DashManifest, String>
         .and_then(|d| parse_duration(&d))
         .unwrap_or(2.0);
 
+    // TODO: Implement full AdaptationSet/Representation XML parsing
+    // Currently only extracts top-level manifest attributes.
+    eprintln!("[DASH] Warning: MPD parser is incomplete — video/audio representations are not yet extracted");
+
     Ok(DashManifest {
         duration,
         min_buffer_time: min_buffer,
-        video_representations: Vec::new(), // Would parse AdaptationSet elements
+        video_representations: Vec::new(),
         audio_representations: Vec::new(),
     })
 }

@@ -32,7 +32,102 @@ pub struct FeedManager {
 
 // Async function to fetch feed
 pub async fn fetch_feed(url: &str) -> Result<Vec<FeedItem>, String> {
-    let content = reqwest::get(url).await.map_err(|e| e.to_string())?.bytes().await.map_err(|e| e.to_string())?;
+    // SSRF protection: block private/loopback addresses
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        if let Some(host) = parsed.host_str() {
+            let lower = host.to_lowercase();
+            if lower == "localhost" || lower == "[::1]" {
+                return Err("Feed URLs targeting localhost are not allowed".to_string());
+            }
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                match ip {
+                    std::net::IpAddr::V4(v4) => {
+                        if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() {
+                            return Err(format!("Feed URL targeting private IP {} is not allowed", v4));
+                        }
+                    }
+                    std::net::IpAddr::V6(v6) => {
+                        if v6.is_loopback() || v6.is_unspecified() {
+                            return Err(format!("Feed URL targeting private IPv6 {} is not allowed", v6));
+                        }
+                        // Check IPv4-mapped addresses like ::ffff:127.0.0.1
+                        if let Some(v4) = v6.to_ipv4_mapped() {
+                            if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
+                                return Err(format!("Feed URL targeting private mapped IP {} is not allowed", v4));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let initial_response = client.get(url).send().await.map_err(|e| e.to_string())?;
+
+    // If the server returns a redirect, validate the target before following it
+    let response = if initial_response.status().is_redirection() {
+        let location = initial_response.headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| "Redirect with no Location header".to_string())?
+            .to_string();
+
+        let redirect_url = if location.starts_with("http") {
+            location
+        } else {
+            // Relative redirect — resolve against original URL
+            format!("{}{}", url.trim_end_matches('/'), location)
+        };
+
+        // Re-validate the redirect target against private IPs
+        if let Ok(parsed) = reqwest::Url::parse(&redirect_url) {
+            if let Some(host) = parsed.host_str() {
+                let lower = host.to_lowercase();
+                if lower == "localhost" || lower == "[::1]" {
+                    return Err("Feed redirect to localhost blocked".to_string());
+                }
+                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                    match ip {
+                        std::net::IpAddr::V4(v4) => {
+                            if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() {
+                                return Err(format!("Feed redirect to private IP {} blocked", v4));
+                            }
+                        }
+                        std::net::IpAddr::V6(v6) => {
+                            if v6.is_loopback() || v6.is_unspecified() {
+                                return Err(format!("Feed redirect to private IPv6 {} blocked", v6));
+                            }
+                            if let Some(v4) = v6.to_ipv4_mapped() {
+                                if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
+                                    return Err(format!("Feed redirect to private mapped IP {} blocked", v4));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Follow the validated redirect manually
+        client.get(&redirect_url).send().await.map_err(|e| e.to_string())?
+    } else {
+        initial_response
+    };
+
+    // Guard against oversized responses (max 10 MB for a feed)
+    if let Some(cl) = response.content_length() {
+        if cl > 10 * 1024 * 1024 {
+            return Err(format!("Feed response too large: {} bytes", cl));
+        }
+    }
+    let content = response.bytes().await.map_err(|e| e.to_string())?;
+    if content.len() > 10 * 1024 * 1024 {
+        return Err("Feed response exceeded 10 MB limit".to_string());
+    }
     let cursor = std::io::Cursor::new(content);
     let feed = parser::parse(cursor).map_err(|e| e.to_string())?;
 
@@ -59,44 +154,61 @@ impl FeedManager {
     }
 
     fn get_store_path() -> std::path::PathBuf {
-        let mut path = std::env::current_dir().unwrap_or_default();
-        path.push("feeds.json");
-        path
+        dirs::config_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+            .join("hyperstream")
+            .join("feeds.json")
     }
 
     pub fn load(&mut self) {
-        if let Ok(data) = std::fs::read_to_string(Self::get_store_path()) {
+        let path = Self::get_store_path();
+        if let Ok(data) = std::fs::read_to_string(&path) {
             if let Ok(feeds) = serde_json::from_str(&data) {
-                *self.feeds.lock().unwrap() = feeds;
+                *self.feeds.lock().unwrap_or_else(|e| e.into_inner()) = feeds;
             }
         }
     }
 
     pub fn save(&self) {
-        let feeds = self.feeds.lock().unwrap();
+        let feeds = self.feeds.lock().unwrap_or_else(|e| e.into_inner());
         if let Ok(data) = serde_json::to_string_pretty(&*feeds) {
-            let _ = std::fs::write(Self::get_store_path(), data);
+            let path = Self::get_store_path();
+            // Ensure parent directory exists
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&path, data) {
+                eprintln!("WARNING: Failed to save feeds to {}: {}", path.display(), e);
+            }
         }
     }
 
-    pub fn add_feed(&self, config: FeedConfig) {
+    pub fn add_feed(&self, config: FeedConfig) -> Result<(), String> {
+        // Validate auto_download_regex if provided (ReDoS protection)
+        if let Some(ref pattern) = config.auto_download_regex {
+            regex::RegexBuilder::new(pattern)
+                .size_limit(1 << 20) // 1 MB compiled DFA limit
+                .build()
+                .map_err(|e| format!("Invalid auto-download regex: {}", e))?;
+        }
         {
-            let mut feeds = self.feeds.lock().unwrap();
+            let mut feeds = self.feeds.lock().unwrap_or_else(|e| e.into_inner());
             feeds.push(config);
         }
         self.save();
+        Ok(())
     }
 
     pub fn remove_feed(&self, id: &str) {
         {
-            let mut feeds = self.feeds.lock().unwrap();
+            let mut feeds = self.feeds.lock().unwrap_or_else(|e| e.into_inner());
             feeds.retain(|f| f.id != id);
         }
         self.save();
     }
 
     pub fn get_feeds(&self) -> Vec<FeedConfig> {
-        self.feeds.lock().unwrap().clone()
+        self.feeds.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
