@@ -2013,7 +2013,8 @@ fn validate_plugin_filename(filename: &str) -> Result<(), String> {
 #[tauri::command]
 async fn get_plugin_source(filename: String) -> Result<String, String> {
     validate_plugin_filename(&filename)?;
-    let path = std::env::current_dir().unwrap_or_default().join("plugins").join(format!("{}.lua", filename));
+    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let path = cwd.join("plugins").join(format!("{}.lua", filename));
     if !path.exists() {
         return Err("Plugin file not found".to_string());
     }
@@ -2023,7 +2024,8 @@ async fn get_plugin_source(filename: String) -> Result<String, String> {
 #[tauri::command]
 async fn save_plugin_source(filename: String, content: String) -> Result<(), String> {
     validate_plugin_filename(&filename)?;
-    let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
+    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let plugins_dir = cwd.join("plugins");
     if !plugins_dir.exists() {
         std::fs::create_dir_all(&plugins_dir).map_err(|e| e.to_string())?;
     }
@@ -2034,7 +2036,8 @@ async fn save_plugin_source(filename: String, content: String) -> Result<(), Str
 #[tauri::command]
 async fn delete_plugin(filename: String) -> Result<(), String> {
     validate_plugin_filename(&filename)?;
-    let path = std::env::current_dir().unwrap_or_default().join("plugins").join(format!("{}.lua", filename));
+    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let path = cwd.join("plugins").join(format!("{}.lua", filename));
     if path.exists() {
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
