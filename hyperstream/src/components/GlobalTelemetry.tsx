@@ -30,10 +30,10 @@ export const GlobalTelemetry: React.FC<GlobalTelemetryProps> = ({ tasks }) => {
 
     // Format speed Helper
     const formatSpeed = (bps: number) => {
-        if (bps === 0) return '0 B/s';
+        if (!bps || bps <= 0) return '0 B/s';
         const k = 1024;
         const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-        const i = Math.floor(Math.log(bps) / Math.log(k));
+        const i = Math.min(Math.floor(Math.log(bps) / Math.log(k)), sizes.length - 1);
         return parseFloat((bps / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     };
 

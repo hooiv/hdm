@@ -33,7 +33,7 @@ pub fn list_usb_drives() -> Result<Vec<UsbDrive>, String> {
     let mut drives = Vec::new();
 
     let items = if parsed.is_array() {
-        parsed.as_array().unwrap().clone()
+        parsed.as_array().cloned().unwrap_or_default()
     } else {
         vec![parsed]
     };
