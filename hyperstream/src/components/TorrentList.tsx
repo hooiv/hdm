@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { TorrentStatus } from '../types';
 import { Magnet, Play } from 'lucide-react';
@@ -63,15 +63,20 @@ const TorrentItem: React.FC<{ status: TorrentStatus, onPlay: (id: number) => voi
 
 export const TorrentList: React.FC<TorrentListProps> = ({ onPlay }) => {
     const [torrents, setTorrents] = useState<TorrentStatus[]>([]);
+    const fetchingRef = useRef(false);
 
     useEffect(() => {
         let mounted = true;
         const fetchTorrents = async () => {
+            if (fetchingRef.current) return; // skip if previous fetch still in-flight
+            fetchingRef.current = true;
             try {
                 const list = await invoke<TorrentStatus[]>('get_torrents');
                 if (mounted) setTorrents(list);
             } catch (e) {
                 logError("Failed to fetch torrents", e);
+            } finally {
+                fetchingRef.current = false;
             }
         };
 

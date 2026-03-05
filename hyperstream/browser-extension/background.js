@@ -2,6 +2,22 @@
 
 const HYPERSTREAM_URL = 'http://localhost:14733';
 
+// Get the stored auth token
+async function getAuthToken() {
+    const { authToken } = await chrome.storage.local.get({ authToken: '' });
+    return authToken;
+}
+
+// Build headers with auth token
+async function getAuthHeaders() {
+    const token = await getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) {
+        headers['X-HyperStream-Token'] = token;
+    }
+    return headers;
+}
+
 // Check if HyperStream is running
 async function checkConnection() {
     try {
@@ -16,13 +32,18 @@ async function checkConnection() {
 // Send download to HyperStream
 async function sendToHyperStream(url, filename) {
     try {
+        const headers = await getAuthHeaders();
         const response = await fetch(`${HYPERSTREAM_URL}/download`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
+            headers,
             body: JSON.stringify({ url, filename }),
         });
+
+        if (response.status === 401 || response.status === 403) {
+            console.warn('Auth token rejected — update token in extension settings');
+            return { success: false, message: 'Invalid auth token. Open extension popup to update.' };
+        }
+
         const data = await response.json();
         return data;
     } catch (e) {
@@ -37,6 +58,10 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     const { enabled } = await chrome.storage.local.get({ enabled: true });
     if (!enabled) return;
 
+    // Check if we have an auth token
+    const token = await getAuthToken();
+    if (!token) return; // No token configured — allow default browser download
+
     // Check if HyperStream is running
     const connected = await checkConnection();
     if (!connected) {
@@ -48,8 +73,6 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     const url = downloadItem.finalUrl || downloadItem.url;
     const filename = downloadItem.filename ? downloadItem.filename.split(/[/\\]/).pop() : null;
 
-    // intercepting download: silently handled
-
     // Cancel the browser download
     chrome.downloads.cancel(downloadItem.id);
     chrome.downloads.erase({ id: downloadItem.id });
@@ -59,9 +82,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 
     if (result.success) {
         // Show notification
-        chrome.action.setBadgeText({ text: '✓' });
-        chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
-        setTimeout(() => chrome.action.setBadgeText({ text: '' }), 2000);
+        showBadge('\u2713');
     } else {
         console.warn('Failed to send to HyperStream:', result.message);
         // Fallback: restart the download in browser
@@ -100,8 +121,6 @@ chrome.runtime.onInstalled.addListener(() => {
         title: 'Download image with HyperStream',
         contexts: ['image']
     });
-
-    // extension installed
 });
 
 // Handle context menu clicks
@@ -109,7 +128,6 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const connected = await checkConnection();
 
     if (!connected) {
-        // HyperStream not running (context menu)
         return;
     }
 
@@ -117,52 +135,53 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         case 'download-link':
             if (info.linkUrl) {
                 const filename = info.linkUrl.split('/').pop()?.split('?')[0] || 'download';
-                await sendToHyperStream(info.linkUrl, filename);
-                showBadge('✓');
+                const result = await sendToHyperStream(info.linkUrl, filename);
+                if (result.success) showBadge('\u2713');
             }
             break;
 
         case 'download-video':
             if (info.srcUrl) {
                 const filename = info.srcUrl.split('/').pop()?.split('?')[0] || 'video.mp4';
-                await sendToHyperStream(info.srcUrl, filename);
-                showBadge('✓');
+                const result = await sendToHyperStream(info.srcUrl, filename);
+                if (result.success) showBadge('\u2713');
             }
             break;
 
         case 'download-image':
             if (info.srcUrl) {
                 const filename = info.srcUrl.split('/').pop()?.split('?')[0] || 'image.jpg';
-                await sendToHyperStream(info.srcUrl, filename);
-                showBadge('✓');
+                const result = await sendToHyperStream(info.srcUrl, filename);
+                if (result.success) showBadge('\u2713');
             }
             break;
 
         case 'download-all-links':
-            // Inject script to gather all links
             chrome.scripting.executeScript({
                 target: { tabId: tab.id },
                 function: gatherDownloadableLinks
             }).then(async (results) => {
                 if (results && results[0] && results[0].result) {
                     const links = results[0].result;
-                    // found links count for batch download
 
                     // Send all links as batch to HyperStream for user review
                     try {
-                        await fetch(`${HYPERSTREAM_URL}/batch`, {
+                        const headers = await getAuthHeaders();
+                        const response = await fetch(`${HYPERSTREAM_URL}/batch`, {
                             method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
+                            headers,
                             body: JSON.stringify(links.map(l => ({
                                 url: l.url,
                                 filename: l.filename
                             })))
                         });
+
+                        if (response.ok) {
+                            showBadge(links.length.toString());
+                        }
                     } catch (e) {
                         console.warn('Failed to send batch to HyperStream:', e);
                     }
-
-                    showBadge(links.length.toString());
                 }
             });
             break;
@@ -209,7 +228,7 @@ function showBadge(text) {
     setTimeout(() => chrome.action.setBadgeText({ text: '' }), 2000);
 }
 
-// Listen for messages from content script
+// Listen for messages from content script or popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'download') {
         sendToHyperStream(message.url, message.filename)
@@ -219,6 +238,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.action === 'checkConnection') {
         checkConnection().then(connected => sendResponse({ connected }));
+        return true;
+    }
+
+    if (message.action === 'setAuthToken') {
+        chrome.storage.local.set({ authToken: message.token });
+        sendResponse({ success: true });
+        return false;
+    }
+
+    if (message.action === 'getAuthToken') {
+        getAuthToken().then(token => sendResponse({ token }));
         return true;
     }
 });

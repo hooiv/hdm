@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import type { DownloadTask, Segment } from "../types";
 import { useDownloadActions } from "../hooks/useDownloadActions";
 import { useToast } from "../contexts/ToastContext";
@@ -39,26 +39,42 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
   const actions = useDownloadActions(task, filePath);
   const toast = useToast();
   const [shareUrl, setShareUrl] = useState<string | null>(null);
-  const [checkingWayback, setCheckingWayback] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
 
-  const isMountable = ["zip", "iso"].includes(
-    task.filename.split(".").pop()?.toLowerCase() || "",
-  );
-  const isArchive = ["zip", "jar", "rar", "7z", "tgz"].includes(
-    task.filename.split(".").pop()?.toLowerCase() || "",
-  );
-  const isDataFile = ["csv", "json"].includes(
-    task.filename.split(".").pop()?.toLowerCase() || "",
-  );
-  const isMediaFile = ["mp4", "mkv", "avi", "mp3", "flac", "wav"].includes(
-    task.filename.split(".").pop()?.toLowerCase() || "",
-  );
-  const isVideoFile = ["mp4", "mkv", "avi", "mov", "webm"].includes(
-    task.filename.split(".").pop()?.toLowerCase() || "",
-  );
-  const isImageFile = ["jpg", "jpeg", "png", "webp", "gif"].includes(
-    task.filename.split(".").pop()?.toLowerCase() || "",
-  );
+  // Reset ephemeral state when the expanded task changes
+  useEffect(() => {
+    setShareUrl(null);
+    setBusyAction(null);
+  }, [task.id]);
+
+  /** Wraps an async action with busy-state tracking to prevent double-clicks. */
+  const withBusy = (name: string, fn: () => Promise<unknown>) => async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (busyAction) return;
+    setBusyAction(name);
+    try { await fn(); } finally { setBusyAction(null); }
+  };
+
+  const isBusy = busyAction !== null;
+
+  /** Extract the effective file extension, handling compound extensions like .tar.gz */
+  const getExtension = (name: string): string => {
+    const lower = name.toLowerCase();
+    // Check compound extensions first
+    const compoundExts = ['.tar.gz', '.tar.bz2', '.tar.xz', '.tar.zst'];
+    for (const ext of compoundExts) {
+      if (lower.endsWith(ext)) return ext.slice(1); // e.g. "tar.gz"
+    }
+    return lower.split('.').pop() || '';
+  };
+
+  const ext = getExtension(task.filename);
+  const isMountable = ['zip', 'iso'].includes(ext);
+  const isArchive = ['zip', 'jar', 'rar', '7z', 'tgz', 'tar.gz', 'tar.bz2', 'tar.xz', 'tar.zst', 'gz', 'bz2', 'xz'].includes(ext);
+  const isDataFile = ['csv', 'json'].includes(ext);
+  const isMediaFile = ['mp4', 'mkv', 'avi', 'mp3', 'flac', 'wav'].includes(ext);
+  const isVideoFile = ['mp4', 'mkv', 'avi', 'mov', 'webm'].includes(ext);
+  const isImageFile = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext);
 
   return (
     <div className="p-4">
@@ -85,8 +101,8 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {/* Mount Drive */}
           {isMountable && (
             <button
-              onClick={async (e) => {
-                e.stopPropagation();
+              disabled={isBusy}
+              onClick={withBusy('mount', async () => {
                 try {
                   const port = await invoke("mount_drive", {
                     path: filePath,
@@ -98,17 +114,17 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
                 } catch (err) {
                   toast.error("Mount failed: " + err);
                 }
-              }}
-              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-green-500/10 text-green-400 border border-green-500/20 hover:bg-green-500/20"
+              })}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-green-500/10 text-green-400 border border-green-500/20 hover:bg-green-500/20 disabled:opacity-50"
             >
-              <HardDrive size={14} /> Mount Drive
+              <HardDrive size={14} /> {busyAction === 'mount' ? 'Mounting...' : 'Mount Drive'}
             </button>
           )}
 
           {/* Cloud Upload */}
           <button
-            onClick={async (e) => {
-              e.stopPropagation();
+            disabled={isBusy}
+            onClick={withBusy('upload', async () => {
               if (!confirm("Upload to configured Cloud Storage?")) return;
               try {
                 toast.info("Upload started... please wait.");
@@ -120,17 +136,17 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
               } catch (err) {
                 toast.error("Upload failed: " + err);
               }
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20"
+            })}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20 disabled:opacity-50"
           >
-            <Cloud size={14} /> Upload to Cloud
+            <Cloud size={14} /> {busyAction === 'upload' ? 'Uploading...' : 'Upload to Cloud'}
           </button>
 
           {/* Media Tools */}
           {isVideoFile && (
             <button
-              onClick={async (e) => {
-                e.stopPropagation();
+              disabled={isBusy}
+              onClick={withBusy('preview', async () => {
                 try {
                   toast.info("Generating Preview (WebP)...");
                   await invoke("process_media", {
@@ -141,45 +157,41 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
                 } catch (err) {
                   toast.error("Media Process Failed: " + err);
                 }
-              }}
-              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-pink-500/10 text-pink-400 border border-pink-500/20 hover:bg-pink-500/20"
+              })}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-pink-500/10 text-pink-400 border border-pink-500/20 hover:bg-pink-500/20 disabled:opacity-50"
             >
-              <Film size={14} /> Smart Preview
+              <Film size={14} /> {busyAction === 'preview' ? 'Generating...' : 'Smart Preview'}
             </button>
           )}
 
           {/* Metadata Scrub */}
           <button
-            onClick={async (e) => {
-              e.stopPropagation();
-              await actions.handleScrubMetadata();
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20"
+            disabled={isBusy}
+            onClick={withBusy('scrub', () => actions.handleScrubMetadata())}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 disabled:opacity-50"
           >
-            <UserX size={14} /> Scrub Metadata
+            <UserX size={14} /> {busyAction === 'scrub' ? 'Scrubbing...' : 'Scrub Metadata'}
           </button>
 
           {/* Ephemeral Share */}
           <button
-            onClick={async (e) => {
-              e.stopPropagation();
+            disabled={isBusy}
+            onClick={withBusy('share', async () => {
               const url = await actions.handleEphemeralShare();
               if (url) setShareUrl(url);
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 pointer-events-auto"
+            })}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 pointer-events-auto disabled:opacity-50"
           >
-            <Share2 size={14} /> DropBox Share
+            <Share2 size={14} /> {busyAction === 'share' ? 'Sharing...' : 'DropBox Share'}
           </button>
 
           {/* AI Upscale */}
           <button
-            onClick={async (e) => {
-              e.stopPropagation();
-              await actions.handleAiUpscale();
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20"
+            disabled={isBusy}
+            onClick={withBusy('upscale', () => actions.handleAiUpscale())}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50"
           >
-            <Film size={14} /> AI Upscale
+            <Film size={14} /> {busyAction === 'upscale' ? 'Upscaling...' : 'AI Upscale'}
           </button>
 
           {/* P2P Share */}
@@ -195,60 +207,50 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
 
           {/* Sandbox */}
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              actions.handleSandbox();
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20"
+            disabled={isBusy}
+            onClick={withBusy('sandbox', () => actions.handleSandbox())}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 disabled:opacity-50"
           >
-            <Bug size={14} /> Run in Sandbox
+            <Bug size={14} /> {busyAction === 'sandbox' ? 'Launching...' : 'Run in Sandbox'}
           </button>
 
           {/* Notarize */}
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              actions.handleNotarize();
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-teal-500/10 text-teal-400 border border-teal-500/20 hover:bg-teal-500/20"
+            disabled={isBusy}
+            onClick={withBusy('notarize', () => actions.handleNotarize())}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-teal-500/10 text-teal-400 border border-teal-500/20 hover:bg-teal-500/20 disabled:opacity-50"
           >
-            <Shield size={14} /> Notarize (TSA)
+            <Shield size={14} /> {busyAction === 'notarize' ? 'Notarizing...' : 'Notarize (TSA)'}
           </button>
 
           {/* Find Mirrors */}
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              actions.handleFindMirrors();
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20"
+            disabled={isBusy}
+            onClick={withBusy('mirrors', () => actions.handleFindMirrors())}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50"
           >
-            <Search size={14} /> Find Mirrors
+            <Search size={14} /> {busyAction === 'mirrors' ? 'Searching...' : 'Find Mirrors'}
           </button>
 
           {/* Flash to USB */}
           {task.filename.toLowerCase().endsWith(".iso") && (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.handleFlashToUsb();
-              }}
-              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20"
+              disabled={isBusy}
+              onClick={withBusy('flash', () => actions.handleFlashToUsb())}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20 disabled:opacity-50"
             >
-              <Zap size={14} /> Flash to USB
+              <Zap size={14} /> {busyAction === 'flash' ? 'Flashing...' : 'Flash to USB'}
             </button>
           )}
 
           {/* Validate C2PA */}
           {isImageFile && (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.handleValidateC2pa();
-              }}
-              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20"
+              disabled={isBusy}
+              onClick={withBusy('c2pa', () => actions.handleValidateC2pa())}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 disabled:opacity-50"
             >
-              <Shield size={14} /> Validate C2PA
+              <Shield size={14} /> {busyAction === 'c2pa' ? 'Validating...' : 'Validate C2PA'}
             </button>
           )}
 
@@ -256,22 +258,18 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {task.filename.toLowerCase().endsWith(".png") && (
             <>
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  actions.handleStegoHide();
-                }}
-                className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-violet-500/10 text-violet-400 border border-violet-500/20 hover:bg-violet-500/20"
+                disabled={isBusy}
+                onClick={withBusy('stegoHide', () => actions.handleStegoHide())}
+                className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-violet-500/10 text-violet-400 border border-violet-500/20 hover:bg-violet-500/20 disabled:opacity-50"
               >
-                <Camera size={14} /> Stego Hide
+                <Camera size={14} /> {busyAction === 'stegoHide' ? 'Hiding...' : 'Stego Hide'}
               </button>
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  actions.handleStegoExtract();
-                }}
-                className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-violet-500/10 text-violet-400 border border-violet-500/20 hover:bg-violet-500/20"
+                disabled={isBusy}
+                onClick={withBusy('stegoExtract', () => actions.handleStegoExtract())}
+                className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-violet-500/10 text-violet-400 border border-violet-500/20 hover:bg-violet-500/20 disabled:opacity-50"
               >
-                <Search size={14} /> Stego Extract
+                <Search size={14} /> {busyAction === 'stegoExtract' ? 'Extracting...' : 'Stego Extract'}
               </button>
             </>
           )}
@@ -279,63 +277,53 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {/* Extract Archive */}
           {isArchive && (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.handleAutoExtract();
-              }}
-              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-lime-500/10 text-lime-400 border border-lime-500/20 hover:bg-lime-500/20"
+              disabled={isBusy}
+              onClick={withBusy('extract', () => actions.handleAutoExtract())}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-lime-500/10 text-lime-400 border border-lime-500/20 hover:bg-lime-500/20 disabled:opacity-50"
             >
-              <Archive size={14} /> Extract
+              <Archive size={14} /> {busyAction === 'extract' ? 'Extracting...' : 'Extract'}
             </button>
           )}
 
           {/* SQL Query */}
           {isDataFile && (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.handleSqlQuery();
-              }}
-              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-sky-500/10 text-sky-400 border border-sky-500/20 hover:bg-sky-500/20"
+              disabled={isBusy}
+              onClick={withBusy('sql', () => actions.handleSqlQuery())}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-sky-500/10 text-sky-400 border border-sky-500/20 hover:bg-sky-500/20 disabled:opacity-50"
             >
-              <FileText size={14} /> SQL Query
+              <FileText size={14} /> {busyAction === 'sql' ? 'Querying...' : 'SQL Query'}
             </button>
           )}
 
           {/* Cast to TV */}
           {isMediaFile && (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.handleDlnaCast();
-              }}
-              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20"
+              disabled={isBusy}
+              onClick={withBusy('dlna', () => actions.handleDlnaCast())}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20 disabled:opacity-50"
             >
-              <Play size={14} /> Cast to TV
+              <Play size={14} /> {busyAction === 'dlna' ? 'Discovering...' : 'Cast to TV'}
             </button>
           )}
 
           {/* Subtitles */}
           {isVideoFile && (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.handleGenerateSubtitles();
-              }}
-              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-pink-500/10 text-pink-400 border border-pink-500/20 hover:bg-pink-500/20"
+              disabled={isBusy}
+              onClick={withBusy('subtitles', () => actions.handleGenerateSubtitles())}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-pink-500/10 text-pink-400 border border-pink-500/20 hover:bg-pink-500/20 disabled:opacity-50"
             >
-              <Film size={14} /> Subtitles
+              <Film size={14} /> {busyAction === 'subtitles' ? 'Generating...' : 'Subtitles'}
             </button>
           )}
 
           {/* QoS Priority (only for active/paused downloads) */}
           {task.status !== "Done" && (
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              actions.handleSetPriority();
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20"
+            disabled={isBusy}
+            onClick={withBusy('priority', () => actions.handleSetPriority())}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 disabled:opacity-50"
           >
             <ArrowUp size={14} /> Priority
           </button>
@@ -343,13 +331,11 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
 
           {/* Mod Optimizer */}
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              actions.handleOptimizeMods();
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-yellow-500/10 text-yellow-500 border border-yellow-500/20 hover:bg-yellow-500/20"
+            disabled={isBusy}
+            onClick={withBusy('mods', () => actions.handleOptimizeMods())}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-yellow-500/10 text-yellow-500 border border-yellow-500/20 hover:bg-yellow-500/20 disabled:opacity-50"
           >
-            <Zap size={14} /> Mod Optimizer
+            <Zap size={14} /> {busyAction === 'mods' ? 'Optimizing...' : 'Mod Optimizer'}
           </button>
 
           {shareUrl && (
@@ -364,28 +350,21 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
       {(task.status === "Error" || task.status === "Paused") && (
         <div className="mt-4 pt-3 border-t border-slate-700/30 flex flex-wrap gap-2">
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              actions.handleRefreshUrl();
-            }}
-            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20"
+            disabled={isBusy}
+            onClick={withBusy('refresh', () => actions.handleRefreshUrl())}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20 disabled:opacity-50"
           >
             <RefreshCw size={14} /> Refresh Address
           </button>
 
           {task.status === "Error" && (
             <button
-              disabled={checkingWayback}
-              onClick={async (e) => {
-                e.stopPropagation();
-                setCheckingWayback(true);
-                await actions.handleWaybackCheck();
-                setCheckingWayback(false);
-              }}
+              disabled={isBusy}
+              onClick={withBusy('wayback', () => actions.handleWaybackCheck())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20 disabled:opacity-50"
             >
               <Globe size={14} />{" "}
-              {checkingWayback ? "Searching..." : "🕸 Try Wayback Machine"}
+              {busyAction === 'wayback' ? "Searching..." : "Try Wayback Machine"}
             </button>
           )}
         </div>

@@ -49,9 +49,17 @@ pub struct WebhookManager {
 
 impl WebhookManager {
     pub fn new() -> Self {
+        // SECURITY: Disable redirect following to prevent SSRF bypass.
+        // A malicious webhook target could return 3xx to a private/loopback
+        // address, bypassing the pre-request IP validation.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             configs: Arc::new(Mutex::new(Vec::new())),
-            client: reqwest::Client::new(),
+            client,
         }
     }
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { GrabbedFile } from '../types';
 import { motion } from 'framer-motion';
@@ -30,6 +30,22 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
     const [results, setResults] = useState<GrabbedFile[]>([]);
     const [selectedUrls, setSelectedUrls] = useState<Set<string>>(new Set());
     const [error, setError] = useState<string | null>(null);
+
+    /** Basic URL validation — must be http(s) */
+    const isValidUrl = /^https?:\/\/.+/.test(url.trim());
+
+    // Close on Escape key
+    useEffect(() => {
+        if (!isOpen) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                onClose();
+            }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [isOpen, onClose]);
 
     const handleCrawl = async () => {
         setIsCrawling(true);
@@ -83,7 +99,7 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" role="dialog" aria-modal="true">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
             <motion.div
                 className="w-full max-w-4xl h-[85vh] bg-slate-900 border border-slate-700/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
                 initial={{ scale: 0.95, opacity: 0 }}
@@ -116,7 +132,7 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
                                     value={url}
                                     onChange={e => setUrl(e.target.value)}
                                     placeholder="https://example.com/gallery"
-                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-10 pr-4 py-2.5 text-slate-200 focus:outline-none focus:border-red-500/50 transition-colors"
+                                    className={`w-full bg-slate-900 border rounded-lg pl-10 pr-4 py-2.5 text-slate-200 focus:outline-none transition-colors ${url.trim() && !isValidUrl ? 'border-red-500/50 focus:border-red-500' : 'border-slate-700 focus:border-red-500/50'}`}
                                 />
                             </div>
                             <div className="w-24">
@@ -154,8 +170,8 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
 
                             <button
                                 onClick={handleCrawl}
-                                disabled={isCrawling || !url}
-                                className={`ml-auto px-6 py-2 rounded-lg font-bold text-white transition-all shadow-lg ${isCrawling ? 'bg-slate-700 cursor-not-allowed' : 'bg-red-600 hover:bg-red-500 shadow-red-900/20'
+                                disabled={isCrawling || !url || !isValidUrl}
+                                className={`ml-auto px-6 py-2 rounded-lg font-bold text-white transition-all shadow-lg ${isCrawling || !isValidUrl ? 'bg-slate-700 cursor-not-allowed' : 'bg-red-600 hover:bg-red-500 shadow-red-900/20'
                                     }`}
                             >
                                 {isCrawling ? 'Crawling...' : 'Start Crawling'}
@@ -192,7 +208,7 @@ export const SpiderModal: React.FC<SpiderModalProps> = ({ isOpen, onClose, onDow
                             </div>
 
                             <div className="flex-1 overflow-y-auto p-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 align-content-start custom-scrollbar">
-                                {results.map((file, idx) => {
+                                {results.map((file) => {
                                     const isSelected = selectedUrls.has(file.url);
                                     return (
                                         <div

@@ -85,6 +85,20 @@ pub struct P2PNode {
 }
 
 impl P2PNode {
+    /// Create a disabled P2PNode stub - no WebSocket server is started.
+    /// Used as a fallback when all port attempts fail.
+    pub fn disabled() -> Self {
+        eprintln!("[P2P] Running in DISABLED mode — P2P features will not work.");
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            pairing_registry: Arc::new(Mutex::new(HashMap::new())),
+            my_files: Arc::new(Mutex::new(HashSet::new())),
+            reputation: Arc::new(Mutex::new(HashMap::new())),
+            ws_port: 0,
+            upload_limiter: Arc::new(crate::speed_limiter::SpeedLimiter::new()),
+        }
+    }
+
     pub async fn new(ws_port: u16) -> Result<Self, String> {
         // Load upload limit from settings
         let settings = crate::settings::load_settings();
@@ -113,14 +127,40 @@ impl P2PNode {
             }
         });
 
+        // Start session cleanup task — evict sessions older than 24 hours every 10 minutes
+        let cleanup_sessions = node.sessions.clone();
+        let cleanup_pairing = node.pairing_registry.clone();
+        tokio::spawn(async move {
+            const MAX_AGE_SECS: u64 = 24 * 60 * 60;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let mut sessions = cleanup_sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let expired: Vec<String> = sessions.iter()
+                    .filter(|(_, s)| now.saturating_sub(s.created_at) > MAX_AGE_SECS)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in &expired {
+                    sessions.remove(id);
+                }
+                if !expired.is_empty() {
+                    let mut pairing = cleanup_pairing.lock().unwrap_or_else(|e| e.into_inner());
+                    pairing.retain(|_, sid| !expired.contains(sid));
+                    println!("[P2P] Cleaned up {} expired sessions", expired.len());
+                }
+            }
+        });
+
         println!("[P2P] Node initialized on WebSocket port {}", ws_port);
         Ok(node)
     }
 
     async fn start_ws_server(&self) -> Result<(), String> {
-        // Bind to localhost only — P2P connections are established via explicit peer_addr
-        // from LAN discovery, not by exposing a server to the wider internet.
-        let addr = format!("127.0.0.1:{}", self.ws_port);
+        // Bind to all interfaces so LAN peers can connect
+        let addr = format!("0.0.0.0:{}", self.ws_port);
         let listener = TcpListener::bind(&addr).await
             .map_err(|e| format!("Failed to bind WebSocket server: {}", e))?;
         
@@ -214,12 +254,13 @@ impl P2PNode {
                         });
                     }
                     
-                    // Read file chunk (assuming downloads are in ./downloads/ directory)
-                    let base_dir = std::path::Path::new("./downloads");
+                    // Read file chunk from the user's configured download directory
+                    let settings = crate::settings::load_settings();
+                    let base_dir = std::path::PathBuf::from(&settings.download_dir);
                     let file_path = base_dir.join(&did);
 
                     // Canonicalize to ensure path stays within downloads directory
-                    let canon_base = dunce::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
+                    let canon_base = dunce::canonicalize(&base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
                     let canon_file = dunce::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
                     if !canon_file.starts_with(&canon_base) {
                         return Some(P2PMessage::RangeError {
@@ -259,9 +300,8 @@ impl P2PNode {
                                 }
 
                                 let mut buffer = vec![0u8; length_usize];
-                                match file.read(&mut buffer).await {
-                                    Ok(n) => {
-                                        buffer.truncate(n); // Handle partial reads (EOF)
+                                match file.read_exact(&mut buffer).await {
+                                    Ok(_) => {
                                         
                                         // Apply upload speed limit (G1)
                                         let _allowed = self.upload_limiter.acquire(buffer.len() as u64).await;

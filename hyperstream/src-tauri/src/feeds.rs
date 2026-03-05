@@ -32,28 +32,31 @@ pub struct FeedManager {
 
 // Async function to fetch feed
 pub async fn fetch_feed(url: &str) -> Result<Vec<FeedItem>, String> {
-    // SSRF protection: block private/loopback addresses
+    // SSRF protection: block private/loopback addresses (both IP literals and DNS-resolved)
+    crate::api_replay::validate_url_not_private(url)?;
+    
+    // Also resolve hostname to check DNS-resolved IPs (prevents DNS rebinding)
     if let Ok(parsed) = reqwest::Url::parse(url) {
         if let Some(host) = parsed.host_str() {
-            let lower = host.to_lowercase();
-            if lower == "localhost" || lower == "[::1]" {
-                return Err("Feed URLs targeting localhost are not allowed".to_string());
-            }
-            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-                match ip {
-                    std::net::IpAddr::V4(v4) => {
-                        if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() {
-                            return Err(format!("Feed URL targeting private IP {} is not allowed", v4));
+            let port = parsed.port_or_known_default().unwrap_or(443);
+            let addr_str = format!("{}:{}", host, port);
+            if let Ok(addrs) = tokio::net::lookup_host(addr_str).await {
+                for addr in addrs {
+                    let ip = addr.ip();
+                    match ip {
+                        std::net::IpAddr::V4(v4) => {
+                            if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.octets()[0] == 0 {
+                                return Err(format!("Feed URL resolves to private IP {}", v4));
+                            }
                         }
-                    }
-                    std::net::IpAddr::V6(v6) => {
-                        if v6.is_loopback() || v6.is_unspecified() {
-                            return Err(format!("Feed URL targeting private IPv6 {} is not allowed", v6));
-                        }
-                        // Check IPv4-mapped addresses like ::ffff:127.0.0.1
-                        if let Some(v4) = v6.to_ipv4_mapped() {
-                            if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
-                                return Err(format!("Feed URL targeting private mapped IP {} is not allowed", v4));
+                        std::net::IpAddr::V6(v6) => {
+                            if v6.is_loopback() || v6.is_unspecified() {
+                                return Err(format!("Feed URL resolves to private IPv6 {}", v6));
+                            }
+                            if let Some(v4) = v6.to_ipv4_mapped() {
+                                if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
+                                    return Err(format!("Feed URL resolves to private mapped IP {}", v4));
+                                }
                             }
                         }
                     }
@@ -66,22 +69,24 @@ pub async fn fetch_feed(url: &str) -> Result<Vec<FeedItem>, String> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())?;
-    let initial_response = client.get(url).send().await.map_err(|e| e.to_string())?;
 
-    // If the server returns a redirect, validate the target before following it
-    let response = if initial_response.status().is_redirection() {
-        let location = initial_response.headers()
+    // Follow redirects manually with SSRF re-validation on each hop (up to 5 hops).
+    let mut current_url = url.to_string();
+    let mut response = client.get(&current_url).send().await.map_err(|e| e.to_string())?;
+
+    for _hop in 0..5 {
+        if !response.status().is_redirection() {
+            break;
+        }
+        let location = response.headers()
             .get("location")
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| "Redirect with no Location header".to_string())?
             .to_string();
 
-        let redirect_url = if location.starts_with("http") {
-            location
-        } else {
-            // Relative redirect — resolve against original URL
-            format!("{}{}", url.trim_end_matches('/'), location)
-        };
+        // Use proper URL resolution for both absolute and relative redirects
+        let base = reqwest::Url::parse(&current_url).map_err(|e| e.to_string())?;
+        let redirect_url = base.join(&location).map_err(|e| e.to_string())?.to_string();
 
         // Re-validate the redirect target against private IPs
         if let Ok(parsed) = reqwest::Url::parse(&redirect_url) {
@@ -112,11 +117,14 @@ pub async fn fetch_feed(url: &str) -> Result<Vec<FeedItem>, String> {
             }
         }
 
-        // Follow the validated redirect manually
-        client.get(&redirect_url).send().await.map_err(|e| e.to_string())?
-    } else {
-        initial_response
-    };
+        current_url = redirect_url;
+        response = client.get(&current_url).send().await.map_err(|e| e.to_string())?;
+    }
+
+    // If still a redirect after 5 hops, bail out
+    if response.status().is_redirection() {
+        return Err("Too many redirects (exceeded 5 hops)".to_string());
+    }
 
     // Guard against oversized responses (max 10 MB for a feed)
     if let Some(cl) = response.content_length() {
@@ -146,7 +154,7 @@ pub async fn fetch_feed(url: &str) -> Result<Vec<FeedItem>, String> {
 
 impl FeedManager {
     pub fn new() -> Self {
-        let mut manager = Self {
+        let manager = Self {
             feeds: Arc::new(Mutex::new(Vec::new())),
         };
         manager.load();
@@ -160,7 +168,7 @@ impl FeedManager {
             .join("feeds.json")
     }
 
-    pub fn load(&mut self) {
+    pub fn load(&self) {
         let path = Self::get_store_path();
         if let Ok(data) = std::fs::read_to_string(&path) {
             if let Ok(feeds) = serde_json::from_str(&data) {
@@ -193,6 +201,9 @@ impl FeedManager {
         }
         {
             let mut feeds = self.feeds.lock().unwrap_or_else(|e| e.into_inner());
+            if feeds.iter().any(|f| f.id == config.id) {
+                return Err(format!("Feed with ID '{}' already exists", config.id));
+            }
             feeds.push(config);
         }
         self.save();

@@ -15,7 +15,11 @@ interface SearchResult {
     engine: string;
 }
 
-export const SearchTab: React.FC = () => {
+interface SearchTabProps {
+    onStartDownload?: (url: string, filename: string) => void;
+}
+
+export const SearchTab: React.FC<SearchTabProps> = ({ onStartDownload }) => {
     const toast = useToast();
     const searchNextId = useRef(0);
     const [query, setQuery] = useState('');
@@ -49,13 +53,18 @@ export const SearchTab: React.FC = () => {
             const urlParts = url.split('/').pop()?.split('?')[0] || '';
             const urlExt = urlParts.match(/\.[a-zA-Z0-9]+$/)?.[0] || '';
             const filename = title.replace(/[^a-zA-Z0-9.-]/g, "_") + urlExt;
-            const settings = await invoke<AppSettings>('get_settings');
-            const downloadId = `search_${Date.now()}_${searchNextId.current++}`;
-            await invoke('start_download', {
-                id: downloadId,
-                url,
-                path: `${settings.download_dir}/${filename}`,
-            });
+            if (onStartDownload) {
+                onStartDownload(url, filename);
+            } else {
+                // Fallback: direct invoke (download won't appear in task list)
+                const settings = await invoke<AppSettings>('get_settings');
+                const downloadId = `search_${Date.now()}_${searchNextId.current++}`;
+                await invoke('start_download', {
+                    id: downloadId,
+                    url,
+                    path: `${settings.download_dir}/${filename}`,
+                });
+            }
         } catch (e) {
             logError("Failed to start download", e);
             toast.error("Failed to start download");

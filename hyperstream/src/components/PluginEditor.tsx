@@ -33,6 +33,28 @@ const PluginEditor: React.FC = () => {
     // (Assuming we have event listeners from tauri, but skipping for MVP simplicity)
   }, []);
 
+  // Stable refs for Ctrl+S handler to avoid re-registering on every keystroke
+  const codeRef = React.useRef(code);
+  codeRef.current = code;
+  const isDirtyRef = React.useRef(isDirty);
+  isDirtyRef.current = isDirty;
+  const selectedPluginRef = React.useRef(selectedPlugin);
+  selectedPluginRef.current = selectedPlugin;
+
+  // Ctrl+S keyboard shortcut to save
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (selectedPluginRef.current && isDirtyRef.current) {
+          handleSave();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const loadPlugins = async () => {
     try {
       const list = await invoke<PluginMetadata[]>("get_all_plugins");
@@ -70,16 +92,16 @@ const PluginEditor: React.FC = () => {
   };
 
   const handleSave = async () => {
-    if (!selectedPlugin) return;
+    if (!selectedPluginRef.current) return;
     try {
       await invoke("save_plugin_source", {
-        filename: selectedPlugin,
-        content: code,
+        filename: selectedPluginRef.current,
+        content: codeRef.current,
       });
       setIsDirty(false);
       // Better UI than alert
       setOutput((prev) => [
-        { id: ++outputIdRef.current, text: `[${new Date().toLocaleTimeString()}] Saved ${selectedPlugin}.lua` },
+        { id: ++outputIdRef.current, text: `[${new Date().toLocaleTimeString()}] Saved ${selectedPluginRef.current}.lua` },
         ...prev,
       ].slice(0, MAX_OUTPUT_LINES));
     } catch (e) {
@@ -232,6 +254,22 @@ const PluginEditor: React.FC = () => {
               onChange={(e) => {
                 setCode(e.target.value);
                 setIsDirty(true);
+              }}
+              onKeyDown={(e) => {
+                // Tab key inserts spaces instead of moving focus
+                if (e.key === 'Tab') {
+                  e.preventDefault();
+                  const target = e.currentTarget;
+                  const start = target.selectionStart;
+                  const end = target.selectionEnd;
+                  const indent = '  ';
+                  setCode(code.substring(0, start) + indent + code.substring(end));
+                  setIsDirty(true);
+                  // Restore cursor position after React re-renders
+                  requestAnimationFrame(() => {
+                    target.selectionStart = target.selectionEnd = start + indent.length;
+                  });
+                }
               }}
               className="w-full h-full bg-[#1E1E1E] text-slate-300 font-mono text-sm p-4 resize-none focus:outline-none custom-scrollbar leading-relaxed"
               spellCheck="false"

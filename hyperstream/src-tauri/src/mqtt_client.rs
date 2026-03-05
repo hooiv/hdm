@@ -61,8 +61,10 @@ pub fn publish_event(event_type: &str, download_id: &str, filename: &str, status
             eprintln!("⚠️  MQTT: Connecting without TLS to {}:{}. Event data will be sent in plaintext.", host, port);
         }
 
-        let mut mqttoptions = MqttOptions::new("hyperstream_client", &host, port);
+        let client_id = format!("hyperstream_{}", std::process::id());
+        let mut mqttoptions = MqttOptions::new(client_id, &host, port);
         mqttoptions.set_keep_alive(Duration::from_secs(5));
+        // Note: NetworkOptions default conn_timeout is already 5 seconds
 
         // Enable TLS for secure connections
         // Note: rumqttc TLS requires the "use-native-tls" feature to be enabled.
@@ -90,9 +92,21 @@ pub fn publish_event(event_type: &str, download_id: &str, filename: &str, status
                 }
             }
             
-            // Allow a short time for the message to be sent before the thread exits
-            // rumqttc requires the connection to be iterated to make progress
-            let _ = connection.iter().next();
+            // Drive the event loop long enough for CONNECT, CONNACK, and PUBLISH
+            // to be flushed. rumqttc requires iterating the connection to make progress.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            for notification in connection.iter() {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                match notification {
+                    Ok(_) => {
+                        // After a few successful events (CONNACK + PUBACK/send), 
+                        // we can safely exit
+                    }
+                    Err(_) => break,
+                }
+            }
         }
     });
 }

@@ -47,14 +47,23 @@ impl AsyncWrite for SniFragmentedStream {
         // regardless of exact version, to break the SNI parser.
         
         if !self.fragmented && buf.len() > 5 && buf[0] == 0x16 {
-            // Heuristic: Fragment after the 5-byte Record Header
-            // The SNI extension usually comes later in the packet.
-            // By sending [Header] ... [Rest], the DPI box might fail to reassemble 
-            // the state or treat it as "Partial/Invalid" and pass it.
-            
-            // Note: Some advanced evasion techniques split the SNI host string itself: "you" + "tube.com".
-            // Here we do a simple Header split (5 bytes).
-            let fragment_len = 5;
+            // Fragment the TLS ClientHello so the SNI extension is split across
+            // TCP segments. DPI systems that don't reassemble TCP will fail to
+            // extract the server name.
+            //
+            // In a typical ClientHello, the SNI extension starts around byte
+            // 80–120 (after Record Header + Handshake Header + Random +
+            // Session ID + Cipher Suites + Compression). Splitting at ~40–50%
+            // of the buffer maximises the chance of bisecting the hostname.
+            //
+            // Clamped to [2, buf.len()/2] so we always leave something for
+            // the second segment.
+            let fragment_len = if buf.len() > 200 {
+                // Large ClientHello: aim for byte ~100 to split SNI
+                100.min(buf.len() / 2)
+            } else {
+                (buf.len() / 3).clamp(2, buf.len() / 2)
+            };
             
             // Delegate to inner stream but only write 5 bytes
             match Pin::new(&mut self.stream).poll_write(cx, &buf[0..fragment_len]) {

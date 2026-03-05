@@ -2,6 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::Path;
 use std::collections::VecDeque;
 
@@ -65,6 +66,9 @@ pub struct DiskWriter {
     config: DiskWriterConfig,
     write_count: u64,
     bytes_written: u64,
+    /// Set to true when a persistent I/O failure occurs (data was dropped).
+    /// The session should periodically check this to abort gracefully.
+    io_error_flag: Arc<AtomicBool>,
 }
 
 impl DiskWriter {
@@ -83,7 +87,13 @@ impl DiskWriter {
             config,
             write_count: 0,
             bytes_written: 0,
+            io_error_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Returns a clone of the I/O error flag. Check with `flag.load(Ordering::Relaxed)`.
+    pub fn io_error_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.io_error_flag)
     }
 
     /// Main write loop - runs in a dedicated thread
@@ -102,6 +112,8 @@ impl DiskWriter {
                         while pending_buffer.len() >= self.config.max_pending_writes {
                             if let Some(dropped) = pending_buffer.pop_front() {
                                 eprintln!("[DiskWriter] CRITICAL: Dropping write at offset {} ({} bytes) due to persistent I/O failure.", dropped.offset, dropped.data.len());
+                                // Signal persistent I/O failure so the session can abort
+                                self.io_error_flag.store(true, Ordering::Release);
                             }
                         }
                     }
@@ -243,16 +255,21 @@ impl DiskWriter {
     }
 }
 
-/// Pre-allocate a file to a specific size using sparse file mode on Windows
+/// Pre-allocate a file to a specific size using sparse file mode on Windows.
+/// If the file already exists with content, it is opened WITHOUT truncation
+/// to avoid destroying previously downloaded data (safety net for resume).
 #[cfg(windows)]
 pub fn preallocate_file(path: &Path, size: u64) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
-    
+
+    // Safety: only truncate when creating a genuinely new file.
+    let already_has_data = path.exists() && path.metadata().map(|m| m.len() > 0).unwrap_or(false);
+
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .truncate(true)
+        .truncate(!already_has_data) // preserve existing bytes
         .custom_flags(0x00200000) // FILE_FLAG_SPARSE_FILE hint
         .open(path)?;
 
@@ -289,11 +306,13 @@ pub fn preallocate_file(path: &Path, size: u64) -> std::io::Result<File> {
 /// Pre-allocate a file on non-Windows systems
 #[cfg(not(windows))]
 pub fn preallocate_file(path: &Path, size: u64) -> std::io::Result<File> {
+    let already_has_data = path.exists() && path.metadata().map(|m| m.len() > 0).unwrap_or(false);
+
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .truncate(true)
+        .truncate(!already_has_data)
         .open(path)?;
 
     file.set_len(size)?;

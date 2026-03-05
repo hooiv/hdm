@@ -67,10 +67,25 @@ impl Default for RetryState {
 }
 
 impl RetryState {
+    /// Create a new `RetryState` whose initial backoff matches the given config.
+    pub fn from_config(config: &RetryConfig) -> Self {
+        Self {
+            immediate_attempts: 0,
+            delayed_attempts: 0,
+            current_delay: config.initial_delay,
+            last_error: None,
+        }
+    }
+
     pub fn reset(&mut self) {
+        self.reset_with_delay(Duration::from_secs(1));
+    }
+
+    /// Reset retry counters, honouring a specific initial delay.
+    pub fn reset_with_delay(&mut self, initial_delay: Duration) {
         self.immediate_attempts = 0;
         self.delayed_attempts = 0;
-        self.current_delay = Duration::from_secs(1);
+        self.current_delay = initial_delay;
         self.last_error = None;
     }
 }
@@ -208,15 +223,23 @@ pub fn is_error_content_type(content_type: Option<&str>, expected_type: Option<&
 
 /// Detect captive portal by checking first bytes
 pub fn is_captive_portal(first_bytes: &[u8]) -> bool {
-    // Check for HTML doctype or html tag
-    let start = String::from_utf8_lossy(&first_bytes[..first_bytes.len().min(100)]);
-    let lower = start.to_lowercase();
+    // Only consider it a captive portal if the response STARTS with HTML markers
+    // (prevents false positives on binary files that happen to contain these strings)
+    let start = String::from_utf8_lossy(&first_bytes[..first_bytes.len().min(256)]);
+    let trimmed = start.trim_start().to_lowercase();
     
-    lower.contains("<!doctype html") || 
-    lower.contains("<html") ||
-    lower.contains("login") ||
-    lower.contains("captive") ||
-    lower.contains("redirect")
+    // Must start with an HTML indicator
+    let is_html = trimmed.starts_with("<!doctype html") || trimmed.starts_with("<html");
+    if !is_html {
+        return false;
+    }
+    
+    // If it's HTML, check for portal-specific keywords in the content
+    trimmed.contains("login") ||
+    trimmed.contains("captive") ||
+    trimmed.contains("redirect") ||
+    trimmed.contains("sign in") ||
+    trimmed.contains("authentication")
 }
 
 /// Parse Retry-After header to get delay

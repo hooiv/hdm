@@ -95,18 +95,18 @@ impl LanApiServer {
             .and(warp::ws())
             .and(warp::query::<std::collections::HashMap<String, String>>())
             .and(warp::any().map(move || tx.clone()))
-            .map(|ws: warp::ws::Ws, params: std::collections::HashMap<String, String>, tx: Arc<tokio::sync::broadcast::Sender<String>>| {
+            .and_then(|ws: warp::ws::Ws, params: std::collections::HashMap<String, String>, tx: Arc<tokio::sync::broadcast::Sender<String>>| async move {
                 let token_valid = params.get("token").map_or(false, |t| {
                     PAIRED_TOKENS.read().unwrap_or_else(|e| e.into_inner()).contains(t.as_str())
                 });
-                ws.on_upgrade(move |socket| async move {
-                    if !token_valid {
-                        // Close unauthorized connections immediately
-                        drop(socket);
-                    } else {
+                if !token_valid {
+                    // Reject BEFORE the 101 upgrade — no WebSocket is established
+                    Err(warp::reject::reject())
+                } else {
+                    Ok(ws.on_upgrade(move |socket| async move {
                         handle_sync_socket(socket, tx).await;
-                    }
-                })
+                    }))
+                }
             });
 
         // Get downloads list (requires auth)
@@ -128,6 +128,25 @@ impl LanApiServer {
             .and(warp::body::content_length_limit(64 * 1024))
             .and(warp::body::json())
             .map(|_, req: DownloadRequest| {
+                // Validate URL scheme — only allow http/https
+                match url::Url::parse(&req.url) {
+                    Ok(parsed) => {
+                        if !matches!(parsed.scheme(), "http" | "https") {
+                            return warp::reply::json(&ApiResponse::<&str> {
+                                success: false,
+                                data: None,
+                                error: Some(format!("Only http/https URLs are allowed, got: {}", parsed.scheme())),
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        return warp::reply::json(&ApiResponse::<&str> {
+                            success: false,
+                            data: None,
+                            error: Some("Invalid URL".to_string()),
+                        });
+                    }
+                }
                 println!("API: New download request: {}", req.url);
                 // Actually enqueue the download via broadcast
                 broadcast_download(req.url.clone());
@@ -208,16 +227,25 @@ async fn handle_sync_socket(ws: warp::ws::WebSocket, tx: Arc<tokio::sync::broadc
     let (mut user_ws_tx, mut user_ws_rx) = ws.split();
     let mut rx = tx.subscribe();
 
-    tokio::spawn(async move {
+    // Use select! so the sender task is cancelled when the receiver side closes
+    let send_task = async move {
         while let Ok(msg) = rx.recv().await {
-            if let Err(_) = user_ws_tx.send(warp::ws::Message::text(msg)).await {
+            if user_ws_tx.send(warp::ws::Message::text(msg)).await.is_err() {
                 break;
             }
         }
-    });
+    };
 
-    while let Some(_result) = user_ws_rx.next().await {
-        // Just keep connection open
+    let recv_task = async move {
+        while let Some(_result) = user_ws_rx.next().await {
+            // Just keep connection open
+        }
+    };
+
+    // When either side completes, the other is dropped/cancelled
+    tokio::select! {
+        _ = send_task => {},
+        _ = recv_task => {},
     }
 }
 
@@ -257,10 +285,10 @@ async fn handle_pair(
     }
 
     // Generate an auth token for this device
+    const MAX_PAIRED: usize = 20;
     let auth_token = uuid::Uuid::new_v4().to_string();
     if let Ok(mut tokens) = PAIRED_TOKENS.write() {
         // Cap the number of paired devices to prevent unbounded growth
-        const MAX_PAIRED: usize = 20;
         if tokens.len() >= MAX_PAIRED {
             return Ok(warp::reply::json(&ApiResponse::<serde_json::Value> {
                 success: false,
@@ -277,7 +305,13 @@ async fn handle_pair(
         paired_at: chrono::Local::now().to_rfc3339(),
     };
 
-    devices.write().await.push(device.clone());
+    let mut devs = devices.write().await;
+    // Keep paired_devices Vec in sync with PAIRED_TOKENS cap (MAX_PAIRED defined above)
+    if devs.len() >= MAX_PAIRED {
+        devs.remove(0); // evict oldest
+    }
+    devs.push(device.clone());
+    drop(devs);
 
     Ok(warp::reply::json(&ApiResponse {
         success: true,

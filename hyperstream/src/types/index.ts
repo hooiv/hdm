@@ -47,6 +47,7 @@ export interface SavedDownload {
 /** Safely coerce a backend status string to a DownloadTask status union */
 export function toTaskStatus(s: string): DownloadTask['status'] {
     if (s === 'Downloading' || s === 'Paused' || s === 'Error' || s === 'Done') return s;
+    if (s === 'Complete' || s === 'Completed') return 'Done'; // backend persists "Complete"/"Completed", UI uses "Done"
     return 'Paused'; // safe default for unknown values
 }
 

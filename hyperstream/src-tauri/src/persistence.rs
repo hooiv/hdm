@@ -75,34 +75,26 @@ pub fn load_downloads() -> Result<Vec<SavedDownload>, String> {
 /// Add or update a download in the saved list
 pub fn upsert_download(download: SavedDownload) -> Result<(), String> {
     let _lock = PERSISTENCE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut downloads = match load_downloads() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("WARNING: Could not load downloads for upsert, starting fresh: {}", e);
-            Vec::new()
-        }
-    };
-    
+    let mut downloads = load_downloads().map_err(|e| {
+        format!("Cannot upsert download: failed to load existing data: {}", e)
+    })?;
+
     // Find and update, or insert new
     if let Some(existing) = downloads.iter_mut().find(|d| d.id == download.id) {
         *existing = download;
     } else {
         downloads.push(download);
     }
-    
+
     save_downloads(&downloads)
 }
 
 /// Remove a download from the saved list
 pub fn remove_download(id: &str) -> Result<(), String> {
     let _lock = PERSISTENCE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut downloads = match load_downloads() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("WARNING: Could not load downloads for remove, starting fresh: {}", e);
-            Vec::new()
-        }
-    };
+    let mut downloads = load_downloads().map_err(|e| {
+        format!("Cannot remove download: failed to load existing data: {}", e)
+    })?;
     downloads.retain(|d| d.id != id);
     save_downloads(&downloads)
 }

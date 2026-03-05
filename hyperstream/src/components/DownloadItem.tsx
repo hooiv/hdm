@@ -82,7 +82,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
 
     // Derived values
     const remainingBytes = task.total - task.downloaded;
-    const eta = task.status === 'Downloading' ? formatETA(remainingBytes, task.speed) : '--:--';
+    const eta = task.status === 'Downloading' ? formatETA(remainingBytes, task.speed) : task.status === 'Done' ? 'Complete' : task.status === 'Paused' ? 'Paused' : '';
 
     // Memoize category calculation
     const category = React.useMemo(() => getFileCategory(safeFilename), [safeFilename]);
@@ -160,7 +160,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
 
                     <div className="flex justify-between mt-1 text-[10px] text-slate-500 font-medium tracking-wide">
                         <span>{task.total > 0 ? <>{formatBytes(task.downloaded)} <span className="text-slate-600">/</span> {formatBytes(task.total)}</> : <>{formatBytes(task.downloaded)} <span className="text-slate-600">(unknown size)</span></>}</span>
-                        <span className="text-cyan-600/70">ETA: {eta}</span>
+                        {eta && <span className={task.status === 'Done' ? 'text-emerald-500/80' : 'text-cyan-600/70'}>{task.status === 'Done' ? '' : 'ETA: '}{eta}</span>}
                     </div>
                 </div>
 

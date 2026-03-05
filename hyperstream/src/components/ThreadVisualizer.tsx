@@ -46,7 +46,7 @@ export const ThreadVisualizer = React.memo<ThreadVisualizerProps>(({ segments, t
                         const leftPercent = (seg.start_byte / effectiveTotal) * 100;
                         const segRange = seg.end_byte - seg.start_byte;
                         const progressPercent = segRange > 0
-                            ? Math.min(((Math.min(seg.downloaded_cursor, seg.end_byte) - seg.start_byte) / segRange) * 100, 100)
+                            ? Math.max(0, Math.min(((Math.min(seg.downloaded_cursor, seg.end_byte) - seg.start_byte) / segRange) * 100, 100))
                             : 0;
 
                         // Cyberpunk Color Palette

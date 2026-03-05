@@ -7,7 +7,7 @@ export function debug(...args: any[]) {
 }
 
 export function info(...args: any[]) {
-  console.log(...args);
+  console.info(...args);
 }
 
 export function warn(...args: any[]) {

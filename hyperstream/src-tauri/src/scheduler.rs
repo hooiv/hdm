@@ -23,14 +23,48 @@ pub struct ScheduledDownload {
     pub status: String, // "pending", "started", "completed", "cancelled"
 }
 
+fn get_store_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        .join("hyperstream")
+        .join("scheduled.json")
+}
+
+fn save_to_disk(scheduled: &HashMap<String, ScheduledDownload>) {
+    let pending: Vec<_> = scheduled.values().filter(|d| d.status == "pending").collect();
+    if let Ok(data) = serde_json::to_string_pretty(&pending) {
+        let path = get_store_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, data);
+    }
+}
+
+fn load_from_disk() {
+    let path = get_store_path();
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(items) = serde_json::from_str::<Vec<ScheduledDownload>>(&data) {
+            let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
+            for item in items {
+                if item.status == "pending" {
+                    scheduled.insert(item.id.clone(), item);
+                }
+            }
+        }
+    }
+}
+
 pub fn add_scheduled_download(download: ScheduledDownload) {
     let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
     scheduled.insert(download.id.clone(), download);
+    save_to_disk(&scheduled);
 }
 
 pub fn remove_scheduled_download(id: &str) {
     let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
     scheduled.remove(id);
+    save_to_disk(&scheduled);
 }
 
 pub fn force_start_download(id: &str) -> Option<ScheduledDownload> {
@@ -72,13 +106,20 @@ pub fn check_scheduled_downloads<R: tauri::Runtime>(app_handle: &tauri::AppHandl
         }
     }
     
-    // Emit events for downloads that should start
+    // Emit events for downloads that should start, then remove them from the map
     for download in to_start {
         let _ = app_handle.emit("scheduled_download_start", serde_json::json!({
             "id": download.id,
             "url": download.url,
             "filename": download.filename
         }));
+    }
+
+    // Purge non-pending entries to prevent unbounded accumulation of dead entries
+    {
+        let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
+        scheduled.retain(|_, d| d.status == "pending");
+        save_to_disk(&scheduled);
     }
 }
 
@@ -89,16 +130,31 @@ pub fn start_scheduler<R: tauri::Runtime + 'static>(app_handle: tauri::AppHandle
         return;
     }
     SCHEDULER_STOP.store(false, Ordering::SeqCst);
+
+    // Restore scheduled downloads from disk before entering the loop
+    load_from_disk();
+
     std::thread::spawn(move || {
+        // Guard ensures SCHEDULER_RUNNING is reset even if the thread panics
+        struct SchedulerGuard;
+        impl Drop for SchedulerGuard {
+            fn drop(&mut self) {
+                SCHEDULER_RUNNING.store(false, Ordering::SeqCst);
+            }
+        }
+        let _guard = SchedulerGuard;
+
+        // Check immediately on startup, then every 30 seconds
+        check_scheduled_downloads(&app_handle);
+
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(30)); // Check every 30 seconds
+            std::thread::sleep(std::time::Duration::from_secs(30));
             if SCHEDULER_STOP.load(Ordering::SeqCst) {
                 println!("Scheduler thread stopping.");
                 break;
             }
             check_scheduled_downloads(&app_handle);
         }
-        SCHEDULER_RUNNING.store(false, Ordering::SeqCst);
     });
 }
 

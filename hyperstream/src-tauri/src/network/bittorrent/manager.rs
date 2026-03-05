@@ -121,7 +121,17 @@ impl TorrentManager {
                      
                      let state_str = format!("{:?}", stats.state);
                      
-                     (p, state_str, 0, 0, 0)
+                     // Extract live speed and peer data from stats
+                     let (dl_speed, ul_speed, live_peers) = if let Some(live) = &stats.live {
+                         let dl = (live.download_speed.mbps * 1_000_000.0 / 8.0) as u64; // Mbps → bytes/s
+                         let ul = (live.upload_speed.mbps * 1_000_000.0 / 8.0) as u64;
+                         let peers = live.snapshot.peer_stats.live;
+                         (dl, ul, peers)
+                     } else {
+                         (0, 0, 0)
+                     };
+                     
+                     (p, state_str, dl_speed, ul_speed, live_peers)
                 } else {
                      (0.0, "Unknown".to_string(), 0, 0, 0)
                 };

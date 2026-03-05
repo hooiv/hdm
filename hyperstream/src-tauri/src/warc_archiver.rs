@@ -24,6 +24,9 @@ pub async fn download_as_warc(url: String, save_path: PathBuf) -> Result<String,
         return Err("Save path must be within the download directory".to_string());
     }
 
+    // SSRF protection: block requests to private/loopback addresses
+    crate::api_replay::validate_url_not_private(&url)?;
+
     // Capture request time BEFORE making the request (WARC spec: date of the request)
     let request_date = Utc::now();
 

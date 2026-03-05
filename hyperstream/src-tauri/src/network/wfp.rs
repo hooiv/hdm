@@ -21,7 +21,7 @@ pub fn set_app_firewall_rule(exe_path: &str, blocked: bool) -> Result<String, St
     
     // 1. Delete existing rule if it exists to avoid duplicates
     let _ = Command::new("netsh")
-        .args(&["advfirewall", "firewall", "delete", "rule", &format!("name=\"{}\"", rule_name)])
+        .args(&["advfirewall", "firewall", "delete", "rule", &format!("name={}", rule_name)])
         .output();
 
     if blocked {

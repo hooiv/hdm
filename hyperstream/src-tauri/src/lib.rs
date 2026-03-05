@@ -74,7 +74,6 @@ mod virtual_drive;
 mod geofence;
 
 use persistence::SavedDownload;
-use settings::Settings;
 
 /// Resolve a file path that may be relative (just a filename) to an absolute path.
 /// Tries: 1) already absolute 2) download_dir/path 3) desktop/path
@@ -110,7 +109,9 @@ async fn add_magnet_link(
     state: State<'_, AppState>
 ) -> Result<usize, String> {
     println!("Adding magnet link: {}", magnet);
-    state.torrent_manager.add_magnet(&magnet).await.map_err(|e| e.to_string())
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+    tm.add_magnet(&magnet).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -118,19 +119,18 @@ async fn play_torrent(
     id: usize,
     state: State<'_, AppState>
 ) -> Result<String, String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
     // 1. Get file ID (largest file)
-    let fid = state.torrent_manager.get_largest_file_id(id)
+    let fid = tm.get_largest_file_id(id)
         .ok_or_else(|| "Could not determine main file ID".to_string())?;
-    
+
     // 2. Register in FileMap (ID -> Torrent Source)
     {
         let mut map = state.p2p_file_map.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(id.to_string(), StreamingSource::Torrent { torrent_id: id, file_id: fid });
-        // NOTE: If we want to support file system fallback (e.g. from get_main_file_path),
-        // we could check if file exists on disk.
-        // But for "Streaming Logic" task, we prefer the stream.
     }
-    
+
     // 3. Return URL
     Ok(format!("http://localhost:14733/p2p/{}", id))
 }
@@ -139,7 +139,10 @@ async fn play_torrent(
 async fn get_torrents(
     state: State<'_, AppState>
 ) -> Result<Vec<network::bittorrent::manager::TorrentStatus>, String> {
-    Ok(state.torrent_manager.get_torrents())
+    match state.torrent_manager.as_ref() {
+        Some(tm) => Ok(tm.get_torrents()),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Validate that an export/import file path is within safe user directories
@@ -240,10 +243,10 @@ async fn start_download(
     id: String,
     url: String,
     path: String,
-    _force: Option<bool>,
+    force: Option<bool>,
     custom_headers: Option<std::collections::HashMap<String, String>>
 ) -> Result<(), String> {
-    start_download_impl(&app, &state, id, url, path, None, custom_headers).await
+    start_download_impl(&app, &state, id, url, path, None, custom_headers, force.unwrap_or(false)).await
 }
 
 
@@ -286,10 +289,14 @@ async fn pause_download(
     }
     
     // Fallback: update persistence if session wasn't found (already stopped)
-    let mut saved_downloads = persistence::load_downloads().unwrap_or_default();
-    if let Some(d) = saved_downloads.iter_mut().find(|d| d.id == id) {
-        d.status = "Paused".to_string();
-        persistence::save_downloads(&saved_downloads).map_err(|e| e.to_string())?;
+    // Use upsert_download (which acquires PERSISTENCE_LOCK) to avoid data races
+    // with the periodic save loop running on active downloads.
+    if let Ok(downloads) = persistence::load_downloads() {
+        if let Some(d) = downloads.into_iter().find(|d| d.id == id) {
+            let mut updated = d;
+            updated.status = "Paused".to_string();
+            let _ = persistence::upsert_download(updated);
+        }
     }
     Ok(())
 }
@@ -308,6 +315,13 @@ fn remove_download_entry(id: String) -> Result<(), String> {
 fn get_settings() -> serde_json::Value {
     let s = settings::load_settings();
     serde_json::to_value(s).unwrap_or(serde_json::json!({}))
+}
+
+#[tauri::command]
+fn get_auth_token() -> Result<String, String> {
+    let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    let token_path = home.join(".hyperstream").join("auth_token");
+    std::fs::read_to_string(&token_path).map_err(|e| format!("Failed to read auth token: {}", e))
 }
 
 #[tauri::command]
@@ -436,14 +450,6 @@ fn schedule_download(id: String, url: String, filename: String, scheduled_time: 
     Ok(())
 }
 
-
-
-#[tauri::command]
-fn cancel_scheduled_download(id: String) -> Result<(), String> {
-    scheduler::remove_scheduled_download(&id);
-    Ok(())
-}
-
 // ============ Spider / Site Grabber Commands ============
 
 #[tauri::command]
@@ -458,6 +464,40 @@ async fn crawl_website(
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0")
         .timeout(std::time::Duration::from_secs(15))
+        // Use a custom redirect policy that re-validates each hop against SSRF rules.
+        // Without this, an attacker could host a public page that 302-redirects to
+        // http://169.254.169.254/ or http://127.0.0.1:8080/ and the spider would follow it.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.stop()
+            } else {
+                // Clone host to avoid borrowing `attempt` across the move
+                let host = attempt.url().host_str().map(|h| h.to_string());
+                if let Some(host) = host {
+                    let h = host.to_lowercase();
+                    if h == "localhost" || h.ends_with(".local") || h.ends_with(".internal") {
+                        attempt.error(anyhow::anyhow!("Redirect to private host blocked: {}", host))
+                    } else if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                        let is_private = match ip {
+                            std::net::IpAddr::V4(v4) => {
+                                v4.is_loopback() || v4.is_private() || v4.is_link_local()
+                                    || v4.is_broadcast() || v4.is_unspecified() || v4.octets()[0] == 0
+                            }
+                            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+                        };
+                        if is_private {
+                            attempt.error(anyhow::anyhow!("Redirect to private IP blocked: {}", ip))
+                        } else {
+                            attempt.follow()
+                        }
+                    } else {
+                        attempt.follow()
+                    }
+                } else {
+                    attempt.follow()
+                }
+            }
+        }))
         .build()
         .map_err(|e| e.to_string())?;
     
@@ -683,7 +723,7 @@ async fn mux_video_audio(video_path: String, audio_path: String, output_path: St
     media::muxer::merge_streams(
         std::path::Path::new(&video_path),
         std::path::Path::new(&audio_path),
-        std::path::Path::new(&output_path)
+        &normalized
     )
 }
 
@@ -782,9 +822,8 @@ async fn test_proxy(config: proxy::ProxyConfig) -> Result<bool, String> {
 
 // ============ Cloud Commands ============
 #[tauri::command]
-async fn upload_to_cloud(app_handle: tauri::AppHandle, path: String, target_name: Option<String>) -> Result<String, String> {
-    let settings_state = app_handle.state::<std::sync::Arc<tokio::sync::Mutex<Settings>>>();
-    let settings = settings_state.lock().await;
+async fn upload_to_cloud(_app_handle: tauri::AppHandle, path: String, target_name: Option<String>) -> Result<String, String> {
+    let settings = settings::load_settings();
 
     let filename = std::path::Path::new(&path)
         .file_name()
@@ -821,7 +860,7 @@ async fn upload_to_cloud(app_handle: tauri::AppHandle, path: String, target_name
 
 // ============ Media Commands ============
 #[tauri::command]
-async fn process_media(app_handle: tauri::AppHandle, path: String, action: String) -> Result<String, String> {
+async fn process_media(_app_handle: tauri::AppHandle, path: String, action: String) -> Result<String, String> {
     // action: "check", "preview", "audio"
     if action == "check" {
         return if media_processor::MediaProcessor::check_ffmpeg() {
@@ -831,8 +870,7 @@ async fn process_media(app_handle: tauri::AppHandle, path: String, action: Strin
         };
     }
 
-    let settings_state = app_handle.state::<std::sync::Arc<tokio::sync::Mutex<Settings>>>();
-    let settings = settings_state.lock().await;
+    let settings = settings::load_settings();
 
     let final_path = resolve_download_path(&path, &settings.download_dir)?;
     
@@ -1144,7 +1182,7 @@ fn preallocate_download_file(path: String, size: u64) -> Result<(), String> {
     if size > MAX_PREALLOC {
         return Err(format!("Preallocation size {} exceeds maximum {} bytes", size, MAX_PREALLOC));
     }
-    downloader::disk::preallocate_file(std::path::Path::new(&path), size)
+    downloader::disk::preallocate_file(&normalized, size)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -1522,7 +1560,7 @@ fn open_file_for_resume(path: String) -> Result<u64, String> {
         return Err("Path must be within the download directory".to_string());
     }
 
-    let file = downloader::disk::open_for_resume(std::path::Path::new(&path))
+    let file = downloader::disk::open_for_resume(&normalized)
         .map_err(|e| e.to_string())?;
     let size = file.metadata()
         .map(|m| m.len())
@@ -1884,15 +1922,15 @@ pub fn run() {
             pause_download, 
             get_downloads, 
             remove_download_entry, 
-            get_settings, 
-            save_settings, 
+            get_settings,
+            get_auth_token,
+            save_settings,
             open_file, 
             open_folder,
             select_directory,
             select_file,
             schedule_download,
             get_scheduled_downloads,
-            cancel_scheduled_download,
             crawl_website,
             mux_video_audio,
             check_ffmpeg_installed,
@@ -2122,10 +2160,8 @@ pub fn run() {
                             Ok(node) => node,
                             Err(e3) => {
                                 eprintln!("CRITICAL: P2P node failed on all ports including dynamic: {}. P2P features disabled.", e3);
-                                // Create a dummy node bound to a random port — accept that P2P won't work
-                                // Rather than crashing the entire app, we proceed with degraded functionality
-                                network::p2p::P2PNode::new(0).await
-                                    .unwrap_or_else(|_| panic!("P2P subsystem completely unavailable"))
+                                // Gracefully degrade: create disabled node without WebSocket server
+                                network::p2p::P2PNode::disabled()
                             }
                         }
                             }
@@ -2137,33 +2173,37 @@ pub fn run() {
             
             let p2p_file_map: crate::http_server::FileMap = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             
-            let torrent_manager = tauri::async_runtime::block_on(async {
+            let torrent_manager: Option<Arc<network::bittorrent::manager::TorrentManager>> = tauri::async_runtime::block_on(async {
                  let settings = settings::load_settings();
                  let mut path = std::path::PathBuf::from(&settings.download_dir);
                  path.push("Torrents");
                  std::fs::create_dir_all(&path).unwrap_or_default();
                  match network::bittorrent::manager::TorrentManager::new(path).await {
-                     Ok(tm) => tm,
+                     Ok(tm) => Some(Arc::new(tm)),
                      Err(e) => {
                          eprintln!("Warning: Torrent Manager failed to start: {}", e);
                          // Use a fallback temp directory instead of panicking
                          let fallback = std::env::temp_dir().join("hyperstream_torrents");
                          std::fs::create_dir_all(&fallback).unwrap_or_default();
                          match network::bittorrent::manager::TorrentManager::new(fallback).await {
-                             Ok(tm) => tm,
+                             Ok(tm) => Some(Arc::new(tm)),
                              Err(e2) => {
                                  eprintln!("CRITICAL: Torrent Manager failed even with temp dir: {}. Torrent features will be unavailable.", e2);
                                  // Try one last time with a unique temp dir
                                  let last_resort = std::env::temp_dir().join(format!("hyperstream_torrents_{}", std::process::id()));
                                  std::fs::create_dir_all(&last_resort).unwrap_or_default();
-                                 network::bittorrent::manager::TorrentManager::new(last_resort).await
-                                     .unwrap_or_else(|e3| panic!("Torrent subsystem completely unavailable: {}", e3))
+                                 match network::bittorrent::manager::TorrentManager::new(last_resort).await {
+                                     Ok(tm) => Some(Arc::new(tm)),
+                                     Err(e3) => {
+                                         eprintln!("FATAL: Torrent subsystem completely unavailable: {}. Continuing without torrent support.", e3);
+                                         None
+                                     }
+                                 }
                              }
                          }
                      }
                  }
             });
-            let torrent_manager = Arc::new(torrent_manager);
 
             // Spawn HTTP server
             let tx_clone = tx.clone();
@@ -2291,9 +2331,7 @@ pub fn run() {
                                         let total_downloaded: u64 = segments.iter()
                                             .map(|s| if s.downloaded_cursor > s.start_byte { s.downloaded_cursor - s.start_byte } else { 0 })
                                             .sum();
-                                        let total_size: u64 = segments.iter()
-                                            .map(|s| s.end_byte - s.start_byte)
-                                            .sum();
+                                        let total_size: u64 = session.manager.lock().unwrap_or_else(|e| e.into_inner()).file_size;
                                         let _ = session.stop_tx.send(());
                                         // Use upsert_download per item to avoid race with concurrent persistence changes
                                         let _ = crate::persistence::upsert_download(crate::persistence::SavedDownload {
@@ -2514,9 +2552,37 @@ async fn detect_archive(path: String) -> Option<archive_manager::ArchiveInfo> {
 
 #[tauri::command]
 async fn extract_archive(archive_path: String, dest_dir: Option<String>) -> Result<String, String> {
+    // Validate paths are within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+
+    if let Ok(canon) = dunce::canonicalize(&archive_path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Archive path must be within the download directory".to_string());
+        }
+    }
+
     // Use same directory as archive if dest not specified
     let dest = if let Some(d) = dest_dir {
-        d
+        // Validate dest is also within download dir
+        let abs_dest = if std::path::Path::new(&d).is_absolute() {
+            std::path::PathBuf::from(&d)
+        } else {
+            download_dir.join(&d)
+        };
+        let mut normalized = std::path::PathBuf::new();
+        for component in abs_dest.components() {
+            match component {
+                std::path::Component::ParentDir => { normalized.pop(); },
+                std::path::Component::CurDir => {},
+                c => normalized.push(c.as_os_str()),
+            }
+        }
+        if !normalized.starts_with(&download_dir) {
+            return Err("Destination path must be within the download directory".to_string());
+        }
+        normalized.to_string_lossy().to_string()
     } else {
         std::path::Path::new(&archive_path)
             .parent()
@@ -2540,7 +2606,35 @@ fn check_unrar_available() -> bool {
 
 #[tauri::command]
 fn extract_zip_all(zip_path: String, dest_dir: String) -> Result<usize, String> {
-    zip_preview::extract_all(std::path::Path::new(&zip_path), std::path::Path::new(&dest_dir))
+    // Validate paths are within the download directory
+    let settings = settings::load_settings();
+    let download_dir = dunce::canonicalize(&settings.download_dir)
+        .map_err(|e| format!("Cannot resolve download dir: {}", e))?;
+
+    if let Ok(canon) = dunce::canonicalize(&zip_path) {
+        if !canon.starts_with(&download_dir) {
+            return Err("Zip path must be within the download directory".to_string());
+        }
+    }
+
+    let abs_dest = if std::path::Path::new(&dest_dir).is_absolute() {
+        std::path::PathBuf::from(&dest_dir)
+    } else {
+        download_dir.join(&dest_dir)
+    };
+    let mut normalized = std::path::PathBuf::new();
+    for component in abs_dest.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); },
+            std::path::Component::CurDir => {},
+            c => normalized.push(c.as_os_str()),
+        }
+    }
+    if !normalized.starts_with(&download_dir) {
+        return Err("Destination path must be within the download directory".to_string());
+    }
+
+    zip_preview::extract_all(std::path::Path::new(&zip_path), &normalized)
 }
 
 // ============ P2P Commands ============

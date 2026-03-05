@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Share2, Users, Upload, Download, Copy, Check, Wifi, AlertCircle } from 'lucide-react';
@@ -30,6 +30,8 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [copied, setCopied] = useState(false);
+    // Track whether session was explicitly closed to prevent double-close in cleanup
+    const closedRef = useRef(false);
 
     // Join mode states
     const [isJoinMode, setIsJoinMode] = useState(false);
@@ -38,15 +40,16 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
 
     useEffect(() => {
         if (isOpen && !isJoinMode) {
+            closedRef.current = false;
             createShare();
         }
-    }, [isOpen, downloadId, isJoinMode]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, downloadId]);
 
     // Cleanup: close session when modal unmounts or closes
     useEffect(() => {
         return () => {
-            // Use a local ref capture so we don't close a stale session
-            if (session) {
+            if (session && !closedRef.current) {
                 invoke('close_p2p_session', { sessionId: session.id }).catch(() => {});
             }
         };
@@ -91,12 +94,15 @@ export default function P2PShareModal({ isOpen, onClose, downloadId, downloadNam
 
     const closeShare = async () => {
         if (session) {
+            closedRef.current = true; // Prevent cleanup effect from double-closing
             try {
                 await invoke('close_p2p_session', { sessionId: session.id });
+                setSession(null);
                 onClose();
             } catch (e) {
                 logError('Failed to close session:', e);
                 toast.error("Failed to close P2P session");
+                setSession(null);
                 onClose();
             }
         } else {

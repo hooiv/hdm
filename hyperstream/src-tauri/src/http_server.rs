@@ -41,11 +41,11 @@ pub type DownloadSender = mpsc::UnboundedSender<DownloadRequest>;
 pub type BatchSender = mpsc::UnboundedSender<Vec<BatchLink>>;
 pub type FileMap = Arc<std::sync::Mutex<HashMap<String, StreamingSource>>>;
 
-pub async fn start_server(tx: DownloadSender, batch_tx: BatchSender, file_map: FileMap, torrent_manager: Arc<TorrentManager>) {
+pub async fn start_server(tx: DownloadSender, batch_tx: BatchSender, file_map: FileMap, torrent_manager: Option<Arc<TorrentManager>>) {
     let tx = Arc::new(tx);
     let batch_tx = Arc::new(batch_tx);
     let torrent_manager = torrent_manager.clone();
-    
+
     // CORS: Allow any origin because browser-extension origins
     // (chrome-extension://<id>, moz-extension://<uuid>) are dynamic and
     // cannot be enumerated at compile time.  Auth is enforced by the
@@ -58,10 +58,26 @@ pub async fn start_server(tx: DownloadSender, batch_tx: BatchSender, file_map: F
     // Simple shared-secret token filter for download/batch routes.
     // The token is generated once at startup and must be sent as a header.
     let auth_token = Arc::new(uuid::Uuid::new_v4().to_string());
-    let token_for_log = auth_token.clone();
-    // Log the token so the extension can be configured (in production this would
-    // be exchanged via native messaging or a secure handshake).
-    println!("[http_server] Auth token for extension: {}", token_for_log);
+    // Log only a truncated hint of the token for debugging — never the full secret.
+    println!("[http_server] Auth token generated (hint: {}...)", &auth_token[..8]);
+
+    // Persist the auth token to a file so the browser extension can read it
+    // via the desktop app's settings/copy-token feature.
+    if let Some(home) = dirs::home_dir() {
+        let token_dir = home.join(".hyperstream");
+        let _ = std::fs::create_dir_all(&token_dir);
+        let token_path = token_dir.join("auth_token");
+        if let Err(e) = std::fs::write(&token_path, auth_token.as_str()) {
+            eprintln!("[http_server] Failed to write auth token file: {}", e);
+        } else {
+            // Restrict to owner-only on Unix (chmod 600)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
 
     let auth_token_filter = {
         let token = auth_token.clone();
@@ -130,14 +146,17 @@ fn error_response(code: warp::http::StatusCode) -> warp::http::Response<warp::hy
     warp::http::Response::builder()
         .status(code)
         .body(warp::hyper::Body::empty())
-        .unwrap()
+        .unwrap_or_else(|_| {
+            // Fallback: if even the builder fails, return a minimal 500
+            warp::http::Response::new(warp::hyper::Body::empty())
+        })
 }
 
 async fn handle_p2p_request(
     id: String,
     range_header: Option<String>,
     file_map: FileMap,
-    torrent_manager: Arc<TorrentManager>,
+    torrent_manager: Option<Arc<TorrentManager>>,
 ) -> Result<warp::http::Response<warp::hyper::Body>, warp::Rejection> {
     let source = {
         let map = file_map.lock().unwrap_or_else(|e| e.into_inner());
@@ -149,7 +168,10 @@ async fn handle_p2p_request(
             serve_file(path, range_header).await
         }
         Some(StreamingSource::Torrent { torrent_id, file_id }) => {
-            serve_torrent_stream(torrent_manager, torrent_id, file_id, range_header).await
+            match torrent_manager {
+                Some(ref tm) => serve_torrent_stream(tm.clone(), torrent_id, file_id, range_header).await,
+                None => Ok(error_response(warp::http::StatusCode::SERVICE_UNAVAILABLE)),
+            }
         }
         None => Ok(error_response(warp::http::StatusCode::NOT_FOUND)),
     }
@@ -226,7 +248,7 @@ where T: AsyncRead + AsyncSeek + Unpin + Send + 'static
                         .header("Content-Type", "application/octet-stream")
                         .header("Accept-Ranges", "bytes")
                         .body(body)
-                        .unwrap();
+                        .unwrap_or_else(|_| warp::http::Response::new(warp::hyper::Body::empty()));
                 return Ok(response);
             }
         }
@@ -238,7 +260,7 @@ where T: AsyncRead + AsyncSeek + Unpin + Send + 'static
     Ok(warp::http::Response::builder()
         .status(warp::http::StatusCode::OK)
         .body(body)
-        .unwrap())
+        .unwrap_or_else(|_| warp::http::Response::new(warp::hyper::Body::empty())))
 }
 
 fn with_sender(
@@ -297,6 +319,30 @@ async fn handle_batch(
     links: Vec<BatchLink>,
     batch_tx: Arc<BatchSender>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // Validate all URLs before forwarding — prevent SSRF via batch endpoint
+    for link in &links {
+        match url::Url::parse(&link.url) {
+            Ok(parsed) => {
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    let response = DownloadResponse {
+                        success: false,
+                        message: format!("Invalid URL scheme in batch: {}", link.url),
+                        id: None,
+                    };
+                    return Ok(warp::reply::json(&response));
+                }
+            }
+            Err(_) => {
+                let response = DownloadResponse {
+                    success: false,
+                    message: format!("Invalid URL in batch: {}", link.url),
+                    id: None,
+                };
+                return Ok(warp::reply::json(&response));
+            }
+        }
+    }
+
     let count = links.len();
     match batch_tx.send(links) {
         Ok(_) => {

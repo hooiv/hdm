@@ -13,7 +13,8 @@ export function formatSpeed(bytesPerSec: number): string {
 }
 
 export function formatETA(remainingBytes: number, speed: number): string {
-  if (speed <= 0 || remainingBytes <= 0) return '--:--';
+  if (remainingBytes <= 0 && speed > 0) return 'Done';
+  if (speed <= 0 || remainingBytes <= 0 || !Number.isFinite(remainingBytes) || !Number.isFinite(speed)) return '--:--';
   const seconds = Math.floor(remainingBytes / speed);
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) {

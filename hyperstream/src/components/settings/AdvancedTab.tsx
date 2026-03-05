@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Activity, ShieldAlert } from "lucide-react";
+import { Activity, ShieldAlert, Key, Copy, Check } from "lucide-react";
 import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { useToast } from "../../contexts/ToastContext";
@@ -24,6 +24,8 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
   const [wfpAppPath, setWfpAppPath] = useState("");
   const [isWfpProcessing, setIsWfpProcessing] = useState(false);
   const [chaos, setChaos] = useState<ChaosConfig>({ enabled: false, latency_ms: 0, error_rate: 0 });
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [tokenCopied, setTokenCopied] = useState(false);
   const toast = useToast();
   const toastRef = React.useRef(toast);
   toastRef.current = toast;
@@ -33,18 +35,24 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
       logError("Failed to load chaos config:", err);
       toastRef.current.error("Failed to load chaos config");
     });
+    invoke<string>("get_auth_token").then(setAuthToken).catch((err) => {
+      logError("Failed to load auth token:", err);
+      setAuthToken(""); // Clear loading state — token may not be generated yet
+    });
   }, []);
 
   const updateChaos = async (update: Partial<ChaosConfig>) => {
-    setChaos(prev => {
-      const newChaos = { ...prev, ...update };
-      invoke("set_chaos_config", {
+    const newChaos = { ...chaos, ...update };
+    setChaos(newChaos);
+    try {
+      await invoke("set_chaos_config", {
         latencyMs: newChaos.latency_ms,
         errorRate: newChaos.error_rate,
         enabled: newChaos.enabled,
-      }).catch(e => toast.error("Failed to update chaos config: " + e));
-      return newChaos;
-    });
+      });
+    } catch (e) {
+      toast.error("Failed to update chaos config: " + e);
+    }
   };
 
   const handleWfpChange = async (blocked: boolean) => {
@@ -66,9 +74,51 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
     }
   };
 
+  const copyAuthToken = async () => {
+    if (authToken) {
+      try {
+        await navigator.clipboard.writeText(authToken);
+        setTokenCopied(true);
+        setTimeout(() => setTokenCopied(false), 2000);
+        toast.success("Auth token copied to clipboard");
+      } catch {
+        toast.error("Failed to copy token to clipboard");
+      }
+    }
+  };
+
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
       <SectionHeader icon={Activity} title="Advanced" />
+
+      {/* Browser Extension Auth Token */}
+      <div className="p-5 rounded-xl border bg-slate-800/20 border-slate-700/30">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-lg bg-cyan-500/10 flex items-center justify-center border border-cyan-500/20">
+            <Key size={20} className="text-cyan-400" />
+          </div>
+          <div>
+            <h3 className="text-slate-200 font-semibold">Browser Extension Token</h3>
+            <p className="text-xs text-slate-500">
+              Copy this token and paste it into the HyperStream browser extension popup.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-300 truncate">
+            {authToken === null ? "Loading..." : authToken ? `${authToken.slice(0, 8)}${"*".repeat(24)}${authToken.slice(-4)}` : "Token unavailable — restart app"}
+          </div>
+          <button
+            onClick={copyAuthToken}
+            disabled={!authToken}
+            className="px-4 py-2.5 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors text-sm font-medium disabled:opacity-50 flex items-center gap-2"
+          >
+            {tokenCopied ? <Check size={16} /> : <Copy size={16} />}
+            {tokenCopied ? "Copied" : "Copy"}
+          </button>
+        </div>
+      </div>
+
       <div
         className={`p-5 rounded-xl border transition-all ${chaos.enabled ? "bg-red-500/10 border-red-500/30" : "bg-slate-800/20 border-slate-700/30"}`}
       >

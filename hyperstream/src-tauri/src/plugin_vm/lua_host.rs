@@ -139,7 +139,7 @@ impl LuaPluginHost {
                 let id = uuid::Uuid::new_v4().to_string();
                 
                 // Trigger backend add via reusable impl
-                let _ = crate::start_download_impl(&app, state.inner(), id.clone(), url, filename, None, None).await;
+                let _ = crate::start_download_impl(&app, state.inner(), id.clone(), url, filename, None, None, false).await;
                 
                 // Emit toast
                 let _ = app.emit("toast", "Plugin triggered download");
@@ -157,7 +157,7 @@ impl LuaPluginHost {
                 let id = uuid::Uuid::new_v4().to_string();
                 
                 // Use the provided name as the filename/display name
-                let _ = crate::start_download_impl(&app, state.inner(), id.clone(), url, name.clone(), None, None).await;
+                let _ = crate::start_download_impl(&app, state.inner(), id.clone(), url, name.clone(), None, None, false).await;
                 
                 // Emit toast with the custom name
                 let _ = app.emit("toast", format!("Plugin download: {}", name));

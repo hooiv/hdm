@@ -116,15 +116,17 @@ export interface WaybackResult {
 }
 
 export interface ApiFuzzResult {
-    total_tested: number;
-    successful: number;
-    results: { url: string; status: number; size: number }[];
+    original_url: string;
+    mutations: { mutated_url: string; mutation_type: string; status_code: number; response_time_ms: number; body_size: number; interesting: boolean }[];
 }
 
 export interface BandwidthArbResult {
-    fastest_url: string;
-    fastest_speed: number;
-    results: { url: string; speed: number; status: string }[];
+    url: string;
+    speed_bytes_per_sec: number;
+    latency_ms: number;
+    supports_range: boolean;
+    content_length: number;
+    status: number;
 }
 
 // ============ Typed API Commands ============
@@ -176,7 +178,7 @@ export const api = {
     apiFuzzUrl: (url: string) =>
         invoke<ApiFuzzResult>('fuzz_url', { url }),
     bandwidthArbitrage: (urls: string[]) =>
-        invoke<BandwidthArbResult>('bandwidth_arbitrage', { urls }),
+        invoke<BandwidthArbResult[]>('arbitrage_download', { urls }),
 
     // --- Media ---
     generateSubtitles: (videoPath: string) =>

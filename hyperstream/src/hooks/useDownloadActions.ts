@@ -103,11 +103,11 @@ export function useDownloadActions(task: DownloadTask, filePath: string) {
             toastRef.current.error('No URL available for API fuzzing');
             return;
         }        try {
-            toastRef.current.info('🔧 Fuzzing URL for alternate endpoints...');
+            toastRef.current.info('Fuzzing URL for alternate endpoints...');
             const result = await invoke<ApiFuzzResult>('fuzz_url', { url: task.url });
-            const hits = result.results?.filter((r) => r.status >= 200 && r.status < 400);
-            const hitList = hits?.slice(0, 10).map((r) => `[${r.status}] ${r.url}`).join('\n') || 'None';
-            toastRef.current.success(`🔧 API Fuzz Complete\nTested: ${result.total_tested}\nHits: ${hits?.length || 0}\n\n${hitList}`);
+            const interesting = result.mutations?.filter((m) => m.interesting) || [];
+            const hitList = interesting.slice(0, 10).map((m) => `[${m.status_code}] ${m.mutated_url}`).join('\n') || 'None';
+            toastRef.current.success(`API Fuzz Complete\nTested: ${result.mutations?.length || 0}\nInteresting: ${interesting.length}\n\n${hitList}`);
         } catch (err) { toastRef.current.error('API Fuzz failed: ' + err); }
     }, [task.url]);
 

@@ -82,6 +82,16 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
     }
   }, [showWebhookModal, editingWebhook]);
 
+  // Escape key handler for webhook modal
+  useEffect(() => {
+    if (!showWebhookModal) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowWebhookModal(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showWebhookModal]);
+
   const loadWebhooks = async () => {
     try {
       const hooks = await invoke<WebhookConfig[]>("get_webhooks");
@@ -467,6 +477,18 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                         toast.warning(
                           "Please fill all fields and select at least one event",
                         );
+                        return;
+                      }
+
+                      // Validate URL format
+                      try {
+                        const parsed = new URL(webhookUrl);
+                        if (!['http:', 'https:'].includes(parsed.protocol)) {
+                          toast.error("Webhook URL must use http or https");
+                          return;
+                        }
+                      } catch {
+                        toast.error("Invalid webhook URL format");
                         return;
                       }
 

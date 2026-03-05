@@ -56,13 +56,14 @@ export const FeedsTab: React.FC = () => {
             setItems([]);
         }
         return () => { cancelled = true; };
-    }, [selectedFeedId, feeds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedFeedId]);
 
-    const loadFeeds = async () => {
+    const loadFeeds = async (selectFallback?: boolean) => {
         try {
             const list = await invoke<FeedConfig[]>('get_feeds');
             setFeeds(list);
-            if (list.length > 0 && !selectedFeedId) {
+            if (list.length > 0 && (selectFallback || !selectedFeedId)) {
                 setSelectedFeedId(list[0].id);
             }
         } catch (e) {
@@ -85,6 +86,19 @@ export const FeedsTab: React.FC = () => {
 
     const handleAddFeed = async () => {
         if (!newFeedUrl || !newFeedName) return;
+
+        // Validate URL format
+        try {
+            const parsed = new URL(newFeedUrl);
+            if (!['http:', 'https:'].includes(parsed.protocol)) {
+                toast.error("Feed URL must use http or https protocol");
+                return;
+            }
+        } catch {
+            toast.error("Invalid feed URL format");
+            return;
+        }
+
         const newFeed: FeedConfig = {
             id: Date.now().toString(),
             url: newFeedUrl,
@@ -110,10 +124,11 @@ export const FeedsTab: React.FC = () => {
     const handleRemoveFeed = async (id: string, e: React.MouseEvent) => {
         e.stopPropagation();
         if (!confirm("Are you sure you want to remove this feed?")) return;
+        const wasSelected = selectedFeedId === id;
         try {
             await invoke('remove_feed', { id });
-            if (selectedFeedId === id) setSelectedFeedId(null);
-            loadFeeds();
+            if (wasSelected) setSelectedFeedId(null);
+            loadFeeds(wasSelected);
         } catch (err) {
             logError("Failed to remove feed", err);
             toast.error("Failed to remove feed");
@@ -228,15 +243,13 @@ export const FeedsTab: React.FC = () => {
                                             className="bg-slate-800/30 border border-slate-700/50 rounded-xl p-5 hover:bg-slate-800/50 transition-colors group"
                                         >
                                             <div className="flex justify-between items-start mb-2">
-                                                <a
-                                                    href={item.link}
-                                                    target="_blank"
-                                                    rel="noreferrer"
-                                                    className="text-base font-semibold text-slate-200 hover:text-blue-400 transition-colors flex items-center gap-2"
+                                                <button
+                                                    onClick={() => { invoke('open_file', { path: item.link }).catch(() => window.open(item.link, '_blank')); }}
+                                                    className="text-base font-semibold text-slate-200 hover:text-blue-400 transition-colors flex items-center gap-2 text-left"
                                                 >
                                                     {item.title}
                                                     <ExternalLink size={12} className="opacity-0 group-hover:opacity-50" />
-                                                </a>
+                                                </button>
                                                 <span className="text-xs text-slate-500 font-mono">
                                                     {item.pub_date ? new Date(item.pub_date).toLocaleDateString() : ''}
                                                 </span>
@@ -244,7 +257,7 @@ export const FeedsTab: React.FC = () => {
 
                                             {item.description && (
                                                 <p className="text-sm text-slate-400 leading-relaxed mb-4 line-clamp-3">
-                                                    {item.description.replace(/<[^>]*>?/gm, '').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim()}
+                                                    {(() => { try { return new DOMParser().parseFromString(item.description, 'text/html').body.textContent?.replace(/\s+/g, ' ').trim() || ''; } catch { return item.description.replace(/<[^>]*>?/gm, '').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim(); } })()}
                                                 </p>
                                             )}
 
@@ -291,6 +304,10 @@ export const FeedsTab: React.FC = () => {
                                 animate={{ scale: 1, opacity: 1, y: 0 }}
                                 exit={{ scale: 0.95, opacity: 0, y: 10 }}
                                 onClick={e => e.stopPropagation()}
+                                onKeyDown={e => { if (e.key === 'Escape') setIsAddModalOpen(false); else if (e.key === 'Enter') handleAddFeed(); }}
+                                role="dialog"
+                                aria-modal="true"
+                                aria-label="Add RSS Feed"
                             >
                                 <h3 className="text-lg font-bold text-white mb-4">Add RSS Feed</h3>
                                 <div className="space-y-4">

@@ -68,7 +68,16 @@ pub fn setup_manager(
     let parts = if segment_count == 0 { 8 } else { segment_count };
     if let Some(saved_dl) = saved.filter(|s| s.segments.is_some()) {
         let segments = saved_dl.segments.as_ref().unwrap().clone();
-        Arc::new(Mutex::new(DownloadManager::new_with_segments(total_size, segments)))
+        // Validate saved segments are compatible with the current total_size.
+        // If the server-side file changed, old segment boundaries may be invalid.
+        let segments_valid = !segments.is_empty()
+            && segments.iter().all(|s| s.end_byte <= total_size && s.start_byte <= s.end_byte);
+        if segments_valid {
+            Arc::new(Mutex::new(DownloadManager::new_with_segments(total_size, segments)))
+        } else {
+            eprintln!("WARNING: Saved segments incompatible with current file size ({}), restarting download", total_size);
+            Arc::new(Mutex::new(DownloadManager::new(total_size, parts)))
+        }
     } else if resume_from > 0 {
         // Simple resume: single segment from resume_from to end
         let mgr = DownloadManager::new(total_size, 1);

@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useCallback } from 'react';
 import { DownloadItem } from './DownloadItem';
 import type { DownloadTask } from '../types';
 import { Virtuoso } from 'react-virtuoso';
@@ -18,7 +18,7 @@ interface DownloadListProps {
 export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onResume, onDelete, onMoveUp, onMoveDown, downloadDir }) => {
 
     // Item renderer
-    const itemContent = useMemo(() => (_index: number, task: DownloadTask) => {
+    const itemContent = useCallback((_index: number, task: DownloadTask) => {
         return (
             <div style={{ paddingBottom: '8px', paddingLeft: '5px', paddingRight: '5px' }}>
                 <DownloadItem

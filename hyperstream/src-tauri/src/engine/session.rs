@@ -20,7 +20,8 @@ pub(crate) async fn start_download_impl(
     url: String, 
     path: String,
     _resume_override: Option<u64>,
-    custom_headers: Option<std::collections::HashMap<String, String>>
+    custom_headers: Option<std::collections::HashMap<String, String>>,
+    force: bool,
 ) -> Result<(), String> {
     println!("DEBUG: Starting download ID: {}", id);
     
@@ -215,7 +216,8 @@ pub(crate) async fn start_download_impl(
         }
     }
 
-    // Check CAS Deduplication
+    // Check CAS Deduplication (skip when force-download is requested)
+    if !force {
     if let Some(existing_path) = crate::cas_manager::check_cas(etag.as_deref(), md5.as_deref()) {
         println!("CAS Match Found! Hardlinking from {}", existing_path);
         // Attempt to hardlink
@@ -230,13 +232,17 @@ pub(crate) async fn start_download_impl(
                 segments: vec![],
             });
             
-            // Persistence
-            let mut saved_downloads = persistence::load_downloads().unwrap_or_default();
-            if let Some(d) = saved_downloads.iter_mut().find(|d| d.id == id) {
-                d.status = "Completed".to_string();
-                d.downloaded_bytes = total_size;
-            }
-            let _ = persistence::save_downloads(&saved_downloads);
+            // Persistence — use upsert_download which acquires the lock
+            let _ = persistence::upsert_download(persistence::SavedDownload {
+                id: id.clone(),
+                url: url.clone(),
+                path: path.clone(),
+                filename: crate::engine::session::extract_filename(&path).to_string(),
+                total_size,
+                downloaded_bytes: total_size,
+                status: "Complete".to_string(),
+                segments: None,
+            });
             
             crate::media::sounds::play_complete();
             return Ok(());
@@ -244,6 +250,7 @@ pub(crate) async fn start_download_impl(
             println!("Failed to create hardlink, falling back to download");
         }
     }
+    } // end !force CAS block
     // 3. Initialize File
     let file = downloader::initialization::setup_file(&path, resume_from, total_size)?;
     let file_mutex = file;
@@ -278,9 +285,32 @@ pub(crate) async fn start_download_impl(
     // 7. Disk Writer
     let (tx, rx) = mpsc::channel::<WriteRequest>();
     let file_writer_clone = file_mutex.clone();
+    let disk_io_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let disk_io_error_writer = disk_io_error.clone();
     thread::spawn(move || {
         let mut writer = DiskWriter::new(file_writer_clone, rx);
+        // Share the writer's actual I/O error flag with the monitor so it can
+        // detect disk failures in real-time (not just after writer.run() returns).
+        // We copy the writer's flag reference into the shared outer flag location
+        // by polling it periodically from a background thread.
+        let writer_flag = writer.io_error_flag();
+        let error_bridge = disk_io_error_writer.clone();
+        let bridge_flag = writer_flag.clone();
+        std::thread::spawn(move || {
+            // Poll the writer's flag every 100ms and propagate to the shared flag
+            while !error_bridge.load(std::sync::atomic::Ordering::Relaxed) {
+                if bridge_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    error_bridge.store(true, std::sync::atomic::Ordering::Release);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
         writer.run();
+        // Final propagation after writer exits
+        if writer_flag.load(std::sync::atomic::Ordering::Acquire) {
+            disk_io_error_writer.store(true, std::sync::atomic::Ordering::Release);
+        }
     });
 
     // 8. Spawn Monitor Task (Decoupled Emission)
@@ -295,6 +325,7 @@ pub(crate) async fn start_download_impl(
     let mut stop_rx_monitor = stop_tx.subscribe();
     let stop_tx_monitor = stop_tx.clone();
     let chatops_monitor = state.chatops_manager.clone();
+    let disk_io_error_monitor = disk_io_error.clone();
     
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(33)); // ~30fps
@@ -302,6 +333,22 @@ pub(crate) async fn start_download_impl(
             tokio::select! {
                 _ = stop_rx_monitor.recv() => break,
                 _ = interval.tick() => {
+                    // Check for disk I/O errors — abort download if disk writer failed
+                    if disk_io_error_monitor.load(std::sync::atomic::Ordering::Acquire) {
+                        eprintln!("[{}] Disk I/O error detected, aborting download", id_monitor);
+                        let _ = window_monitor.emit("download_error", serde_json::json!({
+                            "id": id_monitor,
+                            "error": "Disk write error — the download has been stopped to prevent data corruption."
+                        }));
+                        let _ = stop_tx_monitor.send(());
+                        // Clean up session on error
+                        if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
+                            let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+                            downloads.remove(&id_monitor);
+                        }
+                        break;
+                    }
+
                     let d = downloaded_monitor.load(Ordering::Relaxed);
                     
                     // Get segment snapshot for visualization
@@ -417,6 +464,11 @@ pub(crate) async fn start_download_impl(
                         let _ = persistence::upsert_download(saved);
                         // Signal save loop and workers to stop
                         let _ = stop_tx_monitor.send(());
+                        // Clean up session from in-memory state to prevent memory leak
+                        if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
+                            let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+                            downloads.remove(&id_monitor);
+                        }
                         
                         break;
                     }
@@ -447,6 +499,7 @@ pub(crate) async fn start_download_impl(
         let url_worker = url.clone(); // Alias for error handler
         let app_handle_clone = app.clone(); // Capture app handle for emitting events
         let total_size_worker = total_size; // u64 is Copy
+        let disk_io_error_worker = disk_io_error.clone();
 
         let handle = tokio::spawn(async move {
             let (start, end, seg_id) = {
@@ -454,7 +507,9 @@ pub(crate) async fn start_download_impl(
                 let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
                 let seg = &mut segs[i];
                 seg.state = crate::downloader::structures::SegmentState::Downloading;
-                (seg.start_byte, seg.end_byte, seg.id)
+                // Use downloaded_cursor (not start_byte) so resumed segments
+                // continue from where they left off instead of re-downloading.
+                (seg.downloaded_cursor, seg.end_byte, seg.id)
             };
 
             if end == 0 || start >= end { return; }
@@ -473,6 +528,17 @@ pub(crate) async fn start_download_impl(
                     if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
                         seg.downloaded_cursor = current_pos;
                         seg.state = crate::downloader::structures::SegmentState::Paused;
+                    }
+                    break;
+                }
+
+                // Check for disk I/O errors — stop feeding data to a dead writer
+                if disk_io_error_worker.load(std::sync::atomic::Ordering::Acquire) {
+                    let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                        seg.downloaded_cursor = current_pos;
+                        seg.state = crate::downloader::structures::SegmentState::Error;
                     }
                     break;
                 }
@@ -651,6 +717,10 @@ pub(crate) async fn start_download_impl(
                                     };
                                     let len = safe_chunk.len() as u64;
                                     if len == 0 { break; }
+
+                                    // Apply global speed limit (token-bucket throttle)
+                                    crate::speed_limiter::GLOBAL_LIMITER.acquire(len).await;
+
                                     if tx_clone.send(WriteRequest { offset: current_pos, data: safe_chunk.to_vec(), segment_id: seg_id }).is_err() {
                                         eprintln!("Thread (seg {}): Disk writer channel closed, stopping segment.", seg_id);
                                         return; // Exit worker gracefully instead of panicking

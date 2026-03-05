@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useRef, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Globe, Shield, Users, Activity } from "lucide-react";
 import { SettingsData } from "./types";
@@ -17,6 +17,14 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
   setSettings,
 }) => {
   const toast = useToast();
+  // Keep a ref to latest settings so async handlers (e.g. Tor init) don't use stale closures
+  const settingsRef = useRef(settings);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+
+  const [localIp, setLocalIp] = useState("detecting...");
+  useEffect(() => {
+    invoke<string>("get_local_ip").then(setLocalIp).catch(() => setLocalIp("127.0.0.1"));
+  }, []);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
@@ -73,10 +81,15 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
               <input
                 type="number"
                 placeholder="8080"
+                min={1}
+                max={65535}
                 value={settings.proxy_port}
-                onChange={(e) =>
-                  setSettings({ ...settings, proxy_port: parseInt(e.target.value) || settings.proxy_port })
-                }
+                onChange={(e) => {
+                  const port = parseInt(e.target.value);
+                  if (!isNaN(port) && port >= 1 && port <= 65535) {
+                    setSettings({ ...settings, proxy_port: port });
+                  }
+                }}
                 className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 font-mono text-sm focus:outline-none focus:border-blue-500/50"
               />
             </div>
@@ -170,7 +183,9 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
                 } catch (err) {
                   logError("Tor init failed:", err);
                   toast.error(`Failed to initialize Tor: ${err}`);
-                  setSettings({ ...settings, use_tor: false });
+                  // Use a callback to get fresh settings, avoiding stale closure
+                  // since Tor init can take 30-60 seconds
+                  setSettings({ ...settingsRef.current, use_tor: false });
                 }
               }
             }}
@@ -234,7 +249,7 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
         <div className="text-xs text-slate-500 font-mono bg-slate-900/50 p-2 rounded border border-slate-700/30">
           Your Host IP:{" "}
           <span className="text-slate-300 select-all">
-            127.0.0.1 (Check LAN IP)
+            {localIp}
           </span>{" "}
           (Port: 8765)
         </div>

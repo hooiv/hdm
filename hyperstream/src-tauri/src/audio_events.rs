@@ -104,21 +104,25 @@ impl AudioPlayer {
         let volume = self.get_volume().await;
         let custom_path = self.custom_sounds.lock().await.get(&event).cloned();
         
-        // Spawn a new thread to avoid blocking, but only if no sound is already playing
-        // to prevent unbounded thread accumulation under rapid-fire events.
-        if AUDIO_PLAYING.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+        // Allow up to MAX_CONCURRENT_SOUNDS concurrent playback threads.
+        // This prevents unbounded thread accumulation while avoiding silent
+        // drops when multiple downloads complete in quick succession.
+        let count = AUDIO_PLAYING_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+        if count < MAX_CONCURRENT_SOUNDS {
+            AUDIO_PLAYING_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::thread::spawn(move || {
                 if let Err(e) = play_sound_blocking(event, volume, custom_path) {
                     eprintln!("Failed to play sound: {}", e);
                 }
-                AUDIO_PLAYING.store(false, std::sync::atomic::Ordering::SeqCst);
+                AUDIO_PLAYING_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             });
         }
     }
 }
 
 /// Guard to prevent spawning too many concurrent audio threads.
-static AUDIO_PLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const MAX_CONCURRENT_SOUNDS: u8 = 3;
+static AUDIO_PLAYING_COUNT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Blocking sound playback (called in separate thread)
 /// Compatible with rodio 0.17-0.21

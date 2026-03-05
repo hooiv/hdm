@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { AnimatePresence } from "framer-motion";
+import { safeInvoke as invoke, safeListen as listen, safeGetWindowByLabel } from "./utils/tauri";
 import { debug, error as logError } from "./utils/logger";
-import { Window } from "@tauri-apps/api/window";
 import "./App.css";
 import { Layout } from "./components/Layout";
 import { DownloadList } from "./components/DownloadList";
@@ -46,6 +45,7 @@ function App() {
   const [isTorrentModalOpen, setIsTorrentModalOpen] = useState(false);
   const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
   const [batchLinks, setBatchLinks] = useState<BatchLink[]>([]);
+  const [droppedUrl, setDroppedUrl] = useState<string | undefined>(undefined);
   const [activeTab, setActiveTab] = useState<'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins'>('downloads');
   const [downloadDir, setDownloadDir] = useState<string>('');
 
@@ -54,7 +54,7 @@ function App() {
 
   const toggleOverlay = useCallback(async () => {
     // toggling overlay visibility using the statically imported Window API
-    const overlay = await Window.getByLabel("overlay");
+    const overlay = await safeGetWindowByLabel("overlay");
     if (overlay) {
       if (isOverlayVisibleRef.current) {
         await overlay.hide();
@@ -95,10 +95,50 @@ function App() {
       setTasks(prevTasks => {
         // detect new task arrival
         const exists = prevTasks.some(t => t.id === id);
+
+        // Unpack segments from tuple format (shared by both new & existing paths)
+        const segments = event.payload.segments ? event.payload.segments.map((s) => ({
+          id: s[0],
+          start_byte: s[1],
+          end_byte: s[2],
+          downloaded_cursor: s[3],
+          state: ['Idle', 'Downloading', 'Paused', 'Complete', 'Error'][s[4]] || 'Idle',
+          speed_bps: s[5]
+        })) : [];
+
         if (!exists) {
-          // show overlay window if hidden
-          Window.getByLabel("overlay").then(o => o?.show());
+          // Progress for unknown task — create a placeholder and start tracking it
+          safeGetWindowByLabel("overlay").then(o => o?.show());
+          isOverlayVisibleRef.current = true;
           setIsOverlayVisible(true);
+
+          const now = Date.now();
+          lastUpdate.current.set(id, { time: now, bytes: downloaded, speed: 0 });
+
+          // Fetch real filename/URL from backend so the task is resumable
+          invoke<SavedDownload[]>('get_downloads').then(data => {
+            const match = data.find(d => d.id === id);
+            if (match) {
+              setTasks(curr => curr.map(t =>
+                t.id === id && !t.url
+                  ? { ...t, filename: match.filename, url: match.url }
+                  : t
+              ));
+            }
+          }).catch(() => {});
+
+          const newTask: DownloadTask = {
+            id,
+            filename: 'Downloading...',
+            url: '',
+            progress: total > 0 ? Math.min((downloaded / total) * 100, 100) : 0,
+            downloaded,
+            total,
+            speed: 0,
+            status: total > 0 && downloaded >= total ? 'Done' : 'Downloading',
+            segments,
+          };
+          return [...prevTasks, newTask];
         }
 
         return prevTasks.map(task => {
@@ -122,16 +162,6 @@ function App() {
               lastUpdate.current.set(id, { time: now, bytes: downloaded, speed: 0 });
             }
 
-            // Unpack segments from tuple format
-            const segments = event.payload.segments ? event.payload.segments.map((s) => ({
-              id: s[0],
-              start_byte: s[1],
-              end_byte: s[2],
-              downloaded_cursor: s[3],
-              state: ['Idle', 'Downloading', 'Paused', 'Complete', 'Error'][s[4]] || 'Idle',
-              speed_bps: s[5]
-            })) : [];
-
             const newTask: DownloadTask = {
               ...task,
               progress: total > 0 ? Math.min((downloaded / total) * 100, 100) : 0,
@@ -147,6 +177,7 @@ function App() {
               toastRef.current?.addToast(`Download Complete: ${task.filename}`, 'success');
               // auto-remove after 30 seconds to keep overlay/queue tidy
               const timer = setTimeout(() => {
+                invoke("remove_download_entry", { id }).catch(() => {});
                 setTasks(curr => curr.filter(t => t.id !== id));
                 lastUpdate.current.delete(id);
                 completedIds.current.delete(id);
@@ -399,6 +430,9 @@ function App() {
       setTasks(prev => prev.filter(t => t.id !== id));
       lastUpdate.current.delete(id);
       completedIds.current.delete(id);
+      // Cancel any pending auto-remove timer for this download
+      const timer = autoRemoveTimers.current.get(id);
+      if (timer) { clearTimeout(timer); autoRemoveTimers.current.delete(id); }
     } catch (error) {
       logError("Failed to delete:", error);
       toastRef.current?.addToast('Failed to delete download', 'error');
@@ -542,22 +576,36 @@ function App() {
         {activeTab === 'downloads' ? (
           <div className="flex flex-col h-full">
             <GlobalTelemetry tasks={tasks} />
-            {stats.completed > 0 && (
+            {tasks.length > 0 && (
               <div className="px-4 pb-2 flex flex-col sm:flex-row sm:items-center sm:gap-4">
-                <button
-                  onClick={() => setTasks(prev => prev.filter(t => t.status !== 'Done'))}
-                  className="text-xs text-red-400 hover:text-red-200 underline"
-                >
-                  Clear completed ({stats.completed})
-                </button>
+                {stats.completed > 0 && (
+                  <button
+                    onClick={() => {
+                      const completedTasks = tasks.filter(t => t.status === 'Done');
+                      completedTasks.forEach(t => {
+                        invoke("remove_download_entry", { id: t.id }).catch(() => {});
+                        lastUpdate.current.delete(t.id);
+                        completedIds.current.delete(t.id);
+                        const timer = autoRemoveTimers.current.get(t.id);
+                        if (timer) { clearTimeout(timer); autoRemoveTimers.current.delete(t.id); }
+                      });
+                      setTasks(prev => prev.filter(t => t.status !== 'Done'));
+                    }}
+                    className="text-xs text-red-400 hover:text-red-200 underline"
+                  >
+                    Clear completed ({stats.completed})
+                  </button>
+                )}
                 <div className="flex gap-2 mt-2 sm:mt-0">
                   <button
                     onClick={pauseAll}
-                    className="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-500 rounded text-white"
+                    disabled={stats.downloading === 0}
+                    className="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed rounded text-white transition-colors"
                   >Pause All</button>
                   <button
                     onClick={resumeAll}
-                    className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-500 rounded text-white"
+                    disabled={tasks.filter(t => t.status === 'Paused' || t.status === 'Error').length === 0}
+                    className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed rounded text-white transition-colors"
                   >Resume All</button>
                 </div>
               </div>
@@ -587,17 +635,20 @@ function App() {
         ) : activeTab === 'feeds' ? (
           <FeedsTab />
         ) : activeTab === 'plugins' ? (
-          <PluginEditor />
+          <Suspense fallback={<div className="flex-1 flex items-center justify-center text-slate-500">Loading plugins...</div>}>
+            <PluginEditor />
+          </Suspense>
         ) : (
-          <SearchTab />
+          <SearchTab onStartDownload={startDownload} />
         )}
       </Layout>
       <Suspense fallback={null}>
         {isModalOpen && (
           <AddDownloadModal
             isOpen={isModalOpen}
-            onClose={() => setIsModalOpen(false)}
+            onClose={() => { setIsModalOpen(false); setDroppedUrl(undefined); }}
             onStart={startDownload}
+            initialUrl={droppedUrl}
           />
         )}
         {isTorrentModalOpen && (
@@ -618,7 +669,7 @@ function App() {
         )}
         {batchLinks.length > 0 && (
           <BatchDownloadModal
-            isOpen={batchLinks.length > 0}
+            isOpen={true}
             links={batchLinks}
             onClose={() => setBatchLinks([])}
             onDownload={(links) => {
@@ -645,15 +696,18 @@ function App() {
         )}
       </Suspense>
 
-      {clipboardData && (
-        <ClipboardToast
-          message="URL detected in clipboard"
-          filename={clipboardData.filename}
-          onDownload={() => handleClipboardDownload(clipboardData.url, clipboardData.filename)}
-          onDismiss={() => setClipboardData(null)}
-        />
-      )}
-      <DropTarget onDrop={React.useCallback((_url: string) => {
+      <AnimatePresence>
+        {clipboardData && (
+          <ClipboardToast
+            message="URL detected in clipboard"
+            filename={clipboardData.filename}
+            onDownload={() => handleClipboardDownload(clipboardData.url, clipboardData.filename)}
+            onDismiss={() => setClipboardData(null)}
+          />
+        )}
+      </AnimatePresence>
+      <DropTarget onDrop={React.useCallback((url: string) => {
+        setDroppedUrl(url);
         setIsModalOpen(true);
       }, [])} />
       <ToastManager ref={toastRef} />

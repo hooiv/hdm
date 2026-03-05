@@ -145,9 +145,14 @@ impl ChatOpsManager {
             } else if let Ok(parsed) = url::Url::parse(url) {
                 match parsed.scheme() {
                     "http" | "https" => {
-                        // Queue URL for the frontend to pick up
-                        self.pending_urls.lock().unwrap_or_else(|e| e.into_inner()).push(url.to_string());
-                        format!("✅ Queued for download:\n{}", url)
+                        // Queue URL for the frontend to pick up (cap at 100 to prevent OOM)
+                        let mut urls = self.pending_urls.lock().unwrap_or_else(|e| e.into_inner());
+                        if urls.len() >= 100 {
+                            "❌ Too many pending downloads. Wait for current queue to process.".to_string()
+                        } else {
+                            urls.push(url.to_string());
+                            format!("✅ Queued for download:\n{}", url)
+                        }
                     }
                     _ => "❌ Only http:// and https:// URLs are allowed".to_string(),
                 }

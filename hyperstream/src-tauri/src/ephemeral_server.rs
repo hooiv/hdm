@@ -110,11 +110,12 @@ impl EphemeralManager {
                     let shares_for_count = dl_shares.clone();
                     let share_id_for_count = share_id.clone();
                     async move {
-                        // Enforce a maximum download count to limit abuse
+                        // Atomically check + increment download count in a single lock
+                        // to prevent TOCTOU race under concurrent requests
                         const MAX_DOWNLOADS: u64 = 100;
                         {
-                            if let Ok(shares) = shares_for_count.lock() {
-                                if let Some(handle) = shares.get(&share_id_for_count) {
+                            if let Ok(mut shares) = shares_for_count.lock() {
+                                if let Some(handle) = shares.get_mut(&share_id_for_count) {
                                     if handle.info.download_count >= MAX_DOWNLOADS {
                                         return Ok::<_, warp::Rejection>(
                                             warp::http::Response::builder()
@@ -123,6 +124,7 @@ impl EphemeralManager {
                                                 .unwrap()
                                         );
                                     }
+                                    handle.info.download_count += 1;
                                 }
                             }
                         }
@@ -151,13 +153,6 @@ impl EphemeralManager {
                         let file_len = metadata.len();
                         let stream = ReaderStream::new(file);
                         let body = warp::hyper::Body::wrap_stream(stream);
-
-                        // Increment download count
-                        if let Ok(mut shares) = shares_for_count.lock() {
-                            if let Some(handle) = shares.get_mut(&share_id_for_count) {
-                                handle.info.download_count += 1;
-                            }
-                        }
 
                         // Sanitize filename for Content-Disposition header to prevent header injection
                         let raw_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");

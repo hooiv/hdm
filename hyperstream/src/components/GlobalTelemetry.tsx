@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useMemo } from 'react';
+import React, { useEffect, useId, useRef, useState, useMemo } from 'react';
 import type { DownloadTask } from '../types';
 import { formatSpeed } from '../utils/formatters';
 import { Activity, Server } from 'lucide-react';
@@ -8,6 +8,7 @@ interface GlobalTelemetryProps {
 }
 
 export const GlobalTelemetry: React.FC<GlobalTelemetryProps> = ({ tasks }) => {
+    const gradientId = useId();
     const [history, setHistory] = useState<number[]>(Array(50).fill(0));
 
     // Calculate instantaneous aggregate speed
@@ -34,7 +35,7 @@ export const GlobalTelemetry: React.FC<GlobalTelemetryProps> = ({ tasks }) => {
     }, []);
 
     // Calculate SVG Path for Sparkline
-    const maxSpeed = Math.max(...history, 1024 * 1024); // Minimum scale 1MB/s
+    const maxSpeed = history.reduce((a, b) => Math.max(a, b), 1024 * 1024); // Minimum scale 1MB/s
     const points = history.map((val, i) => {
         const x = (i / (history.length - 1)) * 100;
         const y = 100 - (val / maxSpeed) * 100;
@@ -53,12 +54,12 @@ export const GlobalTelemetry: React.FC<GlobalTelemetryProps> = ({ tasks }) => {
             {/* SVG Sparkline Graph */}
             <svg className="absolute inset-0 w-full h-full pb-0 pt-6" preserveAspectRatio="none" viewBox="0 0 100 100">
                 <defs>
-                    <linearGradient id="glowGradient" x1="0" y1="0" x2="0" y2="1">
+                    <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="rgba(6, 182, 212, 0.4)" />
                         <stop offset="100%" stopColor="rgba(6, 182, 212, 0.0)" />
                     </linearGradient>
                 </defs>
-                <polygon points={polygonPoints} fill="url(#glowGradient)" />
+                <polygon points={polygonPoints} fill={`url(#${gradientId})`} />
                 <polyline
                     fill="none"
                     stroke="#06b6d4"
@@ -94,7 +95,7 @@ export const GlobalTelemetry: React.FC<GlobalTelemetryProps> = ({ tasks }) => {
             </div>
 
             {/* Bottom Axis Label */}
-            <div className="absolute bottom-1 left-2 text-[8px] font-mono text-cyan-800/80">T-25 SECONDS</div>
+            <div className="absolute bottom-1 left-2 text-[8px] font-mono text-cyan-800/80">LAST 25 SECONDS</div>
             <div className="absolute bottom-1 right-2 w-2 h-2 rounded-full bg-cyan-500 shadow-[0_0_10px_#06b6d4] animate-pulse" />
         </div>
     );

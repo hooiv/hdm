@@ -31,7 +31,7 @@ pub struct AppState {
     pub downloads: Mutex<HashMap<String, DownloadSession>>,
     pub p2p_node: Arc<network::p2p::P2PNode>,
     pub p2p_file_map: http_server::FileMap,
-    pub torrent_manager: Arc<network::bittorrent::manager::TorrentManager>,
+    pub torrent_manager: Option<Arc<network::bittorrent::manager::TorrentManager>>,
     pub connection_manager: network::connection_manager::ConnectionManager,
     pub chatops_manager: Arc<network::chatops::ChatOpsManager>,
 }

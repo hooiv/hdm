@@ -22,14 +22,16 @@ interface AddDownloadModalProps {
         force?: boolean,
         customHeaders?: Record<string, string>,
     ) => void;
+    initialUrl?: string;
 }
 
 export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
     isOpen,
     onClose,
     onStart,
+    initialUrl,
 }) => {
-    const [url, setUrl] = useState("");
+    const [url, setUrl] = useState(initialUrl || "");
     const [filename, setFilename] = useState("");
     const userEditedFilename = React.useRef(false);
     const [isForceMode, setIsForceMode] = useState(false);
@@ -42,6 +44,14 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
     const [dockerInfo, setDockerInfo] = useState<DockerImageInfo | null>(null);
 
     const toast = useToast();
+
+    // Update URL when initialUrl changes (e.g., from drag-and-drop)
+    useEffect(() => {
+        if (initialUrl) {
+            setUrl(initialUrl);
+            userEditedFilename.current = false;
+        }
+    }, [initialUrl]);
 
     const isDoi = url.trim().startsWith("10.") || url.includes("doi.org/");
     const isDocker =
@@ -137,6 +147,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
+        if (!canSubmit) return;
 
         if (dockerInfo) {
             dockerInfo.layers.forEach((layer, idx) => {

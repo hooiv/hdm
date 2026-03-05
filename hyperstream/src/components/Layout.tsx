@@ -1,9 +1,10 @@
-import React from 'react';
-import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle, ArrowDownToLine } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { TitleBar } from './TitleBar';
 import { motion } from 'framer-motion';
-import { formatBytes } from '../utils/formatters';
+import { formatBytes, formatSpeed } from '../utils/formatters';
+import { invoke } from '@tauri-apps/api/core';
 
 interface LayoutProps {
     children: React.ReactNode;
@@ -68,8 +69,28 @@ export const Layout: React.FC<LayoutProps> = ({
     stats,
     onSpeedLimitChange,
     activeTab,
-    onTabChange
+    onTabChange,
+    globalSpeed
 }) => {
+    const [speedLimit, setSpeedLimit] = useState(0);
+
+    // Sync dropdown with persisted speed limit on mount
+    useEffect(() => {
+        invoke<number>('get_speed_limit').then(limit => {
+            // Snap to nearest dropdown value
+            const options = [0, 512, 1024, 5120, 10240];
+            const closest = options.reduce((prev, curr) =>
+                Math.abs(curr - limit) < Math.abs(prev - limit) ? curr : prev
+            );
+            setSpeedLimit(closest);
+        }).catch(() => {});
+    }, []);
+
+    const handleSpeedLimitChange = (value: number) => {
+        setSpeedLimit(value);
+        onSpeedLimitChange(value);
+    };
+
     return (
         <div className="flex flex-col h-screen bg-[#020617] text-slate-200 font-sans selection:bg-cyan-500/30 overflow-hidden rounded-xl border border-white/5 shadow-2xl aurora-bg">
             <TitleBar />
@@ -186,18 +207,26 @@ export const Layout: React.FC<LayoutProps> = ({
                             </h1>
                             {activeTab === 'downloads' && (
                                 <span className="bg-white/5 text-slate-300 text-[10px] px-2.5 py-1 rounded-full font-bold border border-white/10 shadow-sm backdrop-blur-md">
-                                    {stats.total} Active
+                                    {stats.downloading > 0 ? `${stats.downloading} Downloading` : `${stats.total} Total`}
                                 </span>
                             )}
                         </div>
 
                         <div className="flex items-center gap-3">
+                            {/* Live Speed Indicator */}
+                            {(globalSpeed ?? 0) > 0 && (
+                                <div className="flex items-center gap-2 bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-3 py-1.5">
+                                    <ArrowDownToLine size={14} className="text-cyan-400 animate-pulse" />
+                                    <span className="text-xs font-mono font-bold text-cyan-300">{formatSpeed(globalSpeed ?? 0)}</span>
+                                </div>
+                            )}
                             <div className="flex items-center bg-black/20 rounded-lg p-1 border border-white/5 hover:border-white/10 transition-colors">
                                 <Zap size={14} className="ml-2 text-amber-400" />
                                 <select
                                     aria-label="Speed limit"
                                     className="bg-transparent border-none text-xs text-slate-300 focus:ring-0 cursor-pointer py-1 pl-2 pr-6 font-medium outline-none"
-                                    onChange={(e) => onSpeedLimitChange(parseInt(e.target.value))}
+                                    value={speedLimit}
+                                    onChange={(e) => handleSpeedLimitChange(parseInt(e.target.value))}
                                 >
                                     <option value="0" className="bg-slate-900 text-white">Unlimited Speed</option>
                                     <option value="512" className="bg-slate-900 text-white">Limit: 512 KB/s</option>

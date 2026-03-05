@@ -1,20 +1,20 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
+import { getCurrentWindow, type Window as TauriWindow } from '@tauri-apps/api/window';
 
 import { X, Minus, Square, Copy } from 'lucide-react';
 
-// Safely get appWindow — getCurrentWindow() may fail outside Tauri webview
-function getAppWindow() {
-    try {
-        const { getCurrentWindow } = require('@tauri-apps/api/window');
-        return getCurrentWindow();
-    } catch {
-        return null;
-    }
-}
-
 export const TitleBar: React.FC = () => {
     const [isMaximized, setIsMaximized] = useState(false);
-    const appWindow = useMemo(() => getAppWindow(), []);
+    const [appWindow, setAppWindow] = useState<TauriWindow | null>(null);
+
+    // Initialize window reference once on mount
+    useEffect(() => {
+        try {
+            setAppWindow(getCurrentWindow());
+        } catch {
+            // Not running inside Tauri
+        }
+    }, []);
 
     useEffect(() => {
         if (!appWindow) return;
@@ -30,9 +30,9 @@ export const TitleBar: React.FC = () => {
         checkMaximized();
 
         return () => {
-            unlisten.then(f => f());
+            unlisten.then((fn) => fn());
         }
-    }, []);
+    }, [appWindow]);
 
     const handleMinimize = () => appWindow?.minimize();
     const handleMaximize = async () => {

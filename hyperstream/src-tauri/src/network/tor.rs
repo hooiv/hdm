@@ -108,7 +108,17 @@ async fn handle_socks_connection(mut stream: TcpStream, client: TorClient<Prefer
             stream.read_exact(&mut domain).await?;
             String::from_utf8_lossy(&domain).to_string()
         },
-        _ => return Err("Unsupported address type".into()),
+        0x04 => { // IPv6
+            let mut ip = [0u8; 16];
+            stream.read_exact(&mut ip).await?;
+            let addr = std::net::Ipv6Addr::from(ip);
+            addr.to_string()
+        },
+        _ => {
+            // SOCKS5 error reply: address type not supported (0x08)
+            let _ = stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0,0,0,0, 0,0]).await;
+            return Err("Unsupported address type".into());
+        },
     };
 
     let mut port_bytes = [0u8; 2];
@@ -118,21 +128,37 @@ async fn handle_socks_connection(mut stream: TcpStream, client: TorClient<Prefer
     println!("Tor Proxy: Connecting to {}:{}", host, port);
 
     // 3. Connect via Tor
-    let target_stream = client.connect((host.as_str(), port)).await?;
+    let target_stream = match client.connect((host.as_str(), port)).await {
+        Ok(s) => s,
+        Err(e) => {
+            // SOCKS5 error reply: connection refused (0x05) or general failure (0x01)
+            let _ = stream.write_all(&[0x05, 0x05, 0x00, 0x01, 0,0,0,0, 0,0]).await;
+            return Err(e.into());
+        }
+    };
 
     // 4. Reply Success
     stream.write_all(&[0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]).await?;
 
-    // 5. Pipe
+    // 5. Pipe data bidirectionally
     let (mut ri, mut wi) = stream.into_split();
     let (mut ro, mut wo) = target_stream.split();
 
-    let client_to_server = tokio::io::copy(&mut ri, &mut wo);
-    let server_to_client = tokio::io::copy(&mut ro, &mut wi);
+    let c2s = tokio::io::copy(&mut ri, &mut wo);
+    let s2c = tokio::io::copy(&mut ro, &mut wi);
+    tokio::pin!(c2s, s2c);
 
+    // When one direction finishes, drain the other to avoid data loss.
+    // select! alone would drop the losing branch mid-transfer.
     tokio::select! {
-        _ = client_to_server => {},
-        _ = server_to_client => {},
+        _ = &mut c2s => {
+            // Client finished sending (EOF). Drain remaining server→client data.
+            let _ = s2c.await;
+        },
+        _ = &mut s2c => {
+            // Server finished sending. Client should stop shortly.
+            let _ = c2s.await;
+        },
     }
 
     Ok(())

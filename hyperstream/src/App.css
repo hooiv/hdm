@@ -3,45 +3,7 @@
   --text-main: #f8fafc;
 }
 
-html,
-body {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  width: 100%;
-  overflow: hidden;
-  background: transparent;
-  /* Essential for transparent window */
-  font-family: 'Inter', sans-serif;
-  user-select: none;
-}
-
-#root {
-  height: 100%;
-  width: 100%;
-  background: transparent;
-}
-
-/* Custom Scrollbar */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 3px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #475569;
-}
-
-/* Utilities for animations that might not be in Tailwind default config */
+/* App-specific utility classes */
 .glass-modal-overlay {
   position: fixed;
   inset: 0;
@@ -70,10 +32,6 @@ body {
     rgba(0,0,0,0.25)
   );
   background-size: 100% 4px;
-}
-
-.text-glow {
-  text-shadow: 0 0 10px rgba(6, 182, 212, 0.6), 0 0 20px rgba(6, 182, 212, 0.4);
 }
 
 .cyber-hud-container {
