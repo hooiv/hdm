@@ -7,10 +7,13 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::menu::{Menu, MenuItem};
 use futures_util::StreamExt;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use crate::downloader::disk::{DiskWriter, WriteRequest};
 use std::sync::mpsc;
 use std::thread;
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod downloader;
 mod persistence;
@@ -103,46 +106,918 @@ pub fn resolve_download_path(path: &str, download_dir: &str) -> Result<std::path
 
 // (id, start, end, cursor, state, speed)
 
+// ─── Torrent commands ────────────────────────────────────────────────────────
+
+#[derive(Clone, serde::Serialize)]
+struct TorrentBulkActionResult {
+    attempted: usize,
+    succeeded: usize,
+    failed: usize,
+    failed_ids: Vec<usize>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct AddTorrentResult {
+    id: usize,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct TorrentActionFailedEvent {
+    timestamp_ms: u64,
+    severity: String,
+    category: String,
+    action: String,
+    id: Option<usize>,
+    error: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct TorrentDiagnostics {
+    generated_at_ms: u64,
+    auto_manage_queue: bool,
+    max_active_downloads: u32,
+    auto_stop_seeding: bool,
+    seed_ratio_limit: f64,
+    seed_time_limit_mins: u32,
+    total_torrents: usize,
+    live_torrents: usize,
+    paused_torrents: usize,
+    error_torrents: usize,
+    initializing_torrents: usize,
+    completed_torrents: usize,
+    pinned_torrents: usize,
+    queue_auto_paused: usize,
+    seeding_policy_auto_paused: usize,
+    recent_error_count: usize,
+    recent_warning_count: usize,
+    recent_errors: Vec<TorrentActionFailedEvent>,
+    recent_warnings: Vec<TorrentActionFailedEvent>,
+    recent_failures: Vec<TorrentActionFailedEvent>,
+    torrents: Vec<network::bittorrent::manager::TorrentStatus>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct RecentIssueClearResult {
+    removed_count: usize,
+    clear_token: Option<u64>,
+}
+
+#[derive(Clone)]
+struct ClearedTorrentIssuesBatch {
+    token: u64,
+    entries: Vec<TorrentActionFailedEvent>,
+}
+
+const MAX_RECENT_TORRENT_ERRORS: usize = 128;
+const MAX_TORRENT_ERROR_MESSAGE_CHARS: usize = 512;
+
+fn recent_torrent_errors() -> &'static Mutex<Vec<TorrentActionFailedEvent>> {
+    static STORE: OnceLock<Mutex<Vec<TorrentActionFailedEvent>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn last_cleared_torrent_issues() -> &'static Mutex<Option<ClearedTorrentIssuesBatch>> {
+    static STORE: OnceLock<Mutex<Option<ClearedTorrentIssuesBatch>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(None))
+}
+
+fn next_torrent_issue_clear_token() -> u64 {
+    static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
+    TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn should_restore_cleared_batch(expected_token: Option<u64>, batch_token: u64) -> bool {
+    match expected_token {
+        Some(expected) => expected == batch_token,
+        None => true,
+    }
+}
+
+fn torrent_action_category(action: &str) -> &'static str {
+    match action {
+        "add_magnet" | "add_torrent_file" => "ingest",
+        "add_magnet_config" | "add_torrent_file_config" => "config",
+        "pause" | "resume" | "remove" | "update_files" | "set_priority" | "set_pinned" => "action",
+        "pause_policy"
+        | "resume_policy"
+        | "remove_policy"
+        | "set_priority_policy"
+        | "set_pinned_policy"
+        | "add_magnet_policy"
+        | "add_torrent_file_policy"
+        | "pause_all_policy"
+        | "resume_all_policy"
+        | "settings_policy" => "policy",
+        _ => "unknown",
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn normalize_torrent_error_message(error: &str) -> String {
+    let trimmed = error.trim();
+    if trimmed.chars().count() <= MAX_TORRENT_ERROR_MESSAGE_CHARS {
+        return trimmed.to_string();
+    }
+    let mut out = trimmed
+        .chars()
+        .take(MAX_TORRENT_ERROR_MESSAGE_CHARS)
+        .collect::<String>();
+    out.push_str("...");
+    out
+}
+
+async fn enforce_torrent_policies(
+    tm: &network::bittorrent::manager::TorrentManager,
+    settings: &settings::Settings,
+) -> Result<(), String> {
+    let queue_limit = if settings.torrent_auto_manage_queue {
+        settings.torrent_max_active_downloads as usize
+    } else {
+        0
+    };
+
+    tm.enforce_queue_limits(queue_limit)
+        .await
+        .map_err(|e| e.to_string())?;
+    tm.enforce_seeding_policy(
+        settings.torrent_auto_stop_seeding,
+        settings.torrent_seed_ratio_limit,
+        settings.torrent_seed_time_limit_mins,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn apply_initial_torrent_config(
+    tm: &network::bittorrent::manager::TorrentManager,
+    id: usize,
+    initial_priority: Option<String>,
+    pinned: Option<bool>,
+) -> Result<settings::Settings, String> {
+    let normalized_priority = match initial_priority {
+        Some(priority) => Some(
+            settings::normalize_torrent_priority_label(&priority)
+                .ok_or_else(|| "Priority must be one of: high, normal, low".to_string())?
+                .to_string(),
+        ),
+        None => None,
+    };
+
+    if normalized_priority.is_none() && pinned.is_none() {
+        return Ok(settings::load_settings());
+    }
+
+    let info_hash = tm
+        .get_torrents()
+        .into_iter()
+        .find(|torrent| torrent.id == id)
+        .map(|torrent| torrent.info_hash)
+        .ok_or_else(|| format!("Torrent {} not found", id))?;
+
+    let mut current_settings = settings::load_settings();
+    apply_torrent_preferences_to_settings(
+        &mut current_settings,
+        &info_hash,
+        normalized_priority.as_deref(),
+        pinned,
+    );
+
+    settings::save_settings(&current_settings)?;
+    Ok(current_settings)
+}
+
+fn apply_torrent_preferences_to_settings(
+    current_settings: &mut settings::Settings,
+    info_hash: &str,
+    normalized_priority: Option<&str>,
+    pinned: Option<bool>,
+) {
+    let normalized_hash = info_hash.to_ascii_lowercase();
+
+    if let Some(priority) = normalized_priority {
+        if priority == "normal" {
+            current_settings
+                .torrent_priority_overrides
+                .remove(&normalized_hash);
+        } else {
+            current_settings
+                .torrent_priority_overrides
+                .insert(normalized_hash.clone(), priority.to_string());
+        }
+    }
+
+    if let Some(should_pin) = pinned {
+        if should_pin {
+            current_settings.torrent_pinned_hashes.insert(normalized_hash);
+        } else {
+            current_settings.torrent_pinned_hashes.remove(&normalized_hash);
+        }
+    }
+}
+
+fn emit_torrent_refresh(app: &tauri::AppHandle) {
+    let _ = app.emit("torrents_refresh", ());
+}
+
+fn emit_torrent_action_event(
+    app: &tauri::AppHandle,
+    action: &'static str,
+    id: Option<usize>,
+    severity: &'static str,
+    error: &str,
+) {
+    let normalized_severity = match severity {
+        "warning" => "warning",
+        _ => "error",
+    };
+
+    let event = TorrentActionFailedEvent {
+        timestamp_ms: now_unix_ms(),
+        severity: normalized_severity.to_string(),
+        category: torrent_action_category(action).to_string(),
+        action: action.to_string(),
+        id,
+        error: normalize_torrent_error_message(error),
+    };
+
+    {
+        let mut recent = recent_torrent_errors()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        recent.push(event.clone());
+        if recent.len() > MAX_RECENT_TORRENT_ERRORS {
+            let remove = recent.len() - MAX_RECENT_TORRENT_ERRORS;
+            recent.drain(0..remove);
+        }
+    }
+
+    let _ = app.emit(
+        "torrent_action_failed",
+        event,
+    );
+}
+
+fn emit_torrent_action_failed(
+    app: &tauri::AppHandle,
+    action: &'static str,
+    id: Option<usize>,
+    error: &str,
+) {
+    emit_torrent_action_event(app, action, id, "error", error);
+}
+
+fn emit_torrent_action_warning(
+    app: &tauri::AppHandle,
+    action: &'static str,
+    id: Option<usize>,
+    warning: &str,
+) {
+    emit_torrent_action_event(app, action, id, "warning", warning);
+}
+
 #[tauri::command]
 async fn add_magnet_link(
     magnet: String,
-    state: State<'_, AppState>
-) -> Result<usize, String> {
-    println!("Adding magnet link: {}", magnet);
+    save_path: Option<String>,
+    paused: Option<bool>,
+    initial_priority: Option<String>,
+    pinned: Option<bool>,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<AddTorrentResult, String> {
     let tm = state.torrent_manager.as_ref()
         .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
-    tm.add_magnet(&magnet).await.map_err(|e| e.to_string())
+    let add_outcome = match tm
+        .add_magnet(&magnet, save_path, paused.unwrap_or(false))
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let msg = e.to_string();
+            emit_torrent_action_failed(&app, "add_magnet", None, &msg);
+            return Err(msg);
+        }
+    };
+    let id = add_outcome.id;
+    let mut warnings = Vec::new();
+    if add_outcome.already_managed {
+        warnings.push("Torrent already exists in session; reusing existing torrent".to_string());
+    }
+    let current_settings = match apply_initial_torrent_config(
+        tm.as_ref(),
+        id,
+        initial_priority,
+        pinned,
+    ) {
+        Ok(settings) => settings,
+        Err(e) => {
+            emit_torrent_action_failed(&app, "add_magnet_config", Some(id), &e);
+            return Err(e);
+        }
+    };
+    if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
+        warnings.push(format!("Policy enforcement warning: {}", e));
+        emit_torrent_action_warning(&app, "add_magnet_policy", Some(id), &e);
+    }
+    emit_torrent_refresh(&app);
+    Ok(AddTorrentResult { id, warnings })
+}
+
+/// Add a torrent from a base64-encoded `.torrent` file sent by the frontend.
+#[tauri::command]
+async fn add_torrent_file(
+    base64_data: String,
+    save_path: Option<String>,
+    paused: Option<bool>,
+    only_files: Option<Vec<usize>>,
+    initial_priority: Option<String>,
+    pinned: Option<bool>,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<AddTorrentResult, String> {
+    const MAX_TORRENT_METADATA_BYTES: usize = 8 * 1024 * 1024;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let estimated_decoded_len = (base64_data.len() / 4) * 3;
+    if estimated_decoded_len > MAX_TORRENT_METADATA_BYTES {
+        let msg = format!(
+            "Torrent file is too large (max {} MiB)",
+            MAX_TORRENT_METADATA_BYTES / (1024 * 1024)
+        );
+        emit_torrent_action_failed(&app, "add_torrent_file", None, &msg);
+        return Err(msg);
+    }
+
+    let raw = STANDARD.decode(&base64_data)
+        .map_err(|e| {
+            let msg = format!("Invalid base64: {}", e);
+            emit_torrent_action_failed(&app, "add_torrent_file", None, &msg);
+            msg
+        })?;
+    if raw.len() > MAX_TORRENT_METADATA_BYTES {
+        let msg = format!(
+            "Torrent file is too large (max {} MiB)",
+            MAX_TORRENT_METADATA_BYTES / (1024 * 1024)
+        );
+        emit_torrent_action_failed(&app, "add_torrent_file", None, &msg);
+        return Err(msg);
+    }
+
+    let bytes = bytes::Bytes::from(raw);
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+    let add_outcome = match tm
+        .add_torrent_bytes(bytes, save_path, paused.unwrap_or(false), only_files)
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let msg = e.to_string();
+            emit_torrent_action_failed(&app, "add_torrent_file", None, &msg);
+            return Err(msg);
+        }
+    };
+    let id = add_outcome.id;
+    let mut warnings = Vec::new();
+    if add_outcome.already_managed {
+        warnings.push("Torrent already exists in session; reusing existing torrent".to_string());
+    }
+    let current_settings = match apply_initial_torrent_config(
+        tm.as_ref(),
+        id,
+        initial_priority,
+        pinned,
+    ) {
+        Ok(settings) => settings,
+        Err(e) => {
+            emit_torrent_action_failed(&app, "add_torrent_file_config", Some(id), &e);
+            return Err(e);
+        }
+    };
+    if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
+        warnings.push(format!("Policy enforcement warning: {}", e));
+        emit_torrent_action_warning(&app, "add_torrent_file_policy", Some(id), &e);
+    }
+    emit_torrent_refresh(&app);
+    Ok(AddTorrentResult { id, warnings })
 }
 
 #[tauri::command]
 async fn play_torrent(
     id: usize,
-    state: State<'_, AppState>
+    file_id: Option<usize>,
+    state: State<'_, AppState>,
 ) -> Result<String, String> {
     let tm = state.torrent_manager.as_ref()
         .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
-    // 1. Get file ID (largest file)
-    let fid = tm.get_largest_file_id(id)
-        .ok_or_else(|| "Could not determine main file ID".to_string())?;
-
-    // 2. Register in FileMap (ID -> Torrent Source)
+    let fid = match file_id {
+        Some(f) => f,
+        None => tm.get_largest_file_id(id)
+            .ok_or_else(|| "Could not determine main file ID".to_string())?,
+    };
     {
         let mut map = state.p2p_file_map.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(id.to_string(), StreamingSource::Torrent { torrent_id: id, file_id: fid });
     }
-
-    // 3. Return URL
     Ok(format!("http://localhost:14733/p2p/{}", id))
 }
 
 #[tauri::command]
 async fn get_torrents(
-    state: State<'_, AppState>
+    state: State<'_, AppState>,
 ) -> Result<Vec<network::bittorrent::manager::TorrentStatus>, String> {
     match state.torrent_manager.as_ref() {
         Some(tm) => Ok(tm.get_torrents()),
         None => Ok(Vec::new()),
     }
+}
+
+/// Get the per-file breakdown for a single torrent.
+#[tauri::command]
+async fn get_torrent_files(
+    id: usize,
+    state: State<'_, AppState>,
+) -> Result<Vec<network::bittorrent::manager::TorrentFileInfo>, String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+    tm.get_torrent_files(id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn pause_torrent(
+    id: usize,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+    if let Err(e) = tm.pause_torrent(id).await {
+        let msg = e.to_string();
+        emit_torrent_action_failed(&app, "pause", Some(id), &msg);
+        return Err(msg);
+    }
+    let current_settings = settings::load_settings();
+    if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
+        emit_torrent_action_warning(&app, "pause_policy", Some(id), &e);
+    }
+    emit_torrent_refresh(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_recent_torrent_errors() -> Vec<TorrentActionFailedEvent> {
+    let recent = recent_torrent_errors()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    recent.iter().cloned().rev().collect()
+}
+
+fn normalize_issue_filter(filter: Option<&str>) -> Result<&str, String> {
+    let normalized = filter.unwrap_or("all");
+    if normalized != "all" && normalized != "errors" && normalized != "warnings" {
+        return Err(format!("Unknown issue filter: {}", normalized));
+    }
+    Ok(normalized)
+}
+
+fn split_recent_torrent_issues_by_filter(
+    entries: Vec<TorrentActionFailedEvent>,
+    filter: Option<&str>,
+) -> Result<(Vec<TorrentActionFailedEvent>, Vec<TorrentActionFailedEvent>), String> {
+    let normalized = normalize_issue_filter(filter)?;
+
+    let mut kept = Vec::with_capacity(entries.len());
+    let mut removed = Vec::new();
+    for entry in entries {
+        let is_warning = entry.severity.eq_ignore_ascii_case("warning");
+        let should_remove = match normalized {
+            "all" => true,
+            "errors" => !is_warning,
+            "warnings" => is_warning,
+            _ => false,
+        };
+        if should_remove {
+            removed.push(entry);
+        } else {
+            kept.push(entry);
+        }
+    }
+    Ok((kept, removed))
+}
+
+fn merge_recent_torrent_issues(
+    mut existing: Vec<TorrentActionFailedEvent>,
+    mut restored: Vec<TorrentActionFailedEvent>,
+) -> Vec<TorrentActionFailedEvent> {
+    existing.append(&mut restored);
+    existing.sort_by_key(|entry| entry.timestamp_ms);
+    if existing.len() > MAX_RECENT_TORRENT_ERRORS {
+        let remove = existing.len() - MAX_RECENT_TORRENT_ERRORS;
+        existing.drain(0..remove);
+    }
+    existing
+}
+
+fn clear_recent_torrent_issues_internal(filter: Option<&str>) -> Result<RecentIssueClearResult, String> {
+    normalize_issue_filter(filter)?;
+
+    let mut recent = recent_torrent_errors()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let existing = std::mem::take(&mut *recent);
+    let (kept, removed) = split_recent_torrent_issues_by_filter(existing, filter)?;
+    *recent = kept;
+    drop(recent);
+
+    let removed_count = removed.len();
+    let mut last_cleared = last_cleared_torrent_issues()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if removed_count == 0 {
+        *last_cleared = None;
+        return Ok(RecentIssueClearResult {
+            removed_count: 0,
+            clear_token: None,
+        });
+    }
+
+    let clear_token = next_torrent_issue_clear_token();
+    *last_cleared = Some(ClearedTorrentIssuesBatch {
+        token: clear_token,
+        entries: removed,
+    });
+
+    Ok(RecentIssueClearResult {
+        removed_count,
+        clear_token: Some(clear_token),
+    })
+}
+
+#[tauri::command]
+fn clear_recent_torrent_errors() {
+    let _ = clear_recent_torrent_issues_internal(None);
+}
+
+#[tauri::command]
+fn clear_recent_torrent_issues(filter: Option<String>) -> Result<RecentIssueClearResult, String> {
+    clear_recent_torrent_issues_internal(filter.as_deref())
+}
+
+#[tauri::command]
+fn restore_recent_torrent_issues(expected_token: Option<u64>) -> usize {
+    let mut recent = recent_torrent_errors()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut last_cleared = last_cleared_torrent_issues()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let Some(batch) = last_cleared.take() else {
+        return 0;
+    };
+
+    if !should_restore_cleared_batch(expected_token, batch.token) {
+        *last_cleared = Some(batch);
+        return 0;
+    }
+
+    let restored_count = batch.entries.len();
+    let existing = std::mem::take(&mut *recent);
+    *recent = merge_recent_torrent_issues(existing, batch.entries);
+
+    restored_count
+}
+
+#[tauri::command]
+fn get_torrent_diagnostics(state: State<'_, AppState>) -> Result<TorrentDiagnostics, String> {
+    let settings = settings::load_settings();
+    let torrents = match state.torrent_manager.as_ref() {
+        Some(tm) => tm.get_torrents(),
+        None => Vec::new(),
+    };
+    let recent_errors = get_recent_torrent_errors();
+    let recent_warnings = recent_errors
+        .iter()
+        .filter(|entry| entry.severity.eq_ignore_ascii_case("warning"))
+        .cloned()
+        .take(64)
+        .collect::<Vec<_>>();
+    let recent_failures = recent_errors
+        .iter()
+        .filter(|entry| entry.severity.eq_ignore_ascii_case("error"))
+        .cloned()
+        .take(64)
+        .collect::<Vec<_>>();
+
+    let total_torrents = torrents.len();
+    let live_torrents = torrents.iter().filter(|t| t.state == "live").count();
+    let paused_torrents = torrents.iter().filter(|t| t.state == "paused").count();
+    let error_torrents = torrents.iter().filter(|t| t.state == "error").count();
+    let initializing_torrents = torrents
+        .iter()
+        .filter(|t| t.state == "initializing")
+        .count();
+    let completed_torrents = torrents.iter().filter(|t| t.finished).count();
+    let pinned_torrents = torrents.iter().filter(|t| t.pinned).count();
+    let queue_auto_paused = torrents
+        .iter()
+        .filter(|t| t.auto_pause_reason.as_deref() == Some("queue"))
+        .count();
+    let seeding_policy_auto_paused = torrents
+        .iter()
+        .filter(|t| t.auto_pause_reason.as_deref() == Some("seeding_policy"))
+        .count();
+
+    Ok(TorrentDiagnostics {
+        generated_at_ms: now_unix_ms(),
+        auto_manage_queue: settings.torrent_auto_manage_queue,
+        max_active_downloads: settings.torrent_max_active_downloads,
+        auto_stop_seeding: settings.torrent_auto_stop_seeding,
+        seed_ratio_limit: settings.torrent_seed_ratio_limit,
+        seed_time_limit_mins: settings.torrent_seed_time_limit_mins,
+        total_torrents,
+        live_torrents,
+        paused_torrents,
+        error_torrents,
+        initializing_torrents,
+        completed_torrents,
+        pinned_torrents,
+        queue_auto_paused,
+        seeding_policy_auto_paused,
+        recent_error_count: recent_failures.len(),
+        recent_warning_count: recent_warnings.len(),
+        recent_errors: recent_errors.into_iter().take(64).collect(),
+        recent_warnings,
+        recent_failures,
+        torrents,
+    })
+}
+
+#[tauri::command]
+async fn resume_torrent(
+    id: usize,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+    if let Err(e) = tm.resume_torrent(id).await {
+        let msg = e.to_string();
+        emit_torrent_action_failed(&app, "resume", Some(id), &msg);
+        return Err(msg);
+    }
+    let current_settings = settings::load_settings();
+    if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
+        emit_torrent_action_warning(&app, "resume_policy", Some(id), &e);
+    }
+    emit_torrent_refresh(&app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn pause_all_torrents(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<TorrentBulkActionResult, String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+
+    let ids = tm
+        .get_torrents()
+        .into_iter()
+        .filter(|torrent| torrent.state == "live")
+        .map(|torrent| torrent.id)
+        .collect::<Vec<_>>();
+    let attempted = ids.len();
+
+    let mut paused_count = 0usize;
+    let mut failed_ids = Vec::new();
+    for id in ids {
+        match tm.pause_torrent(id).await {
+            Ok(()) => paused_count += 1,
+            Err(e) => {
+                eprintln!("[torrent-bulk] failed to pause {}: {}", id, e);
+                emit_torrent_action_failed(&app, "pause", Some(id), &e.to_string());
+                failed_ids.push(id);
+            }
+        }
+    }
+
+    let current_settings = settings::load_settings();
+    if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
+        emit_torrent_action_warning(&app, "pause_all_policy", None, &e);
+    }
+    emit_torrent_refresh(&app);
+    Ok(TorrentBulkActionResult {
+        attempted,
+        succeeded: paused_count,
+        failed: attempted.saturating_sub(paused_count),
+        failed_ids,
+    })
+}
+
+#[tauri::command]
+async fn resume_all_torrents(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<TorrentBulkActionResult, String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+
+    let ids = tm
+        .get_torrents()
+        .into_iter()
+        .filter(|torrent| torrent.state == "paused" || torrent.state == "error")
+        .map(|torrent| torrent.id)
+        .collect::<Vec<_>>();
+    let attempted = ids.len();
+
+    let mut resumed_count = 0usize;
+    let mut failed_ids = Vec::new();
+    for id in ids {
+        match tm.resume_torrent(id).await {
+            Ok(()) => resumed_count += 1,
+            Err(e) => {
+                eprintln!("[torrent-bulk] failed to resume {}: {}", id, e);
+                emit_torrent_action_failed(&app, "resume", Some(id), &e.to_string());
+                failed_ids.push(id);
+            }
+        }
+    }
+
+    let current_settings = settings::load_settings();
+    if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
+        emit_torrent_action_warning(&app, "resume_all_policy", None, &e);
+    }
+    emit_torrent_refresh(&app);
+    Ok(TorrentBulkActionResult {
+        attempted,
+        succeeded: resumed_count,
+        failed: attempted.saturating_sub(resumed_count),
+        failed_ids,
+    })
+}
+
+/// Remove a torrent from the session.
+/// `delete_files` = true will also wipe the downloaded data from disk.
+#[tauri::command]
+async fn remove_torrent(
+    id: usize,
+    delete_files: bool,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+    if let Err(e) = tm.remove_torrent(id, delete_files).await {
+        let msg = e.to_string();
+        emit_torrent_action_failed(&app, "remove", Some(id), &msg);
+        return Err(msg);
+    }
+    let current_settings = settings::load_settings();
+    if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
+        emit_torrent_action_warning(&app, "remove_policy", Some(id), &e);
+    }
+    emit_torrent_refresh(&app);
+    Ok(())
+}
+
+/// Update the set of files to be downloaded within a torrent.
+#[tauri::command]
+async fn update_torrent_files(
+    id: usize,
+    included_ids: Vec<usize>,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+    if let Err(e) = tm.update_only_files(id, included_ids).await {
+        let msg = e.to_string();
+        emit_torrent_action_failed(&app, "update_files", Some(id), &msg);
+        return Err(msg);
+    }
+    emit_torrent_refresh(&app);
+    Ok(())
+}
+
+/// Open the torrent's save folder in the system file explorer.
+#[tauri::command]
+async fn open_torrent_folder(
+    id: usize,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let torrents = get_torrents(state).await?;
+    let t = torrents
+        .iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| format!("Torrent {} not found", id))?;
+    let path = std::path::Path::new(&t.save_path);
+    if path.exists() {
+        #[cfg(target_os = "windows")]
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_torrent_priority(
+    id: usize,
+    priority: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+
+    let normalized = settings::normalize_torrent_priority_label(&priority)
+        .ok_or_else(|| "Priority must be one of: high, normal, low".to_string())?;
+
+    let info_hash = tm
+        .get_torrents()
+        .into_iter()
+        .find(|torrent| torrent.id == id)
+        .map(|torrent| torrent.info_hash)
+        .ok_or_else(|| format!("Torrent {} not found", id))?;
+
+    let mut current_settings = settings::load_settings();
+    if normalized == "normal" {
+        current_settings
+            .torrent_priority_overrides
+            .remove(&info_hash.to_ascii_lowercase());
+    } else {
+        current_settings
+            .torrent_priority_overrides
+            .insert(info_hash.to_ascii_lowercase(), normalized.to_string());
+    }
+    if let Err(e) = settings::save_settings(&current_settings) {
+        emit_torrent_action_failed(&app, "set_priority", Some(id), &e);
+        return Err(e);
+    }
+
+    if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
+        emit_torrent_action_warning(&app, "set_priority_policy", Some(id), &e);
+    }
+    emit_torrent_refresh(&app);
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_torrent_pinned(
+    id: usize,
+    pinned: bool,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let tm = state.torrent_manager.as_ref()
+        .ok_or_else(|| "Torrent subsystem is not available".to_string())?;
+
+    let info_hash = tm
+        .get_torrents()
+        .into_iter()
+        .find(|torrent| torrent.id == id)
+        .map(|torrent| torrent.info_hash)
+        .ok_or_else(|| format!("Torrent {} not found", id))?;
+
+    let mut current_settings = settings::load_settings();
+    let normalized_hash = info_hash.to_ascii_lowercase();
+    if pinned {
+        current_settings.torrent_pinned_hashes.insert(normalized_hash);
+    } else {
+        current_settings.torrent_pinned_hashes.remove(&normalized_hash);
+    }
+    if let Err(e) = settings::save_settings(&current_settings) {
+        emit_torrent_action_failed(&app, "set_pinned", Some(id), &e);
+        return Err(e);
+    }
+
+    if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
+        emit_torrent_action_warning(&app, "set_pinned_policy", Some(id), &e);
+    }
+    emit_torrent_refresh(&app);
+
+    Ok(())
 }
 
 /// Validate that an export/import file path is within safe user directories
@@ -325,13 +1200,31 @@ fn get_auth_token() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn save_settings(settings: serde_json::Value) -> Result<(), String> {
+async fn save_settings(
+    settings: serde_json::Value,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<Vec<String>, String> {
     let new_settings: settings::Settings = serde_json::from_value(settings).map_err(|e| e.to_string())?;
+    let mut warnings = Vec::new();
     // Update speed limiter when settings change
     speed_limiter::GLOBAL_LIMITER.set_limit(new_settings.speed_limit_kbps * 1024);
+    if let Some(tm) = state.torrent_manager.as_ref() {
+        tm.set_session_download_limit_kbps(new_settings.speed_limit_kbps);
+    }
     // Update clipboard monitor
     clipboard::CLIPBOARD_MONITOR.set_enabled(new_settings.clipboard_monitor);
-    settings::save_settings(&new_settings)
+    settings::save_settings(&new_settings)?;
+
+    if let Some(tm) = state.torrent_manager.as_ref() {
+        if let Err(e) = enforce_torrent_policies(tm.as_ref(), &new_settings).await {
+            warnings.push(format!("Policy enforcement warning: {}", e));
+            emit_torrent_action_warning(&app, "settings_policy", None, &e);
+        }
+        emit_torrent_refresh(&app);
+    }
+
+    Ok(warnings)
 }
 
 #[tauri::command]
@@ -980,8 +1873,11 @@ async fn acquire_bandwidth(amount: u32) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_speed_limit(limit_kbps: u64) {
+fn set_speed_limit(limit_kbps: u64, state: State<'_, AppState>) {
     speed_limiter::GLOBAL_LIMITER.set_limit(limit_kbps * 1024);
+    if let Some(tm) = state.torrent_manager.as_ref() {
+        tm.set_session_download_limit_kbps(limit_kbps);
+    }
 }
 
 #[tauri::command]
@@ -1979,8 +2875,24 @@ pub fn run() {
             open_file_for_resume,
             get_disk_writer_config,
             add_magnet_link,
+            add_torrent_file,
             play_torrent,
             get_torrents,
+            get_torrent_diagnostics,
+            get_recent_torrent_errors,
+            clear_recent_torrent_errors,
+            clear_recent_torrent_issues,
+            restore_recent_torrent_issues,
+            get_torrent_files,
+            pause_torrent,
+            resume_torrent,
+            pause_all_torrents,
+            resume_all_torrents,
+            remove_torrent,
+            update_torrent_files,
+            open_torrent_folder,
+            set_torrent_priority,
+            set_torrent_pinned,
             set_chaos_config,
             get_chaos_config,
             // Advanced Subsystems
@@ -2175,25 +3087,31 @@ pub fn run() {
             
             let torrent_manager: Option<Arc<network::bittorrent::manager::TorrentManager>> = tauri::async_runtime::block_on(async {
                  let settings = settings::load_settings();
+                 let speed_limit_kbps = settings.speed_limit_kbps;
                  let mut path = std::path::PathBuf::from(&settings.download_dir);
                  path.push("Torrents");
                  std::fs::create_dir_all(&path).unwrap_or_default();
+                 let make_manager = |tm: network::bittorrent::manager::TorrentManager| {
+                     let tm = Arc::new(tm);
+                     tm.set_session_download_limit_kbps(speed_limit_kbps);
+                     Some(tm)
+                 };
                  match network::bittorrent::manager::TorrentManager::new(path).await {
-                     Ok(tm) => Some(Arc::new(tm)),
+                     Ok(tm) => make_manager(tm),
                      Err(e) => {
                          eprintln!("Warning: Torrent Manager failed to start: {}", e);
                          // Use a fallback temp directory instead of panicking
                          let fallback = std::env::temp_dir().join("hyperstream_torrents");
                          std::fs::create_dir_all(&fallback).unwrap_or_default();
                          match network::bittorrent::manager::TorrentManager::new(fallback).await {
-                             Ok(tm) => Some(Arc::new(tm)),
+                             Ok(tm) => make_manager(tm),
                              Err(e2) => {
                                  eprintln!("CRITICAL: Torrent Manager failed even with temp dir: {}. Torrent features will be unavailable.", e2);
                                  // Try one last time with a unique temp dir
                                  let last_resort = std::env::temp_dir().join(format!("hyperstream_torrents_{}", std::process::id()));
                                  std::fs::create_dir_all(&last_resort).unwrap_or_default();
                                  match network::bittorrent::manager::TorrentManager::new(last_resort).await {
-                                     Ok(tm) => Some(Arc::new(tm)),
+                                     Ok(tm) => make_manager(tm),
                                      Err(e3) => {
                                          eprintln!("FATAL: Torrent subsystem completely unavailable: {}. Continuing without torrent support.", e3);
                                          None
@@ -2280,6 +3198,41 @@ pub fn run() {
                  torrent_manager: torrent_manager.clone(),
                  connection_manager: network::connection_manager::ConnectionManager::default(),
                  chatops_manager: chatops_manager.clone(),
+            });
+
+            // Automatic torrent queue management (active slot enforcement).
+            let queue_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    let settings = crate::settings::load_settings();
+                    let state = queue_app_handle.state::<AppState>();
+                    if let Some(tm) = state.torrent_manager.as_ref() {
+                        let queue_limit = if settings.torrent_auto_manage_queue {
+                            settings.torrent_max_active_downloads as usize
+                        } else {
+                            0
+                        };
+                        if let Err(e) = tm
+                            .enforce_queue_limits(queue_limit)
+                            .await
+                        {
+                            eprintln!("[torrent-queue] enforcement error: {}", e);
+                        }
+
+                        if let Err(e) = tm
+                            .enforce_seeding_policy(
+                                settings.torrent_auto_stop_seeding,
+                                settings.torrent_seed_ratio_limit,
+                                settings.torrent_seed_time_limit_mins,
+                            )
+                            .await
+                        {
+                            eprintln!("[torrent-seeding] enforcement error: {}", e);
+                        }
+                    }
+                }
             });
 
             // Initialize Plugin Manager
@@ -2795,4 +3748,170 @@ async fn check_wayback_availability(url: String) -> Result<Option<wayback::Wayba
 #[tauri::command]
 fn get_wayback_url(wayback_url: String) -> String {
     wayback::get_wayback_download_url(&wayback_url)
+}
+
+#[cfg(test)]
+mod torrent_add_config_tests {
+    use super::*;
+
+    const SAMPLE_HASH: &str = "ABCDEF1234567890ABCDEF1234567890ABCDEF12";
+
+    fn sample_issue(timestamp_ms: u64, severity: &str, action: &str) -> TorrentActionFailedEvent {
+        TorrentActionFailedEvent {
+            timestamp_ms,
+            severity: severity.to_string(),
+            category: "test".to_string(),
+            action: action.to_string(),
+            id: Some(1),
+            error: "boom".to_string(),
+        }
+    }
+
+    #[test]
+    fn apply_sets_priority_and_pin() {
+        let mut s = settings::Settings::default();
+        apply_torrent_preferences_to_settings(&mut s, SAMPLE_HASH, Some("high"), Some(true));
+
+        let key = SAMPLE_HASH.to_ascii_lowercase();
+        assert_eq!(
+            s.torrent_priority_overrides.get(&key).map(|v| v.as_str()),
+            Some("high")
+        );
+        assert!(s.torrent_pinned_hashes.contains(&key));
+    }
+
+    #[test]
+    fn apply_normal_priority_removes_override_and_preserves_pin_when_pin_not_provided() {
+        let mut s = settings::Settings::default();
+        let key = SAMPLE_HASH.to_ascii_lowercase();
+        s.torrent_priority_overrides
+            .insert(key.clone(), "low".to_string());
+        s.torrent_pinned_hashes.insert(key.clone());
+
+        apply_torrent_preferences_to_settings(&mut s, SAMPLE_HASH, Some("normal"), None);
+
+        assert!(!s.torrent_priority_overrides.contains_key(&key));
+        assert!(s.torrent_pinned_hashes.contains(&key));
+    }
+
+    #[test]
+    fn apply_unpin_only_removes_pin_without_touching_priority() {
+        let mut s = settings::Settings::default();
+        let key = SAMPLE_HASH.to_ascii_lowercase();
+        s.torrent_priority_overrides
+            .insert(key.clone(), "high".to_string());
+        s.torrent_pinned_hashes.insert(key.clone());
+
+        apply_torrent_preferences_to_settings(&mut s, SAMPLE_HASH, None, Some(false));
+
+        assert_eq!(
+            s.torrent_priority_overrides.get(&key).map(|v| v.as_str()),
+            Some("high")
+        );
+        assert!(!s.torrent_pinned_hashes.contains(&key));
+    }
+
+    #[test]
+    fn apply_no_options_is_noop() {
+        let mut s = settings::Settings::default();
+        let key = SAMPLE_HASH.to_ascii_lowercase();
+        s.torrent_priority_overrides
+            .insert(key.clone(), "low".to_string());
+        s.torrent_pinned_hashes.insert(key);
+
+        let before_overrides = s.torrent_priority_overrides.clone();
+        let before_pins = s.torrent_pinned_hashes.clone();
+
+        apply_torrent_preferences_to_settings(&mut s, SAMPLE_HASH, None, None);
+
+        assert_eq!(s.torrent_priority_overrides, before_overrides);
+        assert_eq!(s.torrent_pinned_hashes, before_pins);
+    }
+
+    #[test]
+    fn action_category_covers_add_config_actions() {
+        assert_eq!(torrent_action_category("add_magnet_config"), "config");
+        assert_eq!(torrent_action_category("add_torrent_file_config"), "config");
+    }
+
+    #[test]
+    fn action_category_keeps_known_policy_actions_as_policy() {
+        assert_eq!(torrent_action_category("add_magnet_policy"), "policy");
+        assert_eq!(torrent_action_category("settings_policy"), "policy");
+    }
+
+    #[test]
+    fn should_restore_batch_accepts_none_or_matching_token() {
+        assert!(should_restore_cleared_batch(None, 42));
+        assert!(should_restore_cleared_batch(Some(42), 42));
+        assert!(!should_restore_cleared_batch(Some(7), 42));
+    }
+
+    #[test]
+    fn split_recent_issues_by_filter_keeps_and_removes_expected_entries() {
+        let entries = vec![
+            sample_issue(10, "error", "pause"),
+            sample_issue(20, "warning", "add_magnet_policy"),
+            sample_issue(30, "error", "resume"),
+        ];
+
+        let (kept_errors, removed_errors) =
+            split_recent_torrent_issues_by_filter(entries.clone(), Some("errors")).unwrap();
+        assert_eq!(kept_errors.len(), 1);
+        assert_eq!(removed_errors.len(), 2);
+        assert!(kept_errors
+            .iter()
+            .all(|entry| entry.severity.eq_ignore_ascii_case("warning")));
+        assert!(removed_errors
+            .iter()
+            .all(|entry| entry.severity.eq_ignore_ascii_case("error")));
+
+        let (kept_warnings, removed_warnings) =
+            split_recent_torrent_issues_by_filter(entries, Some("warnings")).unwrap();
+        assert_eq!(kept_warnings.len(), 2);
+        assert_eq!(removed_warnings.len(), 1);
+        assert!(kept_warnings
+            .iter()
+            .all(|entry| entry.severity.eq_ignore_ascii_case("error")));
+        assert!(removed_warnings
+            .iter()
+            .all(|entry| entry.severity.eq_ignore_ascii_case("warning")));
+    }
+
+    #[test]
+    fn merge_recent_issues_restores_timestamp_order_and_caps_length() {
+        let existing = vec![
+            sample_issue(100, "error", "pause"),
+            sample_issue(300, "warning", "add_magnet_policy"),
+        ];
+        let restored = vec![sample_issue(200, "error", "resume")];
+        let merged = merge_recent_torrent_issues(existing, restored);
+
+        let merged_timestamps = merged
+            .iter()
+            .map(|entry| entry.timestamp_ms)
+            .collect::<Vec<_>>();
+        assert_eq!(merged_timestamps, vec![100, 200, 300]);
+
+        let oversized = (0..(MAX_RECENT_TORRENT_ERRORS + 3))
+            .map(|idx| sample_issue(idx as u64, "error", "pause"))
+            .collect::<Vec<_>>();
+        let clamped = merge_recent_torrent_issues(oversized, Vec::new());
+        assert_eq!(clamped.len(), MAX_RECENT_TORRENT_ERRORS);
+        assert_eq!(clamped.first().map(|entry| entry.timestamp_ms), Some(3));
+    }
+
+    #[test]
+    fn error_message_normalization_keeps_short_messages() {
+        let msg = "disk full";
+        assert_eq!(normalize_torrent_error_message(msg), "disk full");
+    }
+
+    #[test]
+    fn error_message_normalization_truncates_long_messages() {
+        let msg = "x".repeat(MAX_TORRENT_ERROR_MESSAGE_CHARS + 64);
+        let normalized = normalize_torrent_error_message(&msg);
+        assert!(normalized.ends_with("..."));
+        assert_eq!(normalized.chars().count(), MAX_TORRENT_ERROR_MESSAGE_CHARS + 3);
+    }
 }

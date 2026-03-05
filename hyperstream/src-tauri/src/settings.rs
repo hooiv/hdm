@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryRule {
@@ -130,6 +131,40 @@ pub struct Settings {
     pub prevent_sleep_during_download: bool,
     #[serde(default)]
     pub pause_on_low_battery: bool,
+
+    // Torrent queue management
+    #[serde(default = "default_torrent_max_active_downloads")]
+    pub torrent_max_active_downloads: u32,
+    #[serde(default = "default_true")]
+    pub torrent_auto_manage_queue: bool,
+
+    // Torrent seeding policy
+    #[serde(default = "default_true")]
+    pub torrent_auto_stop_seeding: bool,
+    #[serde(default = "default_torrent_seed_ratio_limit")]
+    pub torrent_seed_ratio_limit: f64,
+    #[serde(default = "default_torrent_seed_time_limit_mins")]
+    pub torrent_seed_time_limit_mins: u32,
+    #[serde(default)]
+    pub torrent_priority_overrides: HashMap<String, String>,
+    #[serde(default)]
+    pub torrent_pinned_hashes: HashSet<String>,
+}
+
+fn default_torrent_max_active_downloads() -> u32 {
+    4
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_torrent_seed_ratio_limit() -> f64 {
+    1.5
+}
+
+fn default_torrent_seed_time_limit_mins() -> u32 {
+    180
 }
 
 impl Default for Settings {
@@ -205,8 +240,28 @@ impl Default for Settings {
             mqtt_topic: "hyperstream/downloads".to_string(),
             prevent_sleep_during_download: true,
             pause_on_low_battery: true,
+            torrent_max_active_downloads: default_torrent_max_active_downloads(),
+            torrent_auto_manage_queue: true,
+            torrent_auto_stop_seeding: true,
+            torrent_seed_ratio_limit: default_torrent_seed_ratio_limit(),
+            torrent_seed_time_limit_mins: default_torrent_seed_time_limit_mins(),
+            torrent_priority_overrides: HashMap::new(),
+            torrent_pinned_hashes: HashSet::new(),
         }
     }
+}
+
+pub fn normalize_torrent_priority_label(priority: &str) -> Option<&'static str> {
+    match priority.trim().to_ascii_lowercase().as_str() {
+        "high" => Some("high"),
+        "normal" => Some("normal"),
+        "low" => Some("low"),
+        _ => None,
+    }
+}
+
+fn is_valid_info_hash(hash: &str) -> bool {
+    hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn get_settings_path() -> PathBuf {
@@ -241,6 +296,41 @@ pub fn load_settings() -> Settings {
     if settings.segments == 0 || settings.segments > 64 {
         settings.segments = 8;
     }
+    if settings.torrent_max_active_downloads > 64 {
+        settings.torrent_max_active_downloads = default_torrent_max_active_downloads();
+    }
+    if !settings.torrent_seed_ratio_limit.is_finite()
+        || settings.torrent_seed_ratio_limit < 0.0
+        || settings.torrent_seed_ratio_limit > 20.0
+    {
+        settings.torrent_seed_ratio_limit = default_torrent_seed_ratio_limit();
+    }
+    if settings.torrent_seed_time_limit_mins > 10_080 {
+        settings.torrent_seed_time_limit_mins = default_torrent_seed_time_limit_mins();
+    }
+    let mut normalized_priorities = HashMap::new();
+    for (hash, priority) in std::mem::take(&mut settings.torrent_priority_overrides) {
+        if !is_valid_info_hash(&hash) {
+            continue;
+        }
+        let Some(normalized) = normalize_torrent_priority_label(&priority) else {
+            continue;
+        };
+        if normalized == "normal" {
+            continue;
+        }
+        normalized_priorities.insert(hash.to_ascii_lowercase(), normalized.to_string());
+    }
+    settings.torrent_priority_overrides = normalized_priorities;
+
+    let mut normalized_pins = HashSet::new();
+    for hash in std::mem::take(&mut settings.torrent_pinned_hashes) {
+        if !is_valid_info_hash(&hash) {
+            continue;
+        }
+        normalized_pins.insert(hash.to_ascii_lowercase());
+    }
+    settings.torrent_pinned_hashes = normalized_pins;
 
     settings
 }
@@ -252,6 +342,31 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
     }
     if settings.min_threads > 0 && settings.max_threads > 0 && settings.min_threads > settings.max_threads {
         return Err("min_threads cannot exceed max_threads".to_string());
+    }
+    if settings.torrent_max_active_downloads > 64 {
+        return Err("torrent_max_active_downloads must be between 0 and 64".to_string());
+    }
+    if !settings.torrent_seed_ratio_limit.is_finite()
+        || settings.torrent_seed_ratio_limit < 0.0
+        || settings.torrent_seed_ratio_limit > 20.0
+    {
+        return Err("torrent_seed_ratio_limit must be between 0.0 and 20.0".to_string());
+    }
+    if settings.torrent_seed_time_limit_mins > 10_080 {
+        return Err("torrent_seed_time_limit_mins must be between 0 and 10080".to_string());
+    }
+    for (hash, priority) in &settings.torrent_priority_overrides {
+        if !is_valid_info_hash(hash) {
+            return Err(format!("Invalid torrent info hash key: {}", hash));
+        }
+        if normalize_torrent_priority_label(priority).is_none() {
+            return Err(format!("Invalid torrent priority '{}' for {}", priority, hash));
+        }
+    }
+    for hash in &settings.torrent_pinned_hashes {
+        if !is_valid_info_hash(hash) {
+            return Err(format!("Invalid pinned torrent info hash: {}", hash));
+        }
     }
     // Validate category rule regexes
     for rule in &settings.category_rules {

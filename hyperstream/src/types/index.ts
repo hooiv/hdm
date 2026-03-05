@@ -12,13 +12,89 @@ export interface SpiderOptions {
 }
 
 export interface TorrentStatus {
-    id: number; // usize -> number
+    id: number;
     name: string;
+    info_hash: string;
+    total_size: number;
+    downloaded: number;
+    uploaded: number;
     progress_percent: number;
-    speed_download: number; // u64 -> number
-    speed_upload: number; // u64 -> number
-    peers: number;
+    /** Download speed in bytes/s */
+    speed_download: number;
+    /** Upload speed in bytes/s */
+    speed_upload: number;
+    /** Number of unchoked / active peers */
+    peers_live: number;
+    /** Total peers seen (live + queued + connecting) */
+    peers_total: number;
+    /** "initializing" | "live" | "paused" | "error" */
     state: string;
+    /** Estimated seconds remaining, or null */
+    eta_secs: number | null;
+    /** Upload/download ratio */
+    ratio: number;
+    /** Queue priority: "high" | "normal" | "low" */
+    priority: string;
+    pinned: boolean;
+    /** "queue" | "seeding_policy" | null */
+    auto_pause_reason: string | null;
+    save_path: string;
+    error: string | null;
+    finished: boolean;
+}
+
+export interface TorrentFileInfo {
+    id: number;
+    name: string;
+    size: number;
+    downloaded: number;
+    progress_percent: number;
+    included: boolean;
+}
+
+export interface TorrentBulkActionResult {
+    attempted: number;
+    succeeded: number;
+    failed: number;
+    failed_ids: number[];
+}
+
+export interface AddTorrentResult {
+    id: number;
+    warnings: string[];
+}
+
+export interface TorrentActionFailedEvent {
+    timestamp_ms: number;
+    severity: string;
+    category: string;
+    action: string;
+    id: number | null;
+    error: string;
+}
+
+export interface TorrentDiagnostics {
+    generated_at_ms: number;
+    auto_manage_queue: boolean;
+    max_active_downloads: number;
+    auto_stop_seeding: boolean;
+    seed_ratio_limit: number;
+    seed_time_limit_mins: number;
+    total_torrents: number;
+    live_torrents: number;
+    paused_torrents: number;
+    error_torrents: number;
+    initializing_torrents: number;
+    completed_torrents: number;
+    pinned_torrents: number;
+    queue_auto_paused: number;
+    seeding_policy_auto_paused: number;
+    recent_error_count: number;
+    recent_warning_count: number;
+    recent_errors: TorrentActionFailedEvent[];
+    recent_warnings: TorrentActionFailedEvent[];
+    recent_failures: TorrentActionFailedEvent[];
+    torrents: TorrentStatus[];
 }
 
 export interface Segment {
@@ -95,6 +171,13 @@ export interface AppSettings {
     mqtt_topic: string;
     prevent_sleep_during_download: boolean;
     pause_on_low_battery: boolean;
+    torrent_max_active_downloads: number;
+    torrent_auto_manage_queue: boolean;
+    torrent_auto_stop_seeding: boolean;
+    torrent_seed_ratio_limit: number;
+    torrent_seed_time_limit_mins: number;
+    torrent_priority_overrides: Record<string, string>;
+    torrent_pinned_hashes: string[];
 }
 
 /** Download progress event payload from Tauri backend */

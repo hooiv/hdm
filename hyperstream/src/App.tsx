@@ -11,7 +11,7 @@ import { ToastManager, ToastRef } from "./components/ToastManager";
 import { TorrentList } from "./components/TorrentList";
 import { FeedsTab } from "./components/FeedsTab";
 import { SearchTab } from "./components/SearchTab";
-import type { DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings, DownloadTask } from "./types";
+import type { AddTorrentResult, DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings, DownloadTask } from "./types";
 import { toTaskStatus } from "./types";
 
 // Lazy load modals to improve initial render time
@@ -541,16 +541,29 @@ function App() {
               const text = await navigator.clipboard.readText();
               if (text && (text.startsWith('http') || text.startsWith('magnet:'))) {
                 debug("Force Download Key detected. Adding:", text);
+                let started = false;
                 if (text.startsWith('magnet:')) {
-                  invoke("add_magnet_link", { magnet: text }).catch((err) => {
+                  try {
+                    const result = await invoke<AddTorrentResult>("add_magnet_link", { magnet: text });
+                    started = true;
+                    if (result.warnings.length > 0) {
+                      toastRef.current?.addToast(
+                        `Torrent added with warning: ${result.warnings[0]}`,
+                        'info',
+                      );
+                    }
+                  } catch (err) {
                     logError("Magnet link failed:", err);
                     toastRef.current?.addToast(`Failed to add magnet link: ${err}`, 'error');
-                  });
+                  }
                 } else {
                   const filename = text.split('/').pop()?.split('?')[0] || 'clipboard_download';
                   startDownload(text, filename);
+                  started = true;
                 }
-                toastRef.current?.addToast(`Started Force Download: ${text}`, 'success');
+                if (started) {
+                  toastRef.current?.addToast(`Started Force Download: ${text}`, 'success');
+                }
               } else {
                 toastRef.current?.addToast(`Clipboard does not contain a valid URL`, 'error');
               }
@@ -655,12 +668,21 @@ function App() {
           <AddTorrentModal
             isOpen={isTorrentModalOpen}
             onClose={() => setIsTorrentModalOpen(false)}
-            onAdd={(magnet) => {
+            onAdd={async (magnet, savePath, paused, initialPriority, pinned) => {
               debug("Adding magnet:", magnet);
-              invoke("add_magnet_link", { magnet }).catch((err) => {
+              try {
+                return await invoke<AddTorrentResult>("add_magnet_link", {
+                  magnet,
+                  savePath: savePath || null,
+                  paused,
+                  initialPriority: initialPriority === 'normal' ? null : initialPriority,
+                  pinned: pinned ? true : null,
+                });
+              } catch (err) {
                 logError("Magnet link failed:", err);
                 toastRef.current?.addToast(`Failed to add magnet: ${err}`, 'error');
-              });
+                throw err;
+              }
             }}
           />
         )}

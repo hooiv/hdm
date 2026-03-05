@@ -21,21 +21,30 @@ export const DropTarget: React.FC<DropTargetProps> = ({ onDrop }) => {
             const webview = getCurrentWebview();
             if (webview) {
                 unlistenDrop = webview.onDragDropEvent((event) => {
-                    if (event.payload.type === 'over') {
-                        setIsDragging(true);
-                    } else if (event.payload.type === 'drop') {
-                        const paths = event.payload.paths;
-                        if (paths && paths.length > 0) {
-                            debug('Dropped files:', paths);
-                            paths.forEach(file => {
-                                onDropRef.current(file);
-                            });
+                    const payload = event.payload as { type?: string; paths?: string[] };
+                    switch (payload.type) {
+                        case 'over':
+                            setIsDragging(true);
+                            break;
+                        case 'drop': {
+                            const paths = payload.paths;
+                            if (paths && paths.length > 0) {
+                                debug('Dropped files:', paths);
+                                paths.forEach(file => {
+                                    onDropRef.current(file);
+                                });
+                            }
+                            setIsDragging(false);
+                            dragCounter.current = 0;
+                            break;
                         }
-                        setIsDragging(false);
-                        dragCounter.current = 0;
-                    } else if (event.payload.type === 'cancel') {
-                        setIsDragging(false);
-                        dragCounter.current = 0;
+                        case 'leave':
+                        case 'cancel':
+                            setIsDragging(false);
+                            dragCounter.current = 0;
+                            break;
+                        default:
+                            break;
                     }
                 });
             }

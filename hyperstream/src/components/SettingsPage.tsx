@@ -71,6 +71,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     mqtt_topic: "hyperstream/downloads",
     prevent_sleep_during_download: true,
     pause_on_low_battery: true,
+    torrent_max_active_downloads: 4,
+    torrent_auto_manage_queue: true,
+    torrent_auto_stop_seeding: true,
+    torrent_seed_ratio_limit: 1.5,
+    torrent_seed_time_limit_mins: 180,
+    torrent_priority_overrides: {},
+    torrent_pinned_hashes: [],
     p2p_enabled: false,
     p2p_upload_limit_kbps: null,
     custom_sound_start: null,
@@ -105,6 +112,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         cloud_region: data.cloud_region || "us-east-1",
         cloud_access_key: data.cloud_access_key || "",
         cloud_secret_key: data.cloud_secret_key || "",
+        torrent_priority_overrides: data.torrent_priority_overrides || {},
+        torrent_pinned_hashes: data.torrent_pinned_hashes || [],
       });
       setSettingsLoaded(true);
     } catch (e) {
@@ -127,12 +136,24 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
 
   const saveSettings = async () => {
     try {
-      await invoke("save_settings", { settings });
-      // Save audio settings
-      await invoke("set_audio_enabled", { enabled: audioEnabled });
-      await invoke("set_audio_volume", { volume: audioVolume });
+      const warnings = await invoke<string[]>("save_settings", { settings });
+      const localWarnings = [...warnings];
+
+      // Save audio settings separately so core settings persist even if audio fails.
+      try {
+        await invoke("set_audio_enabled", { enabled: audioEnabled });
+        await invoke("set_audio_volume", { volume: audioVolume });
+      } catch (e) {
+        logError("Failed to save audio settings", e);
+        localWarnings.push("Audio settings could not be fully applied.");
+      }
+
       setSaved(true);
-      toast.success("Settings Saved Successfully");
+      if (localWarnings.length > 0) {
+        toast.warning(`Settings saved with warnings:\n- ${localWarnings.join("\n- ")}`);
+      } else {
+        toast.success("Settings Saved Successfully");
+      }
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       logError("Failed to save settings", e);

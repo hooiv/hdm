@@ -18,8 +18,8 @@ interface AdvancedTabProps {
 }
 
 export const AdvancedTab: React.FC<AdvancedTabProps> = ({
-  settings: _settings,
-  setSettings: _setSettings,
+  settings,
+  setSettings,
 }) => {
   const [wfpAppPath, setWfpAppPath] = useState("");
   const [isWfpProcessing, setIsWfpProcessing] = useState(false);
@@ -202,6 +202,111 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
             >
               Unblock Application
             </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Torrent Queue */}
+      <div className="p-5 rounded-xl border bg-slate-800/20 border-slate-700/30 space-y-4">
+        <div>
+          <h3 className="text-slate-200 font-semibold">Torrent Queue Manager</h3>
+          <p className="text-xs text-slate-500 mt-1">
+            Automatically keep only a limited number of active torrents and queue the rest.
+          </p>
+        </div>
+
+        <Toggle
+          label="Enable auto queue management"
+          checked={settings.torrent_auto_manage_queue}
+          onChange={(val) =>
+            setSettings({ ...settings, torrent_auto_manage_queue: val })
+          }
+        />
+
+        <div className="space-y-1">
+          <label className="text-xs font-medium text-slate-400">
+            Max active torrents (0 = unlimited)
+          </label>
+          <input
+            type="number"
+            min={0}
+            max={64}
+            value={settings.torrent_max_active_downloads}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                torrent_max_active_downloads: Math.max(
+                  0,
+                  Math.min(64, parseInt(e.target.value, 10) || 0),
+                ),
+              })
+            }
+            className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50"
+          />
+        </div>
+      </div>
+
+      {/* Seeding Policy */}
+      <div className="p-5 rounded-xl border bg-slate-800/20 border-slate-700/30 space-y-4">
+        <div>
+          <h3 className="text-slate-200 font-semibold">Torrent Seeding Policy</h3>
+          <p className="text-xs text-slate-500 mt-1">
+            Automatically stop seeding completed torrents when ratio or max seeding time is reached.
+          </p>
+        </div>
+
+        <Toggle
+          label="Auto stop seeding"
+          checked={settings.torrent_auto_stop_seeding}
+          onChange={(val) =>
+            setSettings({ ...settings, torrent_auto_stop_seeding: val })
+          }
+        />
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">
+              Seed ratio target (0 = disabled)
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={20}
+              step={0.1}
+              value={settings.torrent_seed_ratio_limit}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  torrent_seed_ratio_limit: Math.max(
+                    0,
+                    Math.min(20, parseFloat(e.target.value) || 0),
+                  ),
+                })
+              }
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">
+              Max seeding minutes (0 = unlimited)
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={10080}
+              value={settings.torrent_seed_time_limit_mins}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  torrent_seed_time_limit_mins: Math.max(
+                    0,
+                    Math.min(10080, parseInt(e.target.value, 10) || 0),
+                  ),
+                })
+              }
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50"
+            />
           </div>
         </div>
       </div>

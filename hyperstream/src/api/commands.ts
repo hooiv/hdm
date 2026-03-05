@@ -146,7 +146,7 @@ export const api = {
     getSettings: () =>
         invoke<import('../types').AppSettings>('get_settings'),
     saveSettings: (settings: Partial<import('../types').AppSettings>) =>
-        invoke<void>('save_settings', { settings }),
+        invoke<string[]>('save_settings', { settings }),
 
     // --- File Operations ---
     openFile: (path: string) =>
