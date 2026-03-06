@@ -4,6 +4,83 @@ use tokio::sync::broadcast;
 use crate::core_state::*;
 use crate::*;
 
+/// Try to auto-retry a failed download via the queue system.
+/// Returns true if the download was re-queued for retry.
+fn try_auto_retry(app: &tauri::AppHandle, id: &str) -> bool {
+    use crate::queue_manager::{RETRY_METADATA, DOWNLOAD_QUEUE, QueuedDownload};
+
+    let meta = {
+        let mut store = RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+        store.remove(id)
+    };
+
+    if let Some(meta) = meta {
+        let requeued = {
+            let retry_item = QueuedDownload {
+                id: id.to_string(),
+                url: meta.url,
+                path: meta.path,
+                priority: meta.priority,
+                added_at: chrono::Utc::now().timestamp_millis(),
+                custom_headers: meta.custom_headers,
+                expected_checksum: meta.expected_checksum,
+                retry_count: meta.retry_count,
+                max_retries: meta.max_retries,
+                retry_delay_ms: 0,
+            };
+            let mut queue = DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+            queue.requeue_failed(retry_item)
+        };
+
+        if requeued {
+            eprintln!("[AutoRetry] Re-queued {} for retry (attempt {})", id, meta.retry_count + 1);
+            let _ = app.emit("download_retry", serde_json::json!({
+                "id": id,
+                "attempt": meta.retry_count + 1,
+                "max_retries": meta.max_retries,
+            }));
+            queue_manager::persist_queue();
+            return true;
+        }
+    }
+    false
+}
+
+/// Run post-download integrity check if retry metadata contains an expected checksum.
+/// Emits `integrity_check_passed` or `integrity_check_failed` events.
+fn run_queued_integrity_check(app: &tauri::AppHandle, id: &str, path: &str) {
+    let expected = {
+        let store = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+        store.get(id).and_then(|m| m.expected_checksum.clone())
+    };
+
+    if let Some(expected_checksum) = expected {
+        let app_clone = app.clone();
+        let id_owned = id.to_string();
+        let path_owned = path.to_string();
+        tokio::spawn(async move {
+            match crate::integrity::verify_file_checksum(&path_owned, &expected_checksum).await {
+                Ok(_) => {
+                    let _ = app_clone.emit("integrity_check_passed", serde_json::json!({
+                        "id": id_owned,
+                    }));
+                }
+                Err(e) => {
+                    eprintln!("[Queue] Integrity check failed for {}: {}", id_owned, e);
+                    let _ = app_clone.emit("integrity_check_failed", serde_json::json!({
+                        "id": id_owned,
+                        "error": e,
+                    }));
+                }
+            }
+        });
+    }
+
+    // Clean up retry metadata after successful download
+    let mut store = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+    store.remove(id);
+}
+
 /// Extract filename from a path string, handling both Unix and Windows separators.
 /// Falls back to the full path string if no filename component can be extracted.
 pub(crate) fn extract_filename(path: &str) -> &str {
@@ -427,17 +504,6 @@ pub(crate) async fn start_download_impl(
                             "error": "Disk write error — the download has been stopped to prevent data corruption."
                         }));
                         let _ = stop_tx_monitor.send(());
-                        // Notify queue manager that this download finished (errored)
-                        {
-                            let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                            queue.mark_finished(&id_monitor);
-                        }
-                        crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
-                        // Clean up session on error
-                        if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
-                            let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                            downloads.remove(&id_monitor);
-                        }
                         // Record in download history
                         let elapsed = monitor_start.elapsed();
                         let _ = crate::download_history::record(crate::download_history::HistoryEntry {
@@ -468,6 +534,21 @@ pub(crate) async fn start_download_impl(
                                     "total_size": total_size,
                                 }),
                             });
+                        }
+                        // Auto-retry if retries remain
+                        if !try_auto_retry(&window_monitor, &id_monitor) {
+                            // No retry possible — release queue slot and clean up
+                            {
+                                let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                                queue.mark_finished(&id_monitor);
+                            }
+                            crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
+                            if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
+                                let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+                                downloads.remove(&id_monitor);
+                            }
+                        } else {
+                            crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
                         }
                         break;
                     }
@@ -577,14 +658,19 @@ pub(crate) async fn start_download_impl(
                                     }),
                                 });
                             }
-                            {
-                                let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                                queue.mark_finished(&id_monitor);
-                            }
-                            crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
-                            if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
-                                let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                                downloads.remove(&id_monitor);
+                            // Auto-retry if retries remain
+                            if !try_auto_retry(&window_monitor, &id_monitor) {
+                                {
+                                    let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                                    queue.mark_finished(&id_monitor);
+                                }
+                                crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
+                                if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
+                                    let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+                                    downloads.remove(&id_monitor);
+                                }
+                            } else {
+                                crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
                             }
                             break;
                         }
@@ -655,14 +741,19 @@ pub(crate) async fn start_download_impl(
                                             }),
                                         });
                                     }
-                                    {
-                                        let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                                        queue.mark_finished(&id_monitor);
-                                    }
-                                    crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
-                                    if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
-                                        let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                                        downloads.remove(&id_monitor);
+                                    // Auto-retry if retries remain
+                                    if !try_auto_retry(&window_monitor, &id_monitor) {
+                                        {
+                                            let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                                            queue.mark_finished(&id_monitor);
+                                        }
+                                        crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
+                                        if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
+                                            let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+                                            downloads.remove(&id_monitor);
+                                        }
+                                    } else {
+                                        crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
                                     }
                                     break;
                                 }
@@ -852,6 +943,8 @@ pub(crate) async fn start_download_impl(
                                 }
                             });
                         }
+                        // Also check queue-supplied expected checksum (e.g. from browser extension)
+                        run_queued_integrity_check(&window_monitor, &id_monitor, &path_monitor);
                         // Auto-categorize and optionally move completed file
                         {
                             let settings_snap = crate::settings::load_settings();

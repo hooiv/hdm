@@ -189,7 +189,33 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                                 {unrarMissing && <span className="text-red-400" title="unrar not installed">⚠</span>}
                             </span>
                         )}
+                        {task.integrityStatus === 'verified' && (
+                            <span className="text-[10px] font-bold text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded" title="File integrity verified">
+                                ✓ Verified
+                            </span>
+                        )}
+                        {task.integrityStatus === 'failed' && (
+                            <span className="text-[10px] font-bold text-red-300 bg-red-500/10 border border-red-500/20 px-1.5 py-0.5 rounded" title="Integrity check failed — file may be corrupted">
+                                ✗ Integrity Failed
+                            </span>
+                        )}
+                        {task.virusScanStatus === 'clean' && (
+                            <span className="text-[10px] font-bold text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded" title="Virus scan: clean">
+                                🛡 Clean
+                            </span>
+                        )}
+                        {task.virusScanStatus === 'infected' && (
+                            <span className="text-[10px] font-bold text-red-300 bg-red-500/10 border border-red-500/20 px-1.5 py-0.5 rounded animate-pulse" title="Threat detected!">
+                                ⚠ Threat
+                            </span>
+                        )}
                     </div>
+
+                    {task.errorMessage && (
+                        <div className="text-[10px] text-red-400/80 truncate mb-1 font-mono" title={task.errorMessage}>
+                            {task.errorMessage}
+                        </div>
+                    )}
 
                     <div className="text-[11px] text-slate-500 truncate mb-3 font-mono opacity-60">
                         {task.url}

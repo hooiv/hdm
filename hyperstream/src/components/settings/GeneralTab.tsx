@@ -436,6 +436,38 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               </div>
             ))}
 
+            {/* Quick preset templates */}
+            {(settings.speed_profiles ?? []).length === 0 && (
+              <div className="space-y-2 mb-2">
+                <p className="text-xs text-slate-500">Quick start with a preset:</p>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { name: 'Work Hours', start: '09:00', end: '17:00', speed: 500, days: [0,1,2,3,4], label: 'Mon-Fri 9-5, 500 KB/s' },
+                    { name: 'Night Unlimited', start: '23:00', end: '07:00', speed: 0, days: [], label: 'Every night, unlimited' },
+                    { name: 'Low Priority', start: '00:00', end: '23:59', speed: 100, days: [], label: 'All day, 100 KB/s' },
+                  ].map((preset) => (
+                    <button
+                      key={preset.name}
+                      onClick={() => {
+                        const profiles = [...(settings.speed_profiles ?? []), {
+                          name: preset.name,
+                          start_time: preset.start,
+                          end_time: preset.end,
+                          speed_limit_kbps: preset.speed,
+                          days: preset.days,
+                        }];
+                        setSettings({ ...settings, speed_profiles: profiles });
+                      }}
+                      className="flex flex-col items-start px-3 py-2 bg-slate-800/50 border border-slate-700/50 rounded-lg hover:border-cyan-500/40 hover:bg-cyan-500/5 transition-colors group"
+                    >
+                      <span className="text-xs font-medium text-slate-300 group-hover:text-cyan-300">{preset.name}</span>
+                      <span className="text-[10px] text-slate-500">{preset.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <button
               onClick={() => {
                 const profiles = [...(settings.speed_profiles ?? []), {

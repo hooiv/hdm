@@ -317,6 +317,9 @@ export interface DownloadTask {
     status: 'Downloading' | 'Paused' | 'Error' | 'Done';
     segments?: Segment[];
     mirrorStats?: MirrorStat[];
+    errorMessage?: string;
+    integrityStatus?: 'verified' | 'failed' | 'pending';
+    virusScanStatus?: 'clean' | 'infected' | 'scanning';
     // used by overlays/trackers for internal timing, not persisted
     lastUpdate?: number;
 }

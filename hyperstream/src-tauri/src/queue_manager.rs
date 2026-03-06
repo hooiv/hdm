@@ -1,11 +1,26 @@
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
 
 lazy_static::lazy_static! {
     pub static ref DOWNLOAD_QUEUE: Mutex<DownloadQueue> = Mutex::new(DownloadQueue::new());
+    /// Retry metadata for downloads started via the queue. The session monitor
+    /// reads this to decide whether a failed download should be re-queued.
+    pub static ref RETRY_METADATA: Mutex<HashMap<String, RetryMetadata>> = Mutex::new(HashMap::new());
+}
+
+/// Metadata stored per-download so the session monitor can re-queue on failure.
+#[derive(Debug, Clone)]
+pub struct RetryMetadata {
+    pub url: String,
+    pub path: String,
+    pub priority: DownloadPriority,
+    pub custom_headers: Option<HashMap<String, String>>,
+    pub expected_checksum: Option<String>,
+    pub retry_count: u32,
+    pub max_retries: u32,
 }
 
 /// Priority levels for downloads — higher priority downloads are started first.
@@ -378,11 +393,32 @@ pub async fn queue_processor(app: tauri::AppHandle, mut rx: mpsc::UnboundedRecei
                             let checksum_retry = dl.expected_checksum.clone();
                             let retry_delay = dl.retry_delay_ms;
 
-                            // Spawn the download in its own task
+                            // Spawn the download in its own task.
+                            // NOTE: start_download_impl spawns background tasks and returns
+                            // immediately. The download monitor in session.rs calls
+                            // mark_finished() when the download truly completes or errors.
+                            // We must NOT call mark_finished() here — doing so would open
+                            // a concurrency slot before the download finishes, defeating
+                            // the max_concurrent limit entirely.
                             tokio::spawn(async move {
                                 // If this is a retry, wait for the backoff delay first
                                 if retry_delay > 0 {
+                                    eprintln!("[Queue] Waiting {}ms before retry of {}", retry_delay, dl_id);
                                     tokio::time::sleep(std::time::Duration::from_millis(retry_delay)).await;
+                                }
+
+                                // Store retry metadata so the monitor can re-queue on failure
+                                {
+                                    let mut meta = RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+                                    meta.insert(dl_id.clone(), RetryMetadata {
+                                        url: dl_url_retry.clone(),
+                                        path: dl_path_retry.clone(),
+                                        priority: dl_priority_retry,
+                                        custom_headers: dl_headers_retry.clone(),
+                                        expected_checksum: checksum_retry.clone(),
+                                        retry_count: dl_retry_count,
+                                        max_retries: dl_max_retries,
+                                    });
                                 }
 
                                 let state: tauri::State<AppState> = app_clone.state();
@@ -398,50 +434,50 @@ pub async fn queue_processor(app: tauri::AppHandle, mut rx: mpsc::UnboundedRecei
                                     false,
                                 ).await;
 
-                                // Post-download integrity check if checksum was provided
-                                if result.is_ok() {
-                                    if let Some(expected) = checksum {
-                                        if let Err(e) = crate::integrity::verify_file_checksum(&dl_path, &expected).await {
-                                            eprintln!("[Queue] Integrity check failed for {}: {}", dl_id, e);
-                                            let _ = app_clone.emit("integrity_check_failed", serde_json::json!({
-                                                "id": dl_id,
-                                                "error": e,
-                                            }));
-                                        } else {
-                                            let _ = app_clone.emit("integrity_check_passed", serde_json::json!({
-                                                "id": dl_id,
-                                            }));
-                                        }
-                                    }
-                                }
-
-                                // Mark finished to open a slot
-                                {
-                                    let mut queue = DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                                    queue.mark_finished(&dl_id);
-                                }
-                                persist_queue();
-
+                                // If start_download_impl itself returns Err, the download never
+                                // started (DNS failure, file creation error, etc). Handle retry
+                                // and slot release here since no monitor was spawned.
                                 if let Err(e) = result {
-                                    eprintln!("[Queue] Download {} failed: {}", dl_id, e);
-                                    // Auto-retry if eligible
-                                    let retry_item = QueuedDownload {
-                                        id: dl_id.clone(),
-                                        url: dl_url_retry.clone(),
-                                        path: dl_path_retry.clone(),
-                                        priority: dl_priority_retry,
-                                        added_at: chrono::Utc::now().timestamp_millis(),
-                                        custom_headers: dl_headers_retry.clone(),
-                                        expected_checksum: checksum_retry.clone(),
-                                        retry_count: dl_retry_count,
-                                        max_retries: dl_max_retries,
-                                        retry_delay_ms: 0,
-                                    };
-                                    let mut queue = DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                                    if queue.requeue_failed(retry_item) {
-                                        eprintln!("[Queue] Re-queued {} for retry (attempt {})", dl_id, dl_retry_count + 1);
+                                    eprintln!("[Queue] Download {} failed to start: {}", dl_id, e);
+                                    {
+                                        let mut queue = DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                                        queue.mark_finished(&dl_id);
                                     }
+
+                                    // Try auto-retry
+                                    let requeued = {
+                                        let retry_item = QueuedDownload {
+                                            id: dl_id.clone(),
+                                            url: dl_url_retry,
+                                            path: dl_path_retry,
+                                            priority: dl_priority_retry,
+                                            added_at: chrono::Utc::now().timestamp_millis(),
+                                            custom_headers: dl_headers_retry,
+                                            expected_checksum: checksum_retry,
+                                            retry_count: dl_retry_count,
+                                            max_retries: dl_max_retries,
+                                            retry_delay_ms: 0,
+                                        };
+                                        let mut queue = DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                                        queue.requeue_failed(retry_item)
+                                    };
+                                    if requeued {
+                                        eprintln!("[Queue] Re-queued {} for retry (attempt {})", dl_id, dl_retry_count + 1);
+                                        let _ = app_clone.emit("download_retry", serde_json::json!({
+                                            "id": dl_id,
+                                            "attempt": dl_retry_count + 1,
+                                            "max_retries": dl_max_retries,
+                                        }));
+                                    }
+
+                                    // Clean up retry metadata
+                                    let mut meta = RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+                                    meta.remove(&dl_id);
+
+                                    persist_queue();
                                 }
+                                // If result is Ok, start_download_impl has spawned the monitor
+                                // which will handle mark_finished, retry, and integrity checks.
                             });
                         }
                         None => break, // No more slots or queue empty

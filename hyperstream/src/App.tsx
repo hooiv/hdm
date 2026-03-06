@@ -388,6 +388,90 @@ function App() {
     };
   }, []);
 
+  // Listen for download errors from the backend monitor
+  useEffect(() => {
+    const unlistenPromise = listen<{ id: string; error: string }>('download_error', (event) => {
+      const { id, error } = event.payload;
+      logError('Download error:', id, error);
+      setTasks(prev => prev.map(t =>
+        t.id === id ? { ...t, status: 'Error' as const, errorMessage: error, speed: 0 } : t
+      ));
+      const task = tasks.find(t => t.id === id);
+      const name = task?.filename || id;
+      toastRef.current?.addToast(`Download failed: ${name} — ${error}`, 'error');
+    });
+    return () => { unlistenPromise.then(unlisten => unlisten()); };
+  }, [tasks]);
+
+  // Listen for auto-retry events
+  useEffect(() => {
+    const unlistenPromise = listen<{ id: string; attempt: number; max_retries: number }>('download_retry', (event) => {
+      const { id, attempt, max_retries } = event.payload;
+      debug('Download retry:', id, `attempt ${attempt}/${max_retries}`);
+      setTasks(prev => prev.map(t =>
+        t.id === id ? { ...t, status: 'Downloading' as const, errorMessage: undefined } : t
+      ));
+      const task = tasks.find(t => t.id === id);
+      const name = task?.filename || id;
+      toastRef.current?.addToast(`Retrying ${name} (attempt ${attempt}/${max_retries})`, 'info');
+    });
+    return () => { unlistenPromise.then(unlisten => unlisten()); };
+  }, [tasks]);
+
+  // Listen for integrity check results (auto-verify via Content-MD5 / sidecar files)
+  useEffect(() => {
+    const unlistenPromise = listen<{ id: string; verified: boolean; method: string; algorithm: string; message: string }>('integrity_check', (event) => {
+      const { id, verified, message } = event.payload;
+      setTasks(prev => prev.map(t =>
+        t.id === id ? { ...t, integrityStatus: verified ? 'verified' as const : 'failed' as const } : t
+      ));
+      if (verified) {
+        toastRef.current?.addToast(`✓ Integrity verified: ${message}`, 'success');
+      } else {
+        toastRef.current?.addToast(`✗ Integrity failed: ${message}`, 'error');
+      }
+    });
+    return () => { unlistenPromise.then(unlisten => unlisten()); };
+  }, []);
+
+  // Listen for queue-supplied checksum verification results
+  useEffect(() => {
+    const unlistenPromise = listen<{ id: string }>('integrity_check_passed', (event) => {
+      setTasks(prev => prev.map(t =>
+        t.id === event.payload.id ? { ...t, integrityStatus: 'verified' as const } : t
+      ));
+      toastRef.current?.addToast('Checksum verified ✓', 'success');
+    });
+    const unlisten2 = listen<{ id: string; error: string }>('integrity_check_failed', (event) => {
+      setTasks(prev => prev.map(t =>
+        t.id === event.payload.id ? { ...t, integrityStatus: 'failed' as const } : t
+      ));
+      toastRef.current?.addToast(`Checksum mismatch: ${event.payload.error}`, 'error');
+    });
+    return () => {
+      unlistenPromise.then(unlisten => unlisten());
+      unlisten2.then(unlisten => unlisten());
+    };
+  }, []);
+
+  // Listen for virus scan results
+  useEffect(() => {
+    const unlistenPromise = listen<{ id: string; status: string; threat?: string }>('virus_scan_result', (event) => {
+      const { id, status, threat } = event.payload;
+      if (status === 'infected') {
+        toastRef.current?.addToast(`⚠ Threat detected in download: ${threat}`, 'error');
+      } else if (status === 'clean') {
+        toastRef.current?.addToast('Virus scan: file is clean ✓', 'success');
+      } else if (status === 'error') {
+        toastRef.current?.addToast(`Virus scan error: ${threat}`, 'error');
+      }
+      setTasks(prev => prev.map(t =>
+        t.id === id ? { ...t, virusScanStatus: status as 'clean' | 'infected' | 'scanning' } : t
+      ));
+    });
+    return () => { unlistenPromise.then(unlisten => unlisten()); };
+  }, []);
+
   /* ------------------ Memoized Handlers ------------------ */
 
   /** Sanitize a filename to prevent path traversal and Windows reserved name issues. */
