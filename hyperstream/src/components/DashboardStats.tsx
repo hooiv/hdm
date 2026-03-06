@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Zap, Activity, HardDrive } from 'lucide-react';
+import { Zap, Activity, HardDrive, Cpu } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { formatBytes } from '../utils/formatters';
+import { invoke } from '@tauri-apps/api/core';
 
 interface DashboardStatsProps {
     globalSpeed: number; // bytes per second
@@ -11,8 +12,21 @@ interface DashboardStatsProps {
 }
 
 export const DashboardStats: React.FC<DashboardStatsProps> = ({ globalSpeed, activeCount, totalDownloaded }) => {
+    const [threadCount, setThreadCount] = useState<number | null>(null);
+    const [avgBandwidth, setAvgBandwidth] = useState<number | null>(null);
+
+    useEffect(() => {
+        const poll = () => {
+            invoke<number>('get_adaptive_thread_count').then(setThreadCount).catch(() => {});
+            invoke<number>('get_average_bandwidth').then(setAvgBandwidth).catch(() => {});
+        };
+        poll();
+        const id = setInterval(poll, 5000);
+        return () => clearInterval(id);
+    }, []);
+
     return (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 px-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 px-4">
             <StatCard
                 label="Global Speed"
                 value={`${formatBytes(globalSpeed)}/s`}
@@ -34,15 +48,23 @@ export const DashboardStats: React.FC<DashboardStatsProps> = ({ globalSpeed, act
                 color="emerald"
                 trend="Session"
             />
+            <StatCard
+                label="Threads / Bandwidth"
+                value={threadCount != null ? `${threadCount} threads` : '—'}
+                icon={Cpu}
+                color="amber"
+                trend={avgBandwidth != null && avgBandwidth > 0 ? `Avg: ${formatBytes(avgBandwidth)}/s` : 'Sampling...'}
+            />
         </div>
     );
 };
 
-const StatCard: React.FC<{ label: string; value: string; icon: LucideIcon; color: 'cyan' | 'violet' | 'emerald'; trend: string }> = ({ label, value, icon: Icon, color, trend }) => {
+const StatCard: React.FC<{ label: string; value: string; icon: LucideIcon; color: 'cyan' | 'violet' | 'emerald' | 'amber'; trend: string }> = ({ label, value, icon: Icon, color, trend }) => {
     const colorClasses = {
         cyan: 'from-cyan-500/20 to-blue-500/5 border-cyan-500/30 text-cyan-400',
         violet: 'from-violet-500/20 to-fuchsia-500/5 border-violet-500/30 text-violet-400',
-        emerald: 'from-emerald-500/20 to-teal-500/5 border-emerald-500/30 text-emerald-400'
+        emerald: 'from-emerald-500/20 to-teal-500/5 border-emerald-500/30 text-emerald-400',
+        amber: 'from-amber-500/20 to-orange-500/5 border-amber-500/30 text-amber-400'
     };
 
     return (

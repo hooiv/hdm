@@ -212,7 +212,8 @@ impl DownloadManager {
         };
 
         // Create the stolen segment
-        let new_segment = Segment::new(new_id, split_point, target.end_byte);
+        let mut new_segment = Segment::new(new_id, split_point, target.end_byte);
+        new_segment.state = SegmentState::Downloading;
         
         // Shrink the target's responsibility
         let target = &mut segments[target_idx];
@@ -222,10 +223,15 @@ impl DownloadManager {
         println!("[WorkSteal] Segment {} stole {} bytes from segment {} (new range: {}-{})",
             new_id, steal_bytes, target.id, split_point, original_end);
 
-        Some(StolenWork {
+        let stolen = StolenWork {
             original_segment_id: target.id,
-            new_segment,
-        })
+            new_segment: new_segment.clone(),
+        };
+
+        // Register stolen segment in the manager for progress tracking
+        segments.push(new_segment);
+
+        Some(stolen)
     }
 
     /// Try to steal work without completing a segment (proactive stealing)
@@ -263,15 +269,21 @@ impl DownloadManager {
             id
         };
 
-        let new_segment = Segment::new(new_id, split_point, target.end_byte);
+        let mut new_segment = Segment::new(new_id, split_point, target.end_byte);
+        new_segment.state = SegmentState::Downloading;
         
         let target = &mut segments[target_idx];
         target.end_byte = split_point;
 
-        Some(StolenWork {
+        let stolen = StolenWork {
             original_segment_id: target.id,
-            new_segment,
-        })
+            new_segment: new_segment.clone(),
+        };
+
+        // Register stolen segment in the manager for progress tracking
+        segments.push(new_segment);
+
+        Some(stolen)
     }
 
     /// Get a snapshot of all segments for UI display

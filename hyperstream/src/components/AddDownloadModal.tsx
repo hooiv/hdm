@@ -7,11 +7,15 @@ import {
     Link as LinkIcon,
     AlertCircle,
     BookOpen,
+    Plus,
+    Trash2,
+    Globe,
+    Zap,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "../contexts/ToastContext";
 import { error as logError } from "../utils/logger";
-import type { DockerImageInfo } from "../types";
+import type { DockerImageInfo, HlsStream } from "../types";
 
 interface AddDownloadModalProps {
     isOpen: boolean;
@@ -21,6 +25,7 @@ interface AddDownloadModalProps {
         filename: string,
         force?: boolean,
         customHeaders?: Record<string, string>,
+        mirrors?: [string, string][],
     ) => void;
     initialUrl?: string;
 }
@@ -43,6 +48,20 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
     const [isFetchingDocker, setIsFetchingDocker] = useState(false);
     const [dockerInfo, setDockerInfo] = useState<DockerImageInfo | null>(null);
 
+    const [hlsInfo, setHlsInfo] = useState<HlsStream | null>(null);
+    const [selectedVariantUrl, setSelectedVariantUrl] = useState<string | null>(null);
+    const [isParsingHls, setIsParsingHls] = useState(false);
+
+    // Mirror URLs: array of [url, label] pairs
+    const [mirrors, setMirrors] = useState<{ url: string; label: string }[]>([]);
+    const [showMirrors, setShowMirrors] = useState(false);
+    const [isProbing, setIsProbing] = useState(false);
+    const [probeResults, setProbeResults] = useState<{ url: string; source: string; latency_ms: number; supports_range: boolean; avg_speed_bps: number; disabled: boolean }[] | null>(null);
+
+    // CAS duplicate detection state
+    const [duplicatePath, setDuplicatePath] = useState<string | null>(null);
+    const [isCheckingCas, setIsCheckingCas] = useState(false);
+
     const toast = useToast();
 
     // Update URL when initialUrl changes (e.g., from drag-and-drop)
@@ -57,6 +76,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
     const isDocker =
         url.trim().startsWith("docker pull ") || url.trim().startsWith("docker:");
     const isHttp = url.trim().startsWith("http");
+    const isHls = url.trim().toLowerCase().endsWith(".m3u8");
 
     /** Basic URL validation — must be http(s), DOI, or Docker */
     const isValidUrl = React.useMemo(() => {
@@ -130,6 +150,40 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
         }
     };
 
+    const addMirror = () => {
+        setMirrors(prev => [...prev, { url: '', label: `Mirror ${prev.length + 1}` }]);
+        setShowMirrors(true);
+    };
+
+    const removeMirror = (idx: number) => {
+        setMirrors(prev => prev.filter((_, i) => i !== idx));
+        setProbeResults(null);
+    };
+
+    const updateMirror = (idx: number, field: 'url' | 'label', value: string) => {
+        setMirrors(prev => prev.map((m, i) => i === idx ? { ...m, [field]: value } : m));
+    };
+
+    const handleProbe = async () => {
+        const validMirrors = mirrors.filter(m => m.url.trim());
+        if (validMirrors.length === 0 && !url.trim()) return;
+        setIsProbing(true);
+        setProbeResults(null);
+        try {
+            const mirrorPairs: [string, string][] = validMirrors.map(m => [m.url.trim(), m.label || 'Mirror']);
+            const results = await invoke<{ url: string; source: string; latency_ms: number; supports_range: boolean; avg_speed_bps: number; disabled: boolean }[]>("probe_mirrors", {
+                primaryUrl: url.trim(),
+                mirrorUrls: mirrorPairs,
+            });
+            setProbeResults(results);
+        } catch (e) {
+            logError("Probe Error:", e);
+            toast.error("Mirror probe failed: " + e);
+        } finally {
+            setIsProbing(false);
+        }
+    };
+
     // Auto-extract filename from URL (re-triggers on URL change unless user manually edited)
     React.useEffect(() => {
         if (!url) return;
@@ -144,6 +198,70 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
             /* ignore */
         }
     }, [url]);
+
+    // CAS duplicate detection: check ETag/MD5 from HEAD request against local CAS DB
+    React.useEffect(() => {
+        if (!url || !isHttp) {
+            setDuplicatePath(null);
+            return;
+        }
+        const trimmed = url.trim();
+        if (!/^https?:\/\/.+/.test(trimmed)) return;
+
+        let cancelled = false;
+        setIsCheckingCas(true);
+        setDuplicatePath(null);
+
+        invoke<{ etag: string | null; content_md5: string | null }>('head_url_metadata', { url: trimmed })
+            .then((meta) => {
+                if (cancelled) return;
+                if (!meta.etag && !meta.content_md5) {
+                    setIsCheckingCas(false);
+                    return;
+                }
+                return invoke<string | null>('check_cas_duplicate', {
+                    etag: meta.etag,
+                    md5: meta.content_md5,
+                });
+            })
+            .then((path) => {
+                if (cancelled) return;
+                setDuplicatePath(path ?? null);
+            })
+            .catch(() => {
+                // HEAD request may fail, that's OK — silently skip CAS check
+            })
+            .finally(() => {
+                if (!cancelled) setIsCheckingCas(false);
+            });
+
+        return () => { cancelled = true; };
+    }, [url, isHttp]);
+
+    // whenever URL looks like HLS manifest we parse it to offer variants
+    React.useEffect(() => {
+        if (!isHls) {
+            setHlsInfo(null);
+            setSelectedVariantUrl(null);
+            return;
+        }
+        setIsParsingHls(true);
+        invoke<HlsStream>("parse_hls_stream", { url })
+            .then((info) => {
+                setHlsInfo(info);
+                if (info.is_master && info.variants.length > 0) {
+                    setSelectedVariantUrl(info.variants[0].url);
+                } else {
+                    setSelectedVariantUrl(url);
+                }
+            })
+            .catch((e) => {
+                logError("HLS parse failed", e);
+                setHlsInfo(null);
+                setSelectedVariantUrl(null);
+            })
+            .finally(() => setIsParsingHls(false));
+    }, [url, isHls]);
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
@@ -180,7 +298,14 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                     )
                     .catch((e) => toast.error(`Failed to archive WARC: ${e} `));
             } else {
-                onStart(url, filename, isForceMode);
+                const validMirrors: [string, string][] = mirrors
+                    .filter(m => m.url.trim())
+                    .map(m => [m.url.trim(), m.label || 'Mirror']);
+                if (isHls && selectedVariantUrl) {
+                    onStart(selectedVariantUrl, filename, isForceMode, undefined, validMirrors.length > 0 ? validMirrors : undefined);
+                } else {
+                    onStart(url, filename, isForceMode, undefined, validMirrors.length > 0 ? validMirrors : undefined);
+                }
             }
             setUrl("");
             setFilename("");
@@ -189,6 +314,9 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
             setIsWarcMode(false);
             setBibtex("");
             setDockerInfo(null);
+            setMirrors([]);
+            setShowMirrors(false);
+            setProbeResults(null);
             onClose();
         }
     };
@@ -298,6 +426,39 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                 </div>
                             </div>
 
+                            {isHls && (
+                                <div className="space-y-1">
+                                    <label className="text-xs uppercase font-semibold text-slate-500 tracking-wider ml-1">
+                                        HLS Variant
+                                    </label>
+                                    <div className="relative group">
+                                        {isParsingHls ? (
+                                            <div className="text-sm text-slate-400 italic">Parsing playlist...</div>
+                                        ) : hlsInfo ? (
+                                            hlsInfo.is_master ? (
+                                                <select
+                                                    value={selectedVariantUrl || ''}
+                                                    onChange={e => setSelectedVariantUrl(e.target.value)}
+                                                    className="w-full bg-slate-800/50 border border-slate-700 rounded-lg py-2.5 pl-3 pr-4 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 transition-all font-mono text-sm"
+                                                >
+                                                    {hlsInfo.variants.map(v => (
+                                                        <option key={v.url} value={v.url}>
+                                                            {v.resolution || `${(v.bandwidth/1000).toFixed(0)}kbps`}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            ) : (
+                                                <div className="text-sm text-slate-400">
+                                                    Media playlist – {hlsInfo.segments.length} segments
+                                                </div>
+                                            )
+                                        ) : (
+                                            <div className="text-sm text-red-400">Failed to parse HLS stream</div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
                             <div className="space-y-1">
                                 <label className="text-xs uppercase font-semibold text-slate-500 tracking-wider ml-1">
                                     Filename
@@ -330,6 +491,29 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                         {bibtex}
                                     </pre>
                                 </motion.div>
+                            )}
+
+                            {/* CAS Duplicate Detection Warning */}
+                            {duplicatePath && (
+                                <motion.div
+                                    initial={{ opacity: 0, height: 0 }}
+                                    animate={{ opacity: 1, height: "auto" }}
+                                    className="bg-amber-900/20 border border-amber-600/40 rounded-lg p-3 flex items-start gap-3"
+                                >
+                                    <AlertCircle size={18} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-sm font-bold text-amber-300">Duplicate File Detected</p>
+                                        <p className="text-xs text-amber-400/80 mt-1">You already have this file at:</p>
+                                        <p className="text-xs text-slate-300 font-mono mt-1 truncate" title={duplicatePath}>{duplicatePath}</p>
+                                        <p className="text-[10px] text-amber-500/70 mt-2">You can still download again if needed.</p>
+                                    </div>
+                                </motion.div>
+                            )}
+                            {isCheckingCas && (
+                                <div className="flex items-center gap-2 text-xs text-slate-500">
+                                    <div className="w-3 h-3 border border-slate-500 border-t-transparent rounded-full animate-spin" />
+                                    Checking for duplicates...
+                                </div>
                             )}
 
                             {dockerInfo && (
@@ -415,6 +599,103 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                 </>
                             )}
 
+                            {/* Multi-Source / Mirror URLs */}
+                            {!dockerInfo && !isWarcMode && isHttp && (
+                                <div className="space-y-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => { setShowMirrors(!showMirrors); if (!showMirrors && mirrors.length === 0) addMirror(); }}
+                                        className={`flex items-center gap-2 w-full p-2.5 rounded-lg border transition-all text-sm ${showMirrors ? 'bg-emerald-900/20 border-emerald-500/30 text-emerald-400' : 'bg-slate-800/30 border-transparent hover:bg-slate-800/50 text-slate-400'}`}
+                                    >
+                                        <Globe size={16} />
+                                        <span className="font-medium">Multi-Source / Mirrors</span>
+                                        {mirrors.filter(m => m.url.trim()).length > 0 && (
+                                            <span className="ml-auto bg-emerald-500/20 text-emerald-400 text-xs font-bold px-2 py-0.5 rounded-full">
+                                                {mirrors.filter(m => m.url.trim()).length}
+                                            </span>
+                                        )}
+                                    </button>
+
+                                    <AnimatePresence>
+                                        {showMirrors && (
+                                            <motion.div
+                                                initial={{ opacity: 0, height: 0 }}
+                                                animate={{ opacity: 1, height: 'auto' }}
+                                                exit={{ opacity: 0, height: 0 }}
+                                                className="space-y-2 overflow-hidden"
+                                            >
+                                                <p className="text-xs text-slate-500 px-1">
+                                                    Add mirror URLs to download from multiple sources simultaneously for faster speeds.
+                                                </p>
+                                                {mirrors.map((mirror, idx) => (
+                                                    <div key={idx} className="flex gap-2 items-center">
+                                                        <input
+                                                            type="text"
+                                                            value={mirror.url}
+                                                            onChange={e => updateMirror(idx, 'url', e.target.value)}
+                                                            placeholder="https://mirror.example.com/file.zip"
+                                                            className="flex-1 bg-slate-800/50 border border-slate-700 rounded-lg py-2 px-3 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all font-mono text-xs"
+                                                        />
+                                                        <input
+                                                            type="text"
+                                                            value={mirror.label}
+                                                            onChange={e => updateMirror(idx, 'label', e.target.value)}
+                                                            placeholder="Label"
+                                                            className="w-24 bg-slate-800/50 border border-slate-700 rounded-lg py-2 px-2 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 text-xs"
+                                                        />
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => removeMirror(idx)}
+                                                            className="text-slate-500 hover:text-red-400 transition-colors p-1"
+                                                        >
+                                                            <Trash2 size={14} />
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                                <div className="flex gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={addMirror}
+                                                        className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 transition-colors px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20"
+                                                    >
+                                                        <Plus size={12} /> Add Mirror
+                                                    </button>
+                                                    {mirrors.some(m => m.url.trim()) && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={handleProbe}
+                                                            disabled={isProbing}
+                                                            className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors px-2 py-1 rounded bg-blue-500/10 hover:bg-blue-500/20 disabled:opacity-50"
+                                                        >
+                                                            <Zap size={12} /> {isProbing ? 'Probing...' : 'Test Mirrors'}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                {probeResults && (
+                                                    <motion.div
+                                                        initial={{ opacity: 0 }}
+                                                        animate={{ opacity: 1 }}
+                                                        className="bg-slate-800/50 rounded-lg p-2 space-y-1 text-xs"
+                                                    >
+                                                        {probeResults.map((r, i) => (
+                                                            <div key={i} className={`flex items-center justify-between px-2 py-1 rounded ${r.disabled ? 'text-red-400/60' : 'text-slate-300'}`}>
+                                                                <span className="truncate flex-1 font-mono">{r.source}</span>
+                                                                <span className={`mx-2 ${r.supports_range ? 'text-emerald-400' : 'text-amber-400'}`}>
+                                                                    {r.supports_range ? 'Range ✓' : 'No Range'}
+                                                                </span>
+                                                                <span className="text-slate-400 w-16 text-right">
+                                                                    {r.latency_ms < 999999 ? `${r.latency_ms}ms` : 'Timeout'}
+                                                                </span>
+                                                            </div>
+                                                        ))}
+                                                    </motion.div>
+                                                )}
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
+                                </div>
+                            )}
+
                             <div className="flex gap-3 mt-6 pt-2">
                                 <button
                                     type="button"
@@ -430,10 +711,12 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                             ? "opacity-50 cursor-not-allowed bg-slate-700"
                                             : isForceMode
                                                 ? "bg-gradient-to-r from-amber-600 to-orange-600 shadow-amber-900/20 hover:shadow-amber-900/40"
-                                                : "bg-gradient-to-r from-blue-600 to-violet-600 shadow-blue-900/20 hover:shadow-blue-900/40"
+                                                : mirrors.some(m => m.url.trim())
+                                                    ? "bg-gradient-to-r from-emerald-600 to-cyan-600 shadow-emerald-900/20 hover:shadow-emerald-900/40"
+                                                    : "bg-gradient-to-r from-blue-600 to-violet-600 shadow-blue-900/20 hover:shadow-blue-900/40"
                                         }`}
                                 >
-                                    {isForceMode ? "Force Start" : "Start Download"}
+                                    {isForceMode ? "Force Start" : mirrors.some(m => m.url.trim()) ? "Multi-Source Start" : "Start Download"}
                                 </button>
                             </div>
 

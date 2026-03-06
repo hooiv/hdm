@@ -8,7 +8,11 @@
         "activeTab",
         "scripting",
         "downloads",
-        "storage"
+        "storage",
+        "webRequest",
+        "webRequestBlocking",
+        "notifications",
+        "nativeMessaging"
     ],
     "host_permissions": [
         "http://localhost:14733/*",

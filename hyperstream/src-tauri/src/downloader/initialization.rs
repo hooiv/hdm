@@ -5,42 +5,79 @@ use crate::downloader::manager::DownloadManager;
 use crate::downloader::disk;
 use crate::persistence::SavedDownload;
 
+/// Result of probing a URL: file size, etag, md5, and whether the server supports Range requests.
+pub struct ProbeResult {
+    pub total_size: u64,
+    pub etag: Option<String>,
+    pub md5: Option<String>,
+    /// True when the server demonstrably supports byte-range requests (Accept-Ranges + 206 response).
+    /// When false, the download engine MUST use a single segment to avoid duplicate full-file fetches.
+    pub supports_range: bool,
+}
+
 /// Strategies to determine file size (HEAD, Range 0-1, etc.)
-pub async fn determine_total_size(client: &Client, url: &str) -> Result<(u64, Option<String>, Option<String>), String> {
+/// Also verifies range support so the engine can fall back to single-segment when needed.
+pub async fn determine_total_size(client: &Client, url: &str) -> Result<ProbeResult, String> {
     // 1. Try HEAD request
     let head_resp = client.head(url).send().await.map_err(|e| e.to_string())?;
     
     let etag = head_resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
     let md5 = head_resp.headers().get("content-md5").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
     
-    if let Some(len) = head_resp.content_length() {
-        if len > 0 { return Ok((len, etag, md5)); }
-    }
+    // Check Accept-Ranges from HEAD
+    let accept_ranges = head_resp.headers()
+        .get("accept-ranges")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none");
+    let head_claims_range = accept_ranges.eq_ignore_ascii_case("bytes");
+    
+    let head_size = head_resp.content_length()
+        .filter(|&len| len > 0)
+        .or_else(|| {
+            head_resp.headers().get("content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|&len| len > 0)
+        });
 
-    // Manual content-length check if not parsed automatically
-    if let Some(len_header) = head_resp.headers().get("content-length") {
-        if let Ok(len_str) = len_header.to_str() {
-            if let Ok(len) = len_str.parse::<u64>() {
-                return Ok((len, etag, md5));
-            }
-        }
-    }
-
-    // 2. Try Range 0-1 request
+    // 2. Verify with Range 0-1 request (also discovers size if HEAD didn't provide it)
     let range_resp = client.get(url).header("Range", "bytes=0-1").send().await.map_err(|e| e.to_string())?;
+    let range_status = range_resp.status().as_u16();
     
-    let etag = range_resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
-    let md5 = range_resp.headers().get("content-md5").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let range_etag = range_resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let range_md5 = range_resp.headers().get("content-md5").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
     
-    if let Some(content_range) = range_resp.headers().get("content-range") {
-        let s = content_range.to_str().unwrap_or("");
-        if let Some(slash_pos) = s.find('/') {
-            if let Ok(size) = s[slash_pos + 1..].parse::<u64>() {
-                return Ok((size, etag, md5));
-            }
-        }
+    // Server returned 206 Partial Content → definitely supports range
+    let supports_range = if range_status == 206 {
+        true
+    } else if head_claims_range {
+        // HEAD said bytes but didn't return 206 — trust HEAD cautiously
+        println!("[probe] Server advertises Accept-Ranges: bytes but returned {} for range probe", range_status);
+        true
+    } else {
+        println!("[probe] Server does not support Range requests (HEAD: Accept-Ranges={}, probe status: {})", accept_ranges, range_status);
+        false
+    };
+    
+    // Try to extract size from Content-Range header (e.g., "bytes 0-1/12345")
+    let range_size = range_resp.headers().get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.find('/'))
+        .and_then(|slash_pos| {
+            range_resp.headers().get("content-range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s[slash_pos + 1..].trim().parse::<u64>().ok())
+        });
+    
+    // Prefer HEAD size, fall back to Content-Range
+    let final_etag = etag.or(range_etag);
+    let final_md5 = md5.or(range_md5);
+    
+    if let Some(size) = head_size.or(range_size) {
+        return Ok(ProbeResult { total_size: size, etag: final_etag, md5: final_md5, supports_range });
     }
-
+    
+    // Last resort: try a full GET with streaming to read Content-Length
     Err("Could not determine file size".to_string())
 }
 
@@ -65,7 +102,13 @@ pub fn setup_manager(
     resume_from: u64,
     segment_count: u32,
 ) -> Arc<Mutex<DownloadManager>> {
-    let parts = if segment_count == 0 { 8 } else { segment_count };
+    // Use adaptive thread recommendation if user hasn't set a custom count
+    let parts = if segment_count == 0 {
+        let adaptive = crate::adaptive_threads::recommended_threads();
+        if adaptive >= 2 { adaptive } else { 8 }
+    } else {
+        segment_count
+    };
     if let Some(saved_dl) = saved.filter(|s| s.segments.is_some()) {
         let segments = saved_dl.segments.as_ref().unwrap().clone();
         // Validate saved segments are compatible with the current total_size.

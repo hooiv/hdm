@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LedgerEvent {
@@ -79,5 +79,40 @@ impl SharedLog {
         writeln!(file, "{}", serialized).map_err(|e| e.to_string())?;
         
         Ok(())
+    }
+
+    /// Read the most recent events from the log file.
+    /// Returns up to `limit` events, optionally filtered by event_type.
+    /// Results are returned in reverse chronological order (newest first).
+    pub fn read_recent(&self, limit: usize, event_type_filter: Option<&str>) -> Result<Vec<LedgerEvent>, String> {
+        let _guard = self.lock.lock().map_err(|e| e.to_string())?;
+        
+        let file = match std::fs::File::open(&self.log_file) {
+            Ok(f) => f,
+            Err(_) => return Ok(Vec::new()),
+        };
+        
+        let reader = std::io::BufReader::new(file);
+        let mut events: Vec<LedgerEvent> = Vec::new();
+        
+        for line in reader.lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(event) = serde_json::from_str::<LedgerEvent>(&line) {
+                if let Some(filter) = event_type_filter {
+                    if event.event_type != filter {
+                        continue;
+                    }
+                }
+                events.push(event);
+            }
+        }
+        
+        // Return newest first, limited
+        events.reverse();
+        events.truncate(limit);
+        Ok(events)
     }
 }

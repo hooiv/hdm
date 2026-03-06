@@ -1,6 +1,20 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+lazy_static::lazy_static! {
+    /// Global thread controller — recommends optimal segment count based on bandwidth trends
+    pub static ref THREAD_CONTROLLER: AdaptiveThreadController =
+        AdaptiveThreadController::new(2, 16);
+    /// Global bandwidth monitor — tracks download speeds across all active downloads
+    pub static ref BANDWIDTH_MONITOR: BandwidthMonitor =
+        BandwidthMonitor::new(5);
+}
+
+/// Get the current recommended thread/segment count
+pub fn recommended_threads() -> u32 {
+    THREAD_CONTROLLER.get_threads()
+}
+
 /// Internal PID controller state — all fields grouped under a single Mutex
 /// to prevent interleaved reads/writes from concurrent callers.
 struct PidState {

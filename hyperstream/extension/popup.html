@@ -13,6 +13,11 @@
         HyperStream
       </div>
       <div id="status" class="status-badge offline">...</div>
+    <div class="section" style="margin-top:8px;">
+      <div class="section-label">Server URL</div>
+      <input type="text" id="apiUrlInput" class="token-input" placeholder="http://localhost:14733">
+      <div class="token-hint">Override the local HyperStream API endpoint (optional).</div>
+    </div>
     </header>
 
     <div class="controls">
@@ -35,6 +40,12 @@
     <div class="action-bar">
       <button id="download-selected-btn" class="btn-primary" disabled>Download (0)</button>
       <button id="rescan-btn" class="btn-secondary">↺</button>
+    </div>
+
+    <!-- Active downloads status section -->
+    <div class="status-section">
+      <button id="refresh-status-btn" class="btn-secondary" style="width:100%;margin-bottom:8px;">Refresh active downloads</button>
+      <div id="status-list" class="list"></div>
     </div>
 
     <div class="switch-container">

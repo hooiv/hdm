@@ -2,6 +2,200 @@
 
 const HYPERSTREAM_URL = 'http://localhost:14733';
 
+// ── Video/Audio Stream Content-Type Detection ────────────────────────
+const STREAM_CONTENT_TYPES = {
+    hls: [
+        'application/vnd.apple.mpegurl',
+        'application/x-mpegurl',
+        'audio/mpegurl',
+        'audio/x-mpegurl',
+    ],
+    dash: [
+        'application/dash+xml',
+        'video/vnd.mpeg.dash.mpd',
+    ],
+    video: [
+        'video/mp4',
+        'video/webm',
+        'video/x-matroska',
+        'video/x-msvideo',
+        'video/quicktime',
+        'video/x-flv',
+        'video/3gpp',
+        'video/ogg',
+    ],
+    audio: [
+        'audio/mpeg',
+        'audio/mp4',
+        'audio/ogg',
+        'audio/flac',
+        'audio/wav',
+        'audio/webm',
+    ],
+};
+
+const STREAM_EXTENSIONS = {
+    hls: ['.m3u8'],
+    dash: ['.mpd'],
+    video: ['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.3gp', '.ogv'],
+    audio: ['.mp3', '.m4a', '.ogg', '.flac', '.wav', '.opus', '.aac'],
+};
+
+// Per-tab accumulated stream detections: tabId -> Map<url, stream>
+const tabStreams = new Map();
+
+// Minimum size threshold to avoid tracking tiny segments (100KB)
+const MIN_STREAM_SIZE = 100 * 1024;
+
+// ── Classify a network response ──────────────────────────────────────
+function classifyResponse(url, contentType, contentLength) {
+    const ct = (contentType || '').toLowerCase().split(';')[0].trim();
+    const lower = url.toLowerCase();
+
+    for (const [type, types] of Object.entries(STREAM_CONTENT_TYPES)) {
+        if (types.includes(ct)) {
+            return { type, source: 'content-type' };
+        }
+    }
+
+    // Extension fallback
+    try {
+        const pathname = new URL(url).pathname.toLowerCase();
+        for (const [type, exts] of Object.entries(STREAM_EXTENSIONS)) {
+            if (exts.some(ext => pathname.endsWith(ext))) {
+                // Skip tiny HLS/DASH segments (.ts files are caught by .m3u8 parent)
+                return { type, source: 'extension' };
+            }
+        }
+    } catch (e) { /* invalid URL */ }
+
+    // Known video CDN patterns
+    if (/googlevideo\.com\/videoplayback/i.test(url) ||
+        /\.fbcdn\.net\/.*video/i.test(url) ||
+        /video.*\.twimg\.com/i.test(url) ||
+        /\.akamaized\.net\/.*\.m3u8/i.test(url)) {
+        return { type: 'video', source: 'cdn-pattern' };
+    }
+
+    return null;
+}
+
+// ── Store detected stream for a tab ──────────────────────────────────
+function addStreamForTab(tabId, stream) {
+    if (!tabStreams.has(tabId)) {
+        tabStreams.set(tabId, new Map());
+    }
+    const streams = tabStreams.get(tabId);
+    // Deduplicate by URL
+    if (!streams.has(stream.url)) {
+        streams.set(stream.url, stream);
+        // Notify content script to show/update the stream panel
+        notifyTab(tabId);
+        // Forward to HyperStream app
+        reportStreamsToApp(tabId);
+    }
+}
+
+// ── Notify the content script about updated streams ──────────────────
+function notifyTab(tabId) {
+    const streams = tabStreams.get(tabId);
+    if (!streams) return;
+    const list = Array.from(streams.values());
+    chrome.tabs.sendMessage(tabId, {
+        action: 'streams_updated',
+        streams: list,
+    }).catch(() => { /* tab may not have content script */ });
+}
+
+// ── Report detected streams to HyperStream app ──────────────────────
+async function reportStreamsToApp(tabId) {
+    const streams = tabStreams.get(tabId);
+    if (!streams || streams.size === 0) return;
+
+    const list = Array.from(streams.values());
+    try {
+        const headers = await getAuthHeaders();
+        await fetch(`${HYPERSTREAM_URL}/streams`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(list),
+        });
+    } catch (e) {
+        // HyperStream may not be running
+    }
+}
+
+// ── Clean up when a tab is closed or navigated ──────────────────────
+chrome.tabs.onRemoved.addListener((tabId) => {
+    tabStreams.delete(tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.url) {
+        // Page navigation — reset stream detections for this tab
+        tabStreams.delete(tabId);
+    }
+});
+
+// ── Network Response Monitoring (Content-Type sniffing) ──────────────
+chrome.webRequest.onHeadersReceived.addListener(
+    (details) => {
+        // Only monitor main_frame, sub_frame, xmlhttprequest, media, other
+        // Skip extension/chrome internal requests
+        if (details.tabId < 0) return;
+
+        const headers = details.responseHeaders || [];
+        let contentType = '';
+        let contentLength = 0;
+        for (const h of headers) {
+            const name = h.name.toLowerCase();
+            if (name === 'content-type') contentType = h.value || '';
+            if (name === 'content-length') contentLength = parseInt(h.value, 10) || 0;
+        }
+
+        const classification = classifyResponse(details.url, contentType, contentLength);
+        if (!classification) return;
+
+        // For direct video/audio, skip tiny responses (< 100KB) which are likely thumbnails or previews
+        if ((classification.type === 'video' || classification.type === 'audio') && contentLength > 0 && contentLength < MIN_STREAM_SIZE) {
+            return;
+        }
+
+        // Get page info
+        chrome.tabs.get(details.tabId, (tab) => {
+            if (chrome.runtime.lastError) return;
+            const stream = {
+                url: details.url,
+                content_type: contentType || null,
+                stream_type: classification.type,
+                page_url: tab?.url || null,
+                page_title: tab?.title || null,
+                quality: guessQuality(details.url, contentLength),
+                size: contentLength > 0 ? contentLength : null,
+            };
+            addStreamForTab(details.tabId, stream);
+        });
+    },
+    { urls: ['<all_urls>'] },
+    ['responseHeaders']
+);
+
+// ── Quality guessing from URL patterns ───────────────────────────────
+function guessQuality(url, size) {
+    const lower = url.toLowerCase();
+    if (/2160|4k|uhd/i.test(lower)) return '4K';
+    if (/1080|fullhd|full_hd/i.test(lower)) return '1080p';
+    if (/720|hd/i.test(lower)) return '720p';
+    if (/480|sd/i.test(lower)) return '480p';
+    if (/360/i.test(lower)) return '360p';
+    if (/240/i.test(lower)) return '240p';
+    if (/144/i.test(lower)) return '144p';
+    // Size-based guess for direct videos
+    if (size > 500 * 1024 * 1024) return 'HD+';
+    if (size > 100 * 1024 * 1024) return 'HD';
+    return null;
+}
+
 // Get the stored auth token
 async function getAuthToken() {
     const { authToken } = await chrome.storage.local.get({ authToken: '' });
@@ -31,26 +225,77 @@ async function checkConnection() {
 
 // Send download to HyperStream
 async function sendToHyperStream(url, filename) {
-    try {
-        const headers = await getAuthHeaders();
-        const response = await fetch(`${HYPERSTREAM_URL}/download`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({ url, filename }),
-        });
+    // Retry loop with exponential backoff to handle brief outages
+    let lastErr;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const headers = await getAuthHeaders();
+            const response = await fetch(`${HYPERSTREAM_URL}/download`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ url, filename }),
+            });
 
-        if (response.status === 401 || response.status === 403) {
-            console.warn('Auth token rejected — update token in extension settings');
-            return { success: false, message: 'Invalid auth token. Open extension popup to update.' };
+            if (response.status === 401 || response.status === 403) {
+                console.warn('Auth token rejected — update token in extension settings');
+                chrome.notifications.create({
+                    type: 'basic',
+                    iconUrl: 'icons/icon48.png',
+                    title: 'HyperStream error',
+                    message: 'Invalid auth token. Update in popup.',
+                });
+                return { success: false, message: 'Invalid auth token. Open extension popup to update.' };
+            }
+
+            const data = await response.json();
+            return data;
+        } catch (e) {
+            lastErr = e;
+            console.warn(`attempt ${attempt} failed to reach HyperStream, retrying...`, e);
+            if (attempt < 3) {
+                await new Promise(res => setTimeout(res, 500 * attempt));
+                continue;
+            }
         }
-
-        const data = await response.json();
-        return data;
-    } catch (e) {
-        console.error('Failed to send to HyperStream:', e);
-        return { success: false, message: e.message };
     }
+    console.error('Failed to send to HyperStream after retries:', lastErr);
+    chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon48.png',
+        title: 'HyperStream error',
+        message: `Failed to queue download: ${lastErr?.message}`,
+    });
+    if (url.startsWith('http')) {
+        chrome.downloads.download({ url });
+    }
+    return { success: false, message: lastErr?.message || 'unknown error' };
 }
+
+// Periodically update badge to reflect connection status
+async function updateConnectionBadge() {
+    const connected = await checkConnection();
+    chrome.action.setBadgeText({ text: connected ? '' : '!' });
+    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
+}
+setInterval(updateConnectionBadge, 15000);
+updateConnectionBadge();
+
+// WebRequest interception for common file types (blocking rule)
+const downloadExtensions = ['.exe', '.msi', '.zip', '.rar', '.7z', '.iso', '.mp4', '.mkv', '.mp3', '.pdf', '.dmg', '.pkg', '.torrent'];
+chrome.webRequest.onBeforeRequest.addListener(
+    (details) => {
+        const url = details.url;
+        const lower = url.toLowerCase();
+        const matches = downloadExtensions.some(ext => lower.endsWith(ext));
+        if (matches) {
+            // fire-and-forget
+            sendToHyperStream(url, null);
+            return { cancel: true };
+        }
+    },
+    { urls: ["<all_urls>"] },
+    ["blocking"]
+);
 
 // Listen for download events
 chrome.downloads.onCreated.addListener(async (downloadItem) => {
@@ -196,7 +441,9 @@ function gatherDownloadableLinks() {
         'pdf', 'doc', 'docx', 'xls', 'xlsx',
         'mp4', 'mkv', 'avi', 'mov', 'webm',
         'mp3', 'flac', 'wav', 'aac',
-        'iso', 'img'
+        'iso', 'img',
+        'torrent',
+        'm3u8', 'ts'
     ];
 
     const links = document.querySelectorAll('a[href]');
@@ -208,7 +455,10 @@ function gatherDownloadableLinks() {
 
         const url = new URL(href, window.location.origin);
         const filename = url.pathname.split('/').pop() || 'download';
-        const ext = filename.split('.').pop()?.toLowerCase();
+        let ext = filename.split('.').pop()?.toLowerCase();
+        if ((!ext || ext === '') && filename.includes('?')) {
+            ext = filename.split('?')[0].split('.').pop()?.toLowerCase();
+        }
 
         if (ext && downloadExtensions.includes(ext)) {
             downloadableLinks.push({
@@ -249,6 +499,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.action === 'getAuthToken') {
         getAuthToken().then(token => sendResponse({ token }));
+        return true;
+    }
+
+    if (message.action === 'getStreams') {
+        // Content script or popup requesting current tab streams
+        const tabId = sender.tab?.id || message.tabId;
+        const streams = tabStreams.get(tabId);
+        sendResponse({ streams: streams ? Array.from(streams.values()) : [] });
+        return false;
+    }
+
+    if (message.action === 'downloadStream') {
+        // Download a specific detected stream
+        const stream = message.stream;
+        if (stream && stream.url) {
+            let filename = null;
+            try {
+                const pathname = new URL(stream.url).pathname;
+                filename = pathname.split('/').pop() || null;
+            } catch (e) { /* ignore */ }
+            sendToHyperStream(stream.url, filename)
+                .then(result => sendResponse(result));
+            return true;
+        }
+        sendResponse({ success: false, message: 'No stream URL' });
+        return false;
+    }
+
+    if (message.action === 'scanPageForStreams') {
+        // Request the backend to scan a page URL for streams
+        const tabId = sender.tab?.id || message.tabId;
+        (async () => {
+            try {
+                const headers = await getAuthHeaders();
+                const resp = await fetch(`${HYPERSTREAM_URL}/download`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ url: message.pageUrl, filename: null }),
+                });
+                sendResponse({ success: resp.ok });
+            } catch (e) {
+                sendResponse({ success: false, message: e.message });
+            }
+        })();
         return true;
     }
 });

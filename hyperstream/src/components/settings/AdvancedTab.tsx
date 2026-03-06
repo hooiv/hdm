@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Activity, ShieldAlert, Key, Copy, Check } from "lucide-react";
+import { Activity, ShieldAlert, Key, Copy, Check, Upload, Download, Loader2 } from "lucide-react";
 import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { useToast } from "../../contexts/ToastContext";
@@ -26,6 +26,10 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
   const [chaos, setChaos] = useState<ChaosConfig>({ enabled: false, latency_ms: 0, error_rate: 0 });
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
+  const [exportPath, setExportPath] = useState("");
+  const [importPath, setImportPath] = useState("");
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const toast = useToast();
   const toastRef = React.useRef(toast);
   toastRef.current = toast;
@@ -117,6 +121,34 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
             {tokenCopied ? "Copied" : "Copy"}
           </button>
         </div>
+      </div>
+
+      {/* Native messaging host installer */}
+      <div className="p-5 rounded-xl border bg-slate-800/20 border-slate-700/30">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-lg bg-violet-500/10 flex items-center justify-center border border-violet-500/20">
+            <ShieldAlert size={20} className="text-violet-400" />
+          </div>
+          <div>
+            <h3 className="text-slate-200 font-semibold">Native Messaging Host</h3>
+            <p className="text-xs text-slate-500">
+              Install a browser native messaging manifest so the extension can auto-launch HyperStream.
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={async () => {
+            try {
+              const result = await invoke<string>('install_native_host');
+              toastRef.current?.success(result);
+            } catch (e) {
+              toastRef.current?.error('Installation failed: ' + e);
+            }
+          }}
+          className="px-4 py-2.5 rounded-lg bg-violet-500/10 text-violet-400 border border-violet-500/20 hover:bg-violet-500/20 transition-colors text-sm font-medium"
+        >
+          Install Native Host
+        </button>
       </div>
 
       <div
@@ -307,6 +339,88 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
               }
               className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50"
             />
+          </div>
+        </div>
+      </div>
+
+      {/* Data Export / Import */}
+      <div className="p-5 rounded-xl border bg-slate-800/20 border-slate-700/30 space-y-4">
+        <div className="flex items-center gap-3 mb-2">
+          <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+            <Download size={20} className="text-emerald-400" />
+          </div>
+          <div>
+            <h3 className="text-slate-200 font-semibold">Data Export / Import</h3>
+            <p className="text-xs text-slate-500">
+              Export your settings &amp; download history to a JSON file, or import from a previous backup.
+              Path must be inside Downloads, Documents, or Desktop.
+            </p>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Export Path</label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50"
+                placeholder="C:\Users\You\Downloads\hyperstream-backup.json"
+                value={exportPath}
+                onChange={(e) => setExportPath(e.target.value)}
+              />
+              <button
+                onClick={async () => {
+                  if (!exportPath.trim()) { toast.error("Enter an export file path"); return; }
+                  setIsExporting(true);
+                  try {
+                    await invoke("export_data", { path: exportPath.trim() });
+                    toast.success("Data exported successfully");
+                  } catch (e) {
+                    toast.error("Export failed: " + e);
+                  } finally {
+                    setIsExporting(false);
+                  }
+                }}
+                disabled={isExporting}
+                className="px-4 py-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors text-sm font-medium disabled:opacity-50 flex items-center gap-2"
+              >
+                {isExporting ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                Export
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Import Path</label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50"
+                placeholder="C:\Users\You\Downloads\hyperstream-backup.json"
+                value={importPath}
+                onChange={(e) => setImportPath(e.target.value)}
+              />
+              <button
+                onClick={async () => {
+                  if (!importPath.trim()) { toast.error("Enter an import file path"); return; }
+                  setIsImporting(true);
+                  try {
+                    await invoke("import_data", { path: importPath.trim() });
+                    toast.success("Data imported successfully — restart for full effect");
+                  } catch (e) {
+                    toast.error("Import failed: " + e);
+                  } finally {
+                    setIsImporting(false);
+                  }
+                }}
+                disabled={isImporting}
+                className="px-4 py-2 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-colors text-sm font-medium disabled:opacity-50 flex items-center gap-2"
+              >
+                {isImporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                Import
+              </button>
+            </div>
           </div>
         </div>
       </div>

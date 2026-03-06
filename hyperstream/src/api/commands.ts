@@ -129,6 +129,14 @@ export interface BandwidthArbResult {
     status: number;
 }
 
+export interface ReplayResult {
+    status_code: number;
+    headers: Record<string, string>;
+    body_preview: string;
+    response_time_ms: number;
+    body_size: number;
+}
+
 // ============ Typed API Commands ============
 
 export const api = {
@@ -139,6 +147,10 @@ export const api = {
         invoke<void>('pause_download', { id }),
     getDownloads: () =>
         invoke<import('../types').SavedDownload[]>('get_downloads'),
+    listActiveDownloads: () =>
+        invoke<import('../types').DownloadStatus[]>('list_active_downloads'),
+    installNativeHost: () =>
+        invoke<string>('install_native_host'),
     removeDownload: (id: string) =>
         invoke<void>('remove_download_entry', { id }),
 

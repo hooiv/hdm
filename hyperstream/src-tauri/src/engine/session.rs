@@ -6,11 +6,54 @@ use crate::*;
 
 /// Extract filename from a path string, handling both Unix and Windows separators.
 /// Falls back to the full path string if no filename component can be extracted.
-fn extract_filename(path: &str) -> &str {
+pub(crate) fn extract_filename(path: &str) -> &str {
     std::path::Path::new(path)
         .file_name()
         .and_then(|f| f.to_str())
         .unwrap_or(path)
+}
+
+/// Resolve filename collisions by appending `(1)`, `(2)`, etc. to the stem.
+///
+/// Given `/downloads/video.mp4`:
+///   - If `video.mp4` exists → tries `video(1).mp4`, `video(2).mp4`, …
+///   - Returns the first path that doesn't exist (capped at 9999 attempts).
+///   - If the file doesn't exist at all, returns the original path unchanged.
+///
+/// This mimics IDM's smart rename behaviour and prevents silent overwrites.
+pub(crate) fn resolve_filename_collision(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return path.to_string();
+    }
+
+    let parent = p.parent().unwrap_or(std::path::Path::new("."));
+    let stem = p
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download");
+    let ext = p.extension().and_then(|e| e.to_str());
+
+    for i in 1..=9999u32 {
+        let candidate = match ext {
+            Some(e) => parent.join(format!("{}({}).{}", stem, i, e)),
+            None => parent.join(format!("{}({})", stem, i)),
+        };
+        if !candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+
+    // Extremely unlikely fallback — use timestamp
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let fallback = match ext {
+        Some(e) => parent.join(format!("{}_{}.{}", stem, ts, e)),
+        None => parent.join(format!("{}_{}", stem, ts)),
+    };
+    fallback.to_string_lossy().to_string()
 }
 
 pub(crate) async fn start_download_impl(
@@ -172,8 +215,12 @@ pub(crate) async fn start_download_impl(
         path.clone()
     };
     
-    // Use final_path for the rest
-    let path = final_path;
+    // Use final_path for the rest — apply collision avoidance for new downloads
+    let path = if resume_from == 0 {
+        resolve_filename_collision(&final_path)
+    } else {
+        final_path
+    };
 
     // 2. Get Content Length
     
@@ -195,7 +242,8 @@ pub(crate) async fn start_download_impl(
     }.map_err(|e| e.to_string())?;
 
     let mut actual_url = url.clone();
-    let (mut total_size, mut etag, mut md5) = downloader::initialization::determine_total_size(&client, &actual_url).await?;
+    let probe = downloader::initialization::determine_total_size(&client, &actual_url).await?;
+    let (mut total_size, mut etag, mut md5, mut supports_range) = (probe.total_size, probe.etag, probe.md5, probe.supports_range);
 
     // Git LFS Accelerator check
     if total_size > 0 && total_size < 1024 * 5 {
@@ -206,10 +254,11 @@ pub(crate) async fn start_download_impl(
                     actual_url = new_url;
                     // Re-determine size
                     let sz_res = downloader::initialization::determine_total_size(&client, &actual_url).await;
-                    if let Ok((sz, et, md)) = sz_res {
-                        total_size = sz;
-                        etag = et;
-                        md5 = md;
+                    if let Ok(probe2) = sz_res {
+                        total_size = probe2.total_size;
+                        etag = probe2.etag;
+                        md5 = probe2.md5;
+                        supports_range = probe2.supports_range;
                     }
                 }
             }
@@ -225,12 +274,14 @@ pub(crate) async fn start_download_impl(
             println!("Hardlink successful for {}", path);
             
             // Register success... emit completion... and return
-            let _ = app.emit("download_progress", Payload {
+            let payload = Payload {
                 id: id.clone(),
                 downloaded: total_size,
                 total: total_size,
                 segments: vec![],
-            });
+            };
+            let _ = app.emit("download_progress", payload.clone());
+            let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
             
             // Persistence — use upsert_download which acquires the lock
             let _ = persistence::upsert_download(persistence::SavedDownload {
@@ -242,6 +293,8 @@ pub(crate) async fn start_download_impl(
                 downloaded_bytes: total_size,
                 status: "Complete".to_string(),
                 segments: None,
+                last_active: Some(chrono::Utc::now().to_rfc3339()),
+                error_message: None,
             });
             
             crate::media::sounds::play_complete();
@@ -263,7 +316,14 @@ pub(crate) async fn start_download_impl(
     // P2P file advertising removed (not needed in simplified P2P)
 
     // 4. Initialize Manager
-    let manager = downloader::initialization::setup_manager(total_size, saved, resume_from, settings.segments);
+    // Force single segment if server doesn't support Range requests
+    let effective_segments = if !supports_range {
+        println!("[download] Server does not support Range — falling back to single segment for {}", actual_url);
+        1
+    } else {
+        settings.segments
+    };
+    let manager = downloader::initialization::setup_manager(total_size, saved, resume_from, effective_segments);
     let downloaded_total = Arc::new(AtomicU64::new(resume_from));
     // let last_progress_emit = Arc::new(Mutex::new(std::time::Instant::now())); // Removed
 
@@ -279,6 +339,22 @@ pub(crate) async fn start_download_impl(
             url: url.clone(),
             path: path.clone(),
             file_writer: file_mutex.clone(),
+        });
+    }
+
+    // Log download started event
+    if let Some(log) = app.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+        let _ = log.append(crate::event_sourcing::LedgerEvent {
+            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+            aggregate_id: id.clone(),
+            event_type: "DownloadStarted".to_string(),
+            payload: serde_json::json!({
+                "url": url,
+                "path": path,
+                "total_size": total_size,
+                "segments": settings.segments,
+                "resume_from": resume_from,
+            }),
         });
     }
 
@@ -329,6 +405,16 @@ pub(crate) async fn start_download_impl(
     
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(33)); // ~30fps
+        let monitor_start = std::time::Instant::now();
+        let monitor_start_iso = chrono::Local::now().to_rfc3339();
+        // Stall & failure detection state
+        let mut last_progress_bytes: u64 = 0;
+        let mut stall_since: Option<std::time::Instant> = None;
+        let stall_timeout = std::time::Duration::from_secs(120); // 2 minutes of zero progress
+        let mut last_pid_update = std::time::Instant::now();
+        // Per-segment speed tracking: segment_id -> (last_cursor, last_time, ema_speed)
+        let mut seg_speed_state: std::collections::HashMap<u32, (u64, std::time::Instant, f64)> = std::collections::HashMap::new();
+        const SPEED_EMA_ALPHA: f64 = 0.3; // Smoothing factor for per-segment EMA
         loop {
             tokio::select! {
                 _ = stop_rx_monitor.recv() => break,
@@ -341,10 +427,47 @@ pub(crate) async fn start_download_impl(
                             "error": "Disk write error — the download has been stopped to prevent data corruption."
                         }));
                         let _ = stop_tx_monitor.send(());
+                        // Notify queue manager that this download finished (errored)
+                        {
+                            let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                            queue.mark_finished(&id_monitor);
+                        }
+                        crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
                         // Clean up session on error
                         if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
                             let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                             downloads.remove(&id_monitor);
+                        }
+                        // Record in download history
+                        let elapsed = monitor_start.elapsed();
+                        let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+                            id: id_monitor.clone(),
+                            url: url_monitor.clone(),
+                            path: path_monitor.clone(),
+                            filename: extract_filename(&path_monitor).to_string(),
+                            total_size,
+                            downloaded_bytes: downloaded_monitor.load(Ordering::Relaxed),
+                            status: "Error".to_string(),
+                            started_at: monitor_start_iso.clone(),
+                            finished_at: chrono::Local::now().to_rfc3339(),
+                            avg_speed_bps: 0,
+                            duration_secs: elapsed.as_secs(),
+                            segments_used: 0,
+                            error_message: Some("Disk write error".to_string()),
+                            source_type: Some("http".to_string()),
+                        });
+                        // Log event sourcing
+                        if let Some(log) = window_monitor.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+                            let _ = log.append(crate::event_sourcing::LedgerEvent {
+                                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                                aggregate_id: id_monitor.clone(),
+                                event_type: "DownloadError".to_string(),
+                                payload: serde_json::json!({
+                                    "error": "Disk write error",
+                                    "downloaded_bytes": downloaded_monitor.load(Ordering::Relaxed),
+                                    "total_size": total_size,
+                                }),
+                            });
                         }
                         break;
                     }
@@ -354,8 +477,215 @@ pub(crate) async fn start_download_impl(
                     // Get segment snapshot for visualization
                     // We only lock here, once per 33ms, instead of per-chunk
                     // Note: get_segments_snapshot internally locks.
-                    let segments = manager_monitor.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
+                    let mut segments = manager_monitor.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
+
+                    // Compute per-segment speed using EMA over cursor deltas
+                    let now_speed = std::time::Instant::now();
+                    for seg in segments.iter_mut() {
+                        let cursor = seg.downloaded_cursor;
+                        if let Some((last_cursor, last_time, ema)) = seg_speed_state.get_mut(&seg.id) {
+                            let dt = now_speed.duration_since(*last_time).as_secs_f64();
+                            if dt > 0.01 {
+                                let bytes_delta = cursor.saturating_sub(*last_cursor);
+                                let instant_speed = bytes_delta as f64 / dt;
+                                // EMA: smoothed = α * new + (1-α) * old
+                                *ema = SPEED_EMA_ALPHA * instant_speed + (1.0 - SPEED_EMA_ALPHA) * *ema;
+                                seg.speed_bps = *ema as u64;
+                                *last_cursor = cursor;
+                                *last_time = now_speed;
+                            } else {
+                                seg.speed_bps = *ema as u64;
+                            }
+                        } else {
+                            seg_speed_state.insert(seg.id, (cursor, now_speed, 0.0));
+                            seg.speed_bps = 0;
+                        }
+                        // Zero speed for non-downloading segments
+                        if seg.state != crate::downloader::structures::SegmentState::Downloading {
+                            seg.speed_bps = 0;
+                            if let Some((_, _, ema)) = seg_speed_state.get_mut(&seg.id) {
+                                *ema = 0.0;
+                            }
+                        }
+                    }
                     
+                    // --- Failure & stall detection ---
+                    use crate::downloader::structures::SegmentState;
+                    if total_size > 0 && d < total_size && !segments.is_empty() {
+                        let any_active = segments.iter().any(|s|
+                            s.state == SegmentState::Downloading || s.state == SegmentState::Idle
+                        );
+
+                        // All segments settled (Complete or Error) but download isn't finished
+                        if !any_active {
+                            let error_count = segments.iter().filter(|s| s.state == SegmentState::Error).count();
+                            let error_msg = format!(
+                                "Download failed: {}/{} segments errored, {} of {} bytes downloaded",
+                                error_count, segments.len(), d, total_size
+                            );
+                            eprintln!("[{}] {}", id_monitor, error_msg);
+                            let _ = window_monitor.emit("download_error", serde_json::json!({
+                                "id": id_monitor,
+                                "error": error_msg,
+                            }));
+                            crate::media::sounds::play_error();
+                            let _ = stop_tx_monitor.send(());
+
+                            // Persist as Error with segment state for future resume
+                            let segs_snap = segments.clone();
+                            let _ = persistence::upsert_download(persistence::SavedDownload {
+                                id: id_monitor.clone(),
+                                url: url_monitor.clone(),
+                                path: path_monitor.clone(),
+                                filename: extract_filename(&path_monitor).to_string(),
+                                total_size,
+                                downloaded_bytes: d,
+                                status: "Error".to_string(),
+                                segments: Some(segs_snap),
+                                last_active: Some(chrono::Utc::now().to_rfc3339()),
+                                error_message: Some(error_msg.clone()),
+                            });
+                            let elapsed = monitor_start.elapsed();
+                            let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+                                id: id_monitor.clone(),
+                                url: url_monitor.clone(),
+                                path: path_monitor.clone(),
+                                filename: extract_filename(&path_monitor).to_string(),
+                                total_size,
+                                downloaded_bytes: d,
+                                status: "Error".to_string(),
+                                started_at: monitor_start_iso.clone(),
+                                finished_at: chrono::Local::now().to_rfc3339(),
+                                avg_speed_bps: if elapsed.as_secs() > 0 { d / elapsed.as_secs() } else { 0 },
+                                duration_secs: elapsed.as_secs(),
+                                segments_used: segments.len() as u32,
+                                error_message: Some(error_msg.clone()),
+                                source_type: Some("http".to_string()),
+                            });
+                            // Log event sourcing
+                            if let Some(log) = window_monitor.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+                                let _ = log.append(crate::event_sourcing::LedgerEvent {
+                                    timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                                    aggregate_id: id_monitor.clone(),
+                                    event_type: "DownloadError".to_string(),
+                                    payload: serde_json::json!({
+                                        "error": error_msg,
+                                        "downloaded_bytes": d,
+                                        "total_size": total_size,
+                                        "error_segments": error_count,
+                                        "total_segments": segments.len(),
+                                    }),
+                                });
+                            }
+                            {
+                                let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                                queue.mark_finished(&id_monitor);
+                            }
+                            crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
+                            if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
+                                let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+                                downloads.remove(&id_monitor);
+                            }
+                            break;
+                        }
+
+                        // Stall detection: no progress for stall_timeout
+                        if d > last_progress_bytes {
+                            last_progress_bytes = d;
+                            stall_since = None;
+                        } else {
+                            if stall_since.is_none() {
+                                stall_since = Some(std::time::Instant::now());
+                            }
+                            if let Some(since) = stall_since {
+                                if since.elapsed() > stall_timeout {
+                                    let error_msg = format!(
+                                        "Download stalled: no progress for {}s ({} of {} bytes)",
+                                        stall_timeout.as_secs(), d, total_size
+                                    );
+                                    eprintln!("[{}] {}", id_monitor, error_msg);
+                                    let _ = window_monitor.emit("download_error", serde_json::json!({
+                                        "id": id_monitor,
+                                        "error": error_msg,
+                                    }));
+                                    crate::media::sounds::play_error();
+                                    let _ = stop_tx_monitor.send(());
+
+                                    let segs_snap = segments.clone();
+                                    let _ = persistence::upsert_download(persistence::SavedDownload {
+                                        id: id_monitor.clone(),
+                                        url: url_monitor.clone(),
+                                        path: path_monitor.clone(),
+                                        filename: extract_filename(&path_monitor).to_string(),
+                                        total_size,
+                                        downloaded_bytes: d,
+                                        status: "Error".to_string(),
+                                        segments: Some(segs_snap),
+                                        last_active: Some(chrono::Utc::now().to_rfc3339()),
+                                        error_message: Some(error_msg.clone()),
+                                    });
+                                    let elapsed = monitor_start.elapsed();
+                                    let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+                                        id: id_monitor.clone(),
+                                        url: url_monitor.clone(),
+                                        path: path_monitor.clone(),
+                                        filename: extract_filename(&path_monitor).to_string(),
+                                        total_size,
+                                        downloaded_bytes: d,
+                                        status: "Error".to_string(),
+                                        started_at: monitor_start_iso.clone(),
+                                        finished_at: chrono::Local::now().to_rfc3339(),
+                                        avg_speed_bps: if elapsed.as_secs() > 0 { d / elapsed.as_secs() } else { 0 },
+                                        duration_secs: elapsed.as_secs(),
+                                        segments_used: segments.len() as u32,
+                                        error_message: Some(error_msg.clone()),
+                                        source_type: Some("http".to_string()),
+                                    });
+                                    // Log event sourcing
+                                    if let Some(log) = window_monitor.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+                                        let _ = log.append(crate::event_sourcing::LedgerEvent {
+                                            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                                            aggregate_id: id_monitor.clone(),
+                                            event_type: "DownloadError".to_string(),
+                                            payload: serde_json::json!({
+                                                "error": error_msg,
+                                                "downloaded_bytes": d,
+                                                "total_size": total_size,
+                                                "stall_timeout_secs": stall_timeout.as_secs(),
+                                            }),
+                                        });
+                                    }
+                                    {
+                                        let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                                        queue.mark_finished(&id_monitor);
+                                    }
+                                    crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
+                                    if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
+                                        let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+                                        downloads.remove(&id_monitor);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // --- End failure & stall detection ---
+                    
+                    // Feed adaptive threads system with bandwidth data
+                    {
+                        let speed: u64 = segments.iter()
+                            .filter(|s| s.state == crate::downloader::structures::SegmentState::Downloading)
+                            .map(|s| s.speed_bps)
+                            .sum();
+                        crate::adaptive_threads::BANDWIDTH_MONITOR.add_sample(speed);
+                        // Update PID controller every ~5s
+                        if last_pid_update.elapsed() >= std::time::Duration::from_secs(5) && speed > 0 {
+                            let max_speed = crate::adaptive_threads::BANDWIDTH_MONITOR.get_average_speed().max(speed) * 2;
+                            crate::adaptive_threads::THREAD_CONTROLLER.update(speed, max_speed);
+                            last_pid_update = std::time::Instant::now();
+                        }
+                    }
+
                     // Compress to tuple format
                     let slim_segments: Vec<SlimSegment> = segments.iter().map(|s| (
                         s.id,
@@ -366,16 +696,31 @@ pub(crate) async fn start_download_impl(
                         s.speed_bps
                     )).collect();
 
-                    let _ = window_monitor.emit("download_progress", Payload { 
+                    let payload = Payload { 
                         id: id_monitor.clone(), 
                         downloaded: d, 
                         total: total_size,
-                        segments: slim_segments
-                    });
+                        segments: slim_segments.clone()
+                    };
+                    let _ = window_monitor.emit("download_progress", payload.clone());
+                    let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
 
                     if total_size > 0 && d >= total_size {
                         crate::media::sounds::play_complete();
                         crate::cas_manager::register_cas(etag_monitor.as_deref(), md5_monitor.as_deref(), &path_monitor);
+                        // Log download completed event
+                        if let Some(log) = window_monitor.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+                            let _ = log.append(crate::event_sourcing::LedgerEvent {
+                                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                                aggregate_id: id_monitor.clone(),
+                                event_type: "DownloadCompleted".to_string(),
+                                payload: serde_json::json!({
+                                    "total_size": total_size,
+                                    "duration_secs": monitor_start.elapsed().as_secs(),
+                                    "path": path_monitor,
+                                }),
+                            });
+                        }
                         
                         // Trigger webhooks for download complete
                         let id_webhook = id_monitor.clone();
@@ -460,10 +805,131 @@ pub(crate) async fn start_download_impl(
                             downloaded_bytes: total_size,
                             status: "Complete".to_string(),
                             segments: None,
+                            last_active: Some(chrono::Utc::now().to_rfc3339()),
+                            error_message: None,
                         };
                         let _ = persistence::upsert_download(saved);
+                        // Record in download history
+                        let elapsed = monitor_start.elapsed();
+                        let avg_speed = if elapsed.as_secs() > 0 { total_size / elapsed.as_secs() } else { 0 };
+                        let seg_count = manager_monitor.lock().unwrap_or_else(|e| e.into_inner())
+                            .segments.read().unwrap_or_else(|e| e.into_inner()).len() as u32;
+                        let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+                            id: id_monitor.clone(),
+                            url: url_monitor.clone(),
+                            path: path_monitor.clone(),
+                            filename: extract_filename(&path_monitor).to_string(),
+                            total_size,
+                            downloaded_bytes: total_size,
+                            status: "Complete".to_string(),
+                            started_at: monitor_start_iso.clone(),
+                            finished_at: chrono::Local::now().to_rfc3339(),
+                            avg_speed_bps: avg_speed,
+                            duration_secs: elapsed.as_secs(),
+                            segments_used: seg_count,
+                            error_message: None,
+                            source_type: Some("http".to_string()),
+                        });
+                        // Auto-verify integrity if Content-MD5 header was present
+                        {
+                            let verify_id = id_monitor.clone();
+                            let verify_path = path_monitor.clone();
+                            let verify_md5 = md5_monitor.clone();
+                            let verify_app = window_monitor.clone();
+                            tokio::spawn(async move {
+                                if let Some(result) = crate::integrity::auto_verify(
+                                    &verify_id,
+                                    &verify_path,
+                                    verify_md5.as_deref(),
+                                ).await {
+                                    let _ = verify_app.emit("integrity_check", serde_json::json!({
+                                        "id": verify_id,
+                                        "verified": result.verified,
+                                        "method": result.method,
+                                        "algorithm": result.algorithm,
+                                        "message": result.message,
+                                    }));
+                                }
+                            });
+                        }
+                        // Auto-categorize and optionally move completed file
+                        {
+                            let settings_snap = crate::settings::load_settings();
+                            if settings_snap.auto_sort_downloads {
+                                match crate::file_categorizer::categorize_and_move(&path_monitor, &settings_snap.download_dir) {
+                                    Ok((cat_result, new_path)) => {
+                                        let moved = new_path != path_monitor;
+                                        let _ = window_monitor.emit("file_categorized", serde_json::json!({
+                                            "id": id_monitor,
+                                            "filename": extract_filename(&path_monitor),
+                                            "category": cat_result.category_name,
+                                            "icon": cat_result.icon,
+                                            "color": cat_result.color,
+                                            "should_move": cat_result.should_move,
+                                            "target_dir": cat_result.target_dir,
+                                            "moved": moved,
+                                            "new_path": if moved { Some(&new_path) } else { None },
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[{}] Auto-sort failed: {}", id_monitor, e);
+                                        let cat_result = crate::file_categorizer::categorize(extract_filename(&path_monitor));
+                                        let _ = window_monitor.emit("file_categorized", serde_json::json!({
+                                            "id": id_monitor,
+                                            "filename": extract_filename(&path_monitor),
+                                            "category": cat_result.category_name,
+                                            "icon": cat_result.icon,
+                                            "color": cat_result.color,
+                                            "should_move": false,
+                                            "target_dir": cat_result.target_dir,
+                                        }));
+                                    }
+                                }
+                            } else {
+                                // Just categorize without moving
+                                let cat_result = crate::file_categorizer::categorize(extract_filename(&path_monitor));
+                                let _ = window_monitor.emit("file_categorized", serde_json::json!({
+                                    "id": id_monitor,
+                                    "filename": extract_filename(&path_monitor),
+                                    "category": cat_result.category_name,
+                                    "icon": cat_result.icon,
+                                    "color": cat_result.color,
+                                    "should_move": false,
+                                    "target_dir": cat_result.target_dir,
+                                }));
+                            }
+                        }
+                        // Virus scan after download (async, non-blocking)
+                        if crate::settings::load_settings().scan_after_download {
+                            let scan_path = path_monitor.clone();
+                            let scan_id = id_monitor.clone();
+                            let scan_app = window_monitor.clone();
+                            tokio::spawn(async move {
+                                let scanner = crate::virus_scanner::VirusScanner::new();
+                                if scanner.is_available() {
+                                    let result = scanner.scan_file(std::path::Path::new(&scan_path)).await;
+                                    let (status, threat) = match &result {
+                                        crate::virus_scanner::ScanResult::Clean => ("clean", None),
+                                        crate::virus_scanner::ScanResult::Infected { threat_name } => ("infected", Some(threat_name.as_str())),
+                                        crate::virus_scanner::ScanResult::Error { message } => ("error", Some(message.as_str())),
+                                        crate::virus_scanner::ScanResult::NotScanned => ("not_scanned", None),
+                                    };
+                                    let _ = scan_app.emit("virus_scan_result", serde_json::json!({
+                                        "id": scan_id,
+                                        "status": status,
+                                        "threat": threat,
+                                    }));
+                                }
+                            });
+                        }
                         // Signal save loop and workers to stop
                         let _ = stop_tx_monitor.send(());
+                        // Notify queue manager that a slot opened up
+                        {
+                            let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                            queue.mark_finished(&id_monitor);
+                        }
+                        crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
                         // Clean up session from in-memory state to prevent memory leak
                         if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
                             let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
@@ -477,9 +943,15 @@ pub(crate) async fn start_download_impl(
         }
     });
 
-    // 9. Spawn Worker Threads
+    // 9. Register with bandwidth allocator (default config)
+    crate::bandwidth_allocator::ALLOCATOR.register(&id, crate::bandwidth_allocator::BandwidthConfig::default());
+
+    // 10. Spawn Worker Threads
     let mut handles = Vec::new();
     
+    // Apply per-host connection limits from site rules
+    state.connection_manager.configure_for_url(&actual_url);
+
     // We need to clone manager segments to iterate
     let segments_count = manager.lock().unwrap_or_else(|e| e.into_inner()).segments.read().unwrap_or_else(|e| e.into_inner()).len();
 
@@ -502,7 +974,7 @@ pub(crate) async fn start_download_impl(
         let disk_io_error_worker = disk_io_error.clone();
 
         let handle = tokio::spawn(async move {
-            let (start, end, seg_id) = {
+            let (start, mut end, mut seg_id) = {
                 let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
                 let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
                 let seg = &mut segs[i];
@@ -515,8 +987,8 @@ pub(crate) async fn start_download_impl(
             if end == 0 || start >= end { return; }
 
             let mut current_pos = start;
-            let mut retry_count = 0;
-            const MAX_RETRIES: u32 = 5;
+            let retry_config = crate::downloader::network::RetryConfig::default();
+            let mut retry_state = crate::downloader::network::RetryState::from_config(&retry_config);
             let mut bytes_since_cursor_update: u64 = 0;
             const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024; // Update cursor every 256KB
 
@@ -544,12 +1016,24 @@ pub(crate) async fn start_download_impl(
                 }
 
                 if current_pos >= end {
-                    let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
-                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
-                        seg.state = crate::downloader::structures::SegmentState::Complete;
+                    // Work-stealing: mark this segment complete and try to take work from a slower segment
+                    let stolen = {
+                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        m.on_segment_complete(seg_id)
+                    };
+                    if let Some(work) = stolen {
+                        // Continue downloading the stolen segment
+                        seg_id = work.new_segment.id;
+                        current_pos = work.new_segment.start_byte;
+                        end = work.new_segment.end_byte;
+                        retry_state = crate::downloader::network::RetryState::from_config(&retry_config);
+                        bytes_since_cursor_update = 0;
+                        println!("[Worker] Segment complete, stole new segment {} ({}-{})", seg_id, current_pos, end);
+                        continue;
+                    } else {
+                        // No work to steal — worker exits
+                        break;
                     }
-                    break;
                 }
 
                 let range_header = format!("bytes={}-{}", current_pos, end - 1);
@@ -559,8 +1043,8 @@ pub(crate) async fn start_download_impl(
 
                 // Chaos Mode Check: Inject latency or failure here
                 if let Err(_e) = crate::network::chaos::check_chaos().await {
-                     retry_count += 1;
-                     if retry_count <= MAX_RETRIES {
+                     retry_state.immediate_attempts += 1;
+                     if retry_state.immediate_attempts <= retry_config.max_immediate_retries {
                          tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                          continue;
                      }
@@ -585,22 +1069,67 @@ pub(crate) async fn start_download_impl(
                 let response = match res {
                     Ok(r) => r,
                     Err(e) => {
-                        println!("DEBUG: Thread (seg {}) error: {}", seg_id, e);
-                        retry_count += 1;
-                        if retry_count > MAX_RETRIES { 
-                            {
-                                let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
-                                let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
-                                if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
-                                    seg.downloaded_cursor = current_pos;
-                                    seg.state = crate::downloader::structures::SegmentState::Error;
+                        let strategy = crate::downloader::network::analyze_error(&e);
+                        retry_state.last_error = Some(format!("{}", e));
+                        match strategy {
+                            crate::downloader::network::RetryStrategy::Fatal(msg) => {
+                                eprintln!("[seg {}] Fatal error: {}", seg_id, msg);
+                                {
+                                    let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                                        seg.downloaded_cursor = current_pos;
+                                        seg.state = crate::downloader::structures::SegmentState::Error;
+                                    }
                                 }
+                                crate::media::sounds::play_error();
+                                break;
                             }
-                            crate::media::sounds::play_error();
-                            break; 
+                            crate::downloader::network::RetryStrategy::Immediate => {
+                                retry_state.immediate_attempts += 1;
+                                if retry_state.immediate_attempts > retry_config.max_immediate_retries {
+                                    eprintln!("[seg {}] Exceeded immediate retries ({})", seg_id, retry_config.max_immediate_retries);
+                                    {
+                                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                        if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                                            seg.downloaded_cursor = current_pos;
+                                            seg.state = crate::downloader::structures::SegmentState::Error;
+                                        }
+                                    }
+                                    crate::media::sounds::play_error();
+                                    break;
+                                }
+                                continue;
+                            }
+                            crate::downloader::network::RetryStrategy::Delayed(delay) => {
+                                retry_state.delayed_attempts += 1;
+                                if retry_state.delayed_attempts > retry_config.max_delayed_retries {
+                                    eprintln!("[seg {}] Exceeded delayed retries ({})", seg_id, retry_config.max_delayed_retries);
+                                    {
+                                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                        if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                                            seg.downloaded_cursor = current_pos;
+                                            seg.state = crate::downloader::structures::SegmentState::Error;
+                                        }
+                                    }
+                                    crate::media::sounds::play_error();
+                                    break;
+                                }
+                                let backoff = crate::downloader::network::calculate_backoff(
+                                    delay.max(retry_state.current_delay),
+                                    &retry_config,
+                                );
+                                retry_state.current_delay = backoff;
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                            crate::downloader::network::RetryStrategy::RefreshLink => {
+                                // Treat like 403 — trigger hot-swap
+                                continue;
+                            }
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        continue;
                     }
                 };
 
@@ -628,17 +1157,21 @@ pub(crate) async fn start_download_impl(
                          downloaded_bytes: total_downloaded,
                          status: "WaitingForRefresh".to_string(),
                          segments: Some(segments),
+                         last_active: Some(chrono::Utc::now().to_rfc3339()),
+                         error_message: None,
                      };
                      
                      let _ = persistence::upsert_download(saved);
                      
                      // 3. Notify UI
-                     let _ = app_handle_clone.emit("download_progress", Payload {
+                     let payload = Payload {
                          id: id_worker.clone(),
                          downloaded: total_downloaded,
                          total: 0, 
                          segments: vec![],
-                     });
+                     };
+                     let _ = app_handle_clone.emit("download_progress", payload.clone());
+                     let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
                      
                      crate::media::sounds::play_error();
                      
@@ -678,6 +1211,20 @@ pub(crate) async fn start_download_impl(
 
                 // Check for Rate Limiting (429/503)
                 if response.status() == rquest::StatusCode::TOO_MANY_REQUESTS || response.status() == rquest::StatusCode::SERVICE_UNAVAILABLE {
+                     retry_state.delayed_attempts += 1;
+                     if retry_state.delayed_attempts > retry_config.max_delayed_retries {
+                         eprintln!("[seg {}] Rate-limited too many times ({}), giving up", seg_id, retry_config.max_delayed_retries);
+                         {
+                             let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                             let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                             if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                                 seg.downloaded_cursor = current_pos;
+                                 seg.state = crate::downloader::structures::SegmentState::Error;
+                             }
+                         }
+                         crate::media::sounds::play_error();
+                         break;
+                     }
                      let wait_time = if let Some(h) = response.headers().get("Retry-After") {
                          if let Ok(s) = h.to_str() {
                              crate::downloader::network::parse_retry_after(s).unwrap_or(std::time::Duration::from_secs(30))
@@ -685,12 +1232,16 @@ pub(crate) async fn start_download_impl(
                              std::time::Duration::from_secs(30)
                          }
                      } else {
-                         std::time::Duration::from_secs(30)
+                         crate::downloader::network::calculate_backoff(retry_state.current_delay, &retry_config)
                      };
+                     retry_state.current_delay = wait_time;
 
                      tokio::time::sleep(wait_time).await;
                      continue;
                 }
+
+                // Reset retry state on successful connection — transient blips don't accumulate
+                retry_state.reset_with_delay(retry_config.initial_delay);
 
                 let mut stream = response.bytes_stream();
                 
@@ -721,6 +1272,9 @@ pub(crate) async fn start_download_impl(
                                     // Apply global speed limit (token-bucket throttle)
                                     crate::speed_limiter::GLOBAL_LIMITER.acquire(len).await;
 
+                                    // Apply per-download bandwidth allocation
+                                    crate::bandwidth_allocator::ALLOCATOR.acquire(&id_worker, len).await;
+
                                     if tx_clone.send(WriteRequest { offset: current_pos, data: safe_chunk.to_vec(), segment_id: seg_id }).is_err() {
                                         eprintln!("Thread (seg {}): Disk writer channel closed, stopping segment.", seg_id);
                                         return; // Exit worker gracefully instead of panicking
@@ -744,8 +1298,22 @@ pub(crate) async fn start_download_impl(
                                     // NO EMISSION HERE!
                                     // Emission is handled by monitor_task
                                 }
-                                Some(Err(_)) => {
-                                    break; // Stream error, retry loop
+                                Some(Err(stream_err)) => {
+                                    retry_state.delayed_attempts += 1;
+                                    retry_state.last_error = Some(format!("Stream error: {}", stream_err));
+                                    if retry_state.delayed_attempts > retry_config.max_delayed_retries {
+                                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                        if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                                            seg.downloaded_cursor = current_pos;
+                                            seg.state = crate::downloader::structures::SegmentState::Error;
+                                        }
+                                        return;
+                                    }
+                                    let backoff = crate::downloader::network::calculate_backoff(retry_state.current_delay, &retry_config);
+                                    retry_state.current_delay = backoff;
+                                    tokio::time::sleep(backoff).await;
+                                    break; // Break inner stream loop, retry outer request loop
                                 }
                                 None => {
                                     break; // End of stream
@@ -792,6 +1360,8 @@ pub(crate) async fn start_download_impl(
                         downloaded_bytes: total_downloaded,
                         status: "Downloading".to_string(),
                         segments: Some(segments),
+                        last_active: Some(chrono::Utc::now().to_rfc3339()),
+                        error_message: None,
                     };
                     // Silent save, ignore errors
                     let _ = persistence::upsert_download(saved);

@@ -197,6 +197,38 @@ header {
     color: var(--text-primary);
 }
 
+.status-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.status-item {
+    background: var(--card-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.status-item button {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+
+.status-item button:hover {
+    background: rgba(255,255,255,0.1);
+}
+
 .item-type {
     font-size: 10px;
     color: var(--text-secondary);

@@ -59,3 +59,208 @@
     transform: translateX(-50%) translateY(0);
     opacity: 1;
 }
+
+/* ── Floating Stream Detection Panel ─────────────────────────────── */
+
+#hyperstream-stream-panel {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    width: 340px;
+    max-height: 400px;
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 13px;
+    color: #e2e8f0;
+    z-index: 2147483646;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(59, 130, 246, 0.1);
+    overflow: hidden;
+    display: none;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+}
+
+#hyperstream-stream-panel.hs-expanded {
+    border-color: rgba(59, 130, 246, 0.5);
+}
+
+.hs-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    cursor: pointer;
+    user-select: none;
+    background: rgba(59, 130, 246, 0.08);
+    border-bottom: 1px solid rgba(59, 130, 246, 0.15);
+}
+
+.hs-panel-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 13px;
+    color: #93c5fd;
+}
+
+.hs-panel-title svg {
+    color: #3b82f6;
+}
+
+.hs-stream-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    color: white;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.hs-panel-toggle {
+    background: none;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    transition: transform 0.2s, color 0.2s;
+    display: flex;
+    align-items: center;
+}
+
+.hs-panel-toggle:hover {
+    color: #e2e8f0;
+}
+
+.hs-panel-body {
+    display: none;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+
+.hs-panel-body::-webkit-scrollbar {
+    width: 4px;
+}
+
+.hs-panel-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.hs-panel-body::-webkit-scrollbar-thumb {
+    background: rgba(59, 130, 246, 0.3);
+    border-radius: 2px;
+}
+
+.hs-stream-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    gap: 8px;
+    transition: background 0.15s;
+}
+
+.hs-stream-item:hover {
+    background: rgba(59, 130, 246, 0.06);
+}
+
+.hs-stream-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.hs-stream-icon {
+    flex-shrink: 0;
+    color: #64748b;
+    display: flex;
+    align-items: center;
+}
+
+.hs-stream-label {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 12px;
+    color: #cbd5e1;
+}
+
+.hs-badge {
+    flex-shrink: 0;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 5px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.hs-badge-hls {
+    background: rgba(168, 85, 247, 0.2);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.hs-badge-dash {
+    background: rgba(236, 72, 153, 0.2);
+    color: #f472b6;
+    border: 1px solid rgba(236, 72, 153, 0.3);
+}
+
+.hs-badge-video {
+    background: rgba(59, 130, 246, 0.2);
+    color: #93c5fd;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.hs-badge-audio {
+    background: rgba(34, 197, 94, 0.2);
+    color: #86efac;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.hs-quality {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 600;
+    color: #fbbf24;
+}
+
+.hs-size {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: #64748b;
+}
+
+.hs-stream-item .hs-download-btn {
+    flex-shrink: 0;
+    background: none;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: #93c5fd;
+    border-radius: 6px;
+    padding: 5px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.hs-stream-item .hs-download-btn:hover {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: rgba(59, 130, 246, 0.5);
+    color: #60a5fa;
+}

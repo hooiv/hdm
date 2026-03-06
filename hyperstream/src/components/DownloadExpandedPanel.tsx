@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { DownloadTask, Segment } from "../types";
 import { useDownloadActions } from "../hooks/useDownloadActions";
 import { useToast } from "../contexts/ToastContext";
@@ -18,10 +18,61 @@ import {
   Zap,
   Camera,
   RefreshCw,
+  RotateCcw,
   Play,
   ArrowUp,
   Globe,
+  Activity,
+  ShieldCheck,
 } from "lucide-react";
+
+const formatSpeed = (bytes: number): string => {
+  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB/s';
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB/s';
+  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB/s';
+  return bytes.toFixed(0) + ' B/s';
+};
+
+const SpeedChart: React.FC<{ samples: { t: number; v: number }[] }> = ({ samples }) => {
+  const W = 400, H = 60;
+  const maxSpeed = Math.max(...samples.map(s => s.v), 1);
+  const avgSpeed = samples.reduce((s, p) => s + p.v, 0) / samples.length;
+  const peakSpeed = Math.max(...samples.map(s => s.v));
+
+  const points = samples.map((s, i) => {
+    const x = (i / (samples.length - 1)) * W;
+    const y = H - (s.v / maxSpeed) * (H - 4);
+    return `${x},${y}`;
+  });
+  const areaPath = `M0,${H} L${points.join(' L')} L${W},${H} Z`;
+  const linePath = `M${points.join(' L')}`;
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-16" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="speedGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgb(6, 182, 212)" stopOpacity="0.3" />
+            <stop offset="100%" stopColor="rgb(6, 182, 212)" stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+        <path d={areaPath} fill="url(#speedGrad)" />
+        <path d={linePath} fill="none" stroke="rgb(6, 182, 212)" strokeWidth="1.5" strokeLinejoin="round" />
+        {/* avg line */}
+        <line
+          x1="0" y1={H - (avgSpeed / maxSpeed) * (H - 4)}
+          x2={W} y2={H - (avgSpeed / maxSpeed) * (H - 4)}
+          stroke="rgb(148, 163, 184)" strokeWidth="0.5" strokeDasharray="4 3" opacity="0.5"
+        />
+      </svg>
+      <div className="flex items-center justify-between text-xs mt-1">
+        <span className="text-slate-500">Avg: <span className="text-cyan-400 font-mono">{formatSpeed(avgSpeed)}</span></span>
+        <span className="text-slate-500">Peak: <span className="text-emerald-400 font-mono">{formatSpeed(peakSpeed)}</span></span>
+        <span className="text-slate-500">Now: <span className="text-slate-300 font-mono">{formatSpeed(samples[samples.length - 1]?.v || 0)}</span></span>
+      </div>
+    </div>
+  );
+};
 
 interface DownloadExpandedPanelProps {
   task: DownloadTask;
@@ -41,11 +92,29 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
+  // Speed history tracking
+  const MAX_SAMPLES = 120; // ~2 min at 1 sample/sec
+  const speedHistory = useRef<{ t: number; v: number }[]>([]);
+  const [, forceRender] = useState(0);
+
   // Reset ephemeral state when the expanded task changes
   useEffect(() => {
     setShareUrl(null);
     setBusyAction(null);
+    speedHistory.current = [];
   }, [task.id]);
+
+  // Sample speed every second while downloading
+  useEffect(() => {
+    if (task.status !== 'Downloading') return;
+    const interval = setInterval(() => {
+      const arr = speedHistory.current;
+      arr.push({ t: Date.now(), v: task.speed || 0 });
+      if (arr.length > MAX_SAMPLES) arr.shift();
+      forceRender(c => c + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [task.id, task.status, task.speed]);
 
   /** Wraps an async action with busy-state tracking to prevent double-clicks. */
   const withBusy = (name: string, fn: () => Promise<unknown>) => async (e: React.MouseEvent) => {
@@ -80,6 +149,22 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
     <div className="p-4">
       {/* Thread Visualization */}
       <ThreadVisualizer segments={task.segments || []} totalSize={task.total} />
+
+      {/* Speed History Graph */}
+      {speedHistory.current.length > 1 && (
+        <div className="mt-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700/30">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-1.5 text-xs text-slate-400">
+              <Activity size={12} className="text-cyan-400" />
+              <span>Speed History</span>
+            </div>
+            <span className="text-xs text-slate-500 font-mono">
+              {speedHistory.current.length}s
+            </span>
+          </div>
+          <SpeedChart samples={speedHistory.current} />
+        </div>
+      )}
 
       {/* Advanced Actions Toolbar */}
       {task.status === "Done" && (
@@ -285,6 +370,17 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
             </button>
           )}
 
+          {/* Checksum Verification */}
+          {task.status === 'Done' && (
+            <button
+              disabled={isBusy}
+              onClick={withBusy('checksum', () => actions.handleVerifyChecksum())}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 disabled:opacity-50"
+            >
+              <ShieldCheck size={14} /> {busyAction === 'checksum' ? 'Verifying...' : 'Verify Checksum'}
+            </button>
+          )}
+
           {/* SQL Query */}
           {isDataFile && (
             <button
@@ -338,9 +434,46 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
             <Zap size={14} /> {busyAction === 'mods' ? 'Optimizing...' : 'Mod Optimizer'}
           </button>
 
+          {/* API Fuzz — discover alternate download endpoints */}
+          {task.url && (
+            <button
+              disabled={isBusy}
+              onClick={withBusy('fuzz', () => actions.handleApiFuzz())}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20 disabled:opacity-50"
+            >
+              <Search size={14} /> {busyAction === 'fuzz' ? 'Fuzzing...' : 'Fuzz URL'}
+            </button>
+          )}
+
+          {/* HTTP Replay — replay the original request and inspect the response */}
+          {task.url && (
+            <button
+              disabled={isBusy}
+              onClick={withBusy('replay', () => actions.handleApiReplay())}
+              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-teal-500/10 text-teal-400 border border-teal-500/20 hover:bg-teal-500/20 disabled:opacity-50"
+            >
+              <RotateCcw size={14} /> {busyAction === 'replay' ? 'Replaying...' : 'HTTP Replay'}
+            </button>
+          )}
+
           {shareUrl && (
-            <div className="w-full mt-2 p-2 bg-cyan-500/5 border border-cyan-500/20 rounded-md text-xs text-cyan-400 font-mono break-all pointer-events-auto">
-              🔗 {shareUrl}
+            <div className="w-full mt-2 p-2 bg-cyan-500/5 border border-cyan-500/20 rounded-md text-xs text-cyan-400 font-mono break-all pointer-events-auto flex items-center gap-2">
+              <span className="flex-1">🔗 {shareUrl}</span>
+              <button
+                onClick={async () => {
+                  try {
+                    const shares = await invoke<{ id: string; url: string }[]>('list_ephemeral_shares');
+                    const match = shares.find(s => shareUrl.includes(`:${s.url.split(':').pop()}`));
+                    if (match) {
+                      await invoke('stop_ephemeral_share', { id: match.id });
+                      setShareUrl(null);
+                    }
+                  } catch { /* ignore */ }
+                }}
+                className="flex-shrink-0 px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors border border-red-500/30 text-[10px] font-bold"
+              >
+                Stop
+              </button>
             </div>
           )}
         </div>
@@ -388,9 +521,55 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           </span>
         </div>
         <div>
-          Server: <span className="text-slate-300 ml-1">Multi-Threaded</span>
+          Server: <span className="text-slate-300 ml-1">{task.mirrorStats && task.mirrorStats.length > 1 ? 'Multi-Source' : 'Multi-Threaded'}</span>
         </div>
       </div>
+
+      {/* Live Mirror Stats */}
+      {task.mirrorStats && task.mirrorStats.length > 1 && (
+        <div className="mt-3 p-3 bg-slate-900/50 rounded-lg border border-emerald-500/20">
+          <div className="flex items-center gap-2 mb-2">
+            <Globe size={12} className="text-emerald-400" />
+            <span className="text-xs font-semibold text-emerald-400">Mirror Sources</span>
+            <button
+              disabled={isBusy}
+              onClick={withBusy('arbitrage', async () => {
+                const urls = task.mirrorStats!.filter(m => !m.disabled).map(m => m.url);
+                if (urls.length < 2) { toast.error('Need at least 2 active mirrors to probe'); return; }
+                toast.info('Probing mirror bandwidth...');
+                const results = await invoke<{ url: string; speed_bytes_per_sec: number; latency_ms: number; supports_range: boolean; status: number }[]>('arbitrage_download', { urls });
+                const sorted = results.sort((a, b) => b.speed_bytes_per_sec - a.speed_bytes_per_sec);
+                const lines = sorted.slice(0, 5).map((r, i) =>
+                  `${i === 0 ? '🏆' : '  '} ${(r.speed_bytes_per_sec / 1024).toFixed(0)} KB/s — ${r.latency_ms}ms — ${new URL(r.url).hostname}`
+                ).join('\n');
+                toast.success(`Bandwidth Probe:\n${lines}`);
+              })}
+              className="ml-2 px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+            >
+              {busyAction === 'arbitrage' ? 'Probing...' : 'Probe Speeds'}
+            </button>
+            <span className="ml-auto text-[10px] text-slate-500">{task.mirrorStats.filter(m => !m.disabled).length} active</span>
+          </div>
+          <div className="space-y-1">
+            {task.mirrorStats.map((m, i) => {
+              const speedKB = m.avg_speed_bps > 0 ? (m.avg_speed_bps / 1024).toFixed(0) : '0';
+              const maxSpeed = Math.max(...task.mirrorStats!.map(ms => ms.avg_speed_bps), 1);
+              const barWidth = (m.avg_speed_bps / maxSpeed) * 100;
+              return (
+                <div key={i} className={`flex items-center gap-2 text-[10px] ${m.disabled ? 'opacity-30' : ''}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${m.disabled ? 'bg-red-500' : i === 0 ? 'bg-emerald-400' : 'bg-blue-400'}`} />
+                  <span className="text-slate-400 truncate w-20" title={m.url}>{m.source}</span>
+                  <div className="flex-1 h-1 bg-slate-800 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${i === 0 ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{ width: `${barWidth}%` }} />
+                  </div>
+                  <span className="text-slate-400 font-mono w-16 text-right">{speedKB} KB/s</span>
+                  <span className="text-slate-500 font-mono w-8 text-right">{m.latency_ms < 999999 ? `${m.latency_ms}ms` : '—'}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

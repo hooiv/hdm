@@ -1,6 +1,7 @@
 use reqwest::Client;
 use std::collections::{HashSet, VecDeque};
 use url::Url;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GrabbedFile {
@@ -18,6 +19,90 @@ pub struct SpiderOptions {
     pub extensions: Vec<String>,
 }
 
+/// Parsed robots.txt rules for a single user-agent.
+struct RobotRules {
+    disallow: Vec<String>,
+    allow: Vec<String>,
+    crawl_delay: Option<f64>,
+}
+
+impl RobotRules {
+    fn empty() -> Self {
+        Self { disallow: Vec::new(), allow: Vec::new(), crawl_delay: None }
+    }
+
+    /// Parse a robots.txt body, extracting rules relevant to our user-agent.
+    fn parse(body: &str) -> Self {
+        let mut rules = RobotRules::empty();
+        let mut in_our_section = false;
+        let mut found_specific = false;
+        let ua = "hyperstream";
+
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let lower = line.to_lowercase();
+            if lower.starts_with("user-agent:") {
+                let agent = lower["user-agent:".len()..].trim().to_string();
+                if agent == "*" && !found_specific {
+                    in_our_section = true;
+                } else if agent == ua {
+                    // Reset to prefer specific rules
+                    if !found_specific {
+                        rules = RobotRules::empty();
+                    }
+                    found_specific = true;
+                    in_our_section = true;
+                } else {
+                    if !found_specific {
+                        in_our_section = false;
+                    }
+                }
+            } else if in_our_section {
+                if lower.starts_with("disallow:") {
+                    let path = line["Disallow:".len()..].trim();
+                    if !path.is_empty() {
+                        rules.disallow.push(path.to_string());
+                    }
+                } else if lower.starts_with("allow:") {
+                    let path = line["Allow:".len()..].trim();
+                    if !path.is_empty() {
+                        rules.allow.push(path.to_string());
+                    }
+                } else if lower.starts_with("crawl-delay:") {
+                    if let Ok(d) = line["Crawl-delay:".len()..].trim().parse::<f64>() {
+                        rules.crawl_delay = Some(d);
+                    }
+                }
+            }
+        }
+        rules
+    }
+
+    /// Check if a path is allowed by the rules (Allow takes precedence over Disallow for longer matches).
+    fn is_allowed(&self, path: &str) -> bool {
+        let mut best_disallow = 0usize;
+        let mut best_allow = 0usize;
+        for d in &self.disallow {
+            if path.starts_with(d.as_str()) && d.len() > best_disallow {
+                best_disallow = d.len();
+            }
+        }
+        for a in &self.allow {
+            if path.starts_with(a.as_str()) && a.len() > best_allow {
+                best_allow = a.len();
+            }
+        }
+        if best_disallow == 0 {
+            return true; // nothing disallowed
+        }
+        // Longer match wins; on tie, allow wins
+        best_allow >= best_disallow
+    }
+}
+
 pub struct Spider {
     client: Client,
 }
@@ -29,6 +114,32 @@ impl Spider {
 
     /// Maximum number of pages to visit during a crawl to prevent unbounded resource consumption.
     const MAX_PAGES: usize = 500;
+    /// Minimum delay between requests to the same domain (seconds).
+    const MIN_CRAWL_DELAY: f64 = 0.5;
+    /// Maximum crawl-delay we'll respect (cap unreasonable values).
+    const MAX_CRAWL_DELAY: f64 = 30.0;
+    /// User-Agent string identifying the crawler.
+    const USER_AGENT: &'static str = "HyperStream/1.0 (download-manager; +https://github.com/niconicodex/HyperStream)";
+
+    /// Fetch and parse robots.txt for a domain. Returns empty rules on failure.
+    async fn fetch_robots(&self, base_url: &Url) -> RobotRules {
+        let robots_url = format!("{}://{}/robots.txt", base_url.scheme(), base_url.authority());
+        match self.client
+            .get(&robots_url)
+            .header("User-Agent", Self::USER_AGENT)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.text().await {
+                    Ok(body) => RobotRules::parse(&body),
+                    Err(_) => RobotRules::empty(),
+                }
+            }
+            _ => RobotRules::empty(), // No robots.txt or error = allow all
+        }
+    }
 
     pub async fn crawl(&self, options: SpiderOptions) -> Result<Vec<GrabbedFile>, String> {
         let start_url = Url::parse(&options.url).map_err(|e| e.to_string())?;
@@ -48,6 +159,12 @@ impl Spider {
 
         let domain = start_url.domain().ok_or("Invalid URL domain")?.to_string();
 
+        // Fetch robots.txt before crawling
+        let robots = self.fetch_robots(&start_url).await;
+        let crawl_delay = robots.crawl_delay
+            .unwrap_or(Self::MIN_CRAWL_DELAY)
+            .clamp(Self::MIN_CRAWL_DELAY, Self::MAX_CRAWL_DELAY);
+
         let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
         let mut results = Vec::new();
@@ -60,6 +177,7 @@ impl Spider {
             .map_err(|e| format!("Failed to compile regex: {}", e))?;
 
         let mut pages_visited: usize = 0;
+        let mut last_request_time = Instant::now() - Duration::from_secs(10); // allow first request immediately
 
         while let Some((current_url, depth)) = queue.pop_front() {
             if depth > options.max_depth {
@@ -83,10 +201,29 @@ impl Spider {
                 }
             }
 
-            println!("Crawling: {}", current_url);
+            // robots.txt check — skip disallowed paths
+            if !robots.is_allowed(current_url.path()) {
+                continue;
+            }
 
-            // Fetch page
-            let response = match self.client.get(current_url.clone()).send().await {
+            // Enforce crawl delay between requests
+            let elapsed = last_request_time.elapsed();
+            let delay = Duration::from_secs_f64(crawl_delay);
+            if elapsed < delay {
+                tokio::time::sleep(delay - elapsed).await;
+            }
+
+            println!("Crawling: {}", current_url);
+            last_request_time = Instant::now();
+
+            // Fetch page with proper User-Agent
+            let response = match self.client
+                .get(current_url.clone())
+                .header("User-Agent", Self::USER_AGENT)
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(_) => continue,
             };

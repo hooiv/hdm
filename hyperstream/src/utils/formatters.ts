@@ -12,10 +12,28 @@ export function formatSpeed(bytesPerSec: number): string {
   return formatBytes(bytesPerSec) + '/s';
 }
 
-export function formatETA(remainingBytes: number, speed: number): string {
+// ETA smoothing state: per-download EMA of seconds remaining
+const etaState = new Map<string, number>();
+
+export function formatETA(remainingBytes: number, speed: number, downloadId?: string): string {
   if (remainingBytes <= 0 && speed > 0) return 'Done';
   if (speed <= 0 || remainingBytes <= 0 || !Number.isFinite(remainingBytes) || !Number.isFinite(speed)) return '--:--';
-  const seconds = Math.floor(remainingBytes / speed);
+  const rawSeconds = remainingBytes / speed;
+
+  let seconds: number;
+  if (downloadId) {
+    const prev = etaState.get(downloadId);
+    if (prev !== undefined) {
+      // Heavier damping (α=0.15) to prevent ETA jitter
+      seconds = Math.floor(0.15 * rawSeconds + 0.85 * prev);
+    } else {
+      seconds = Math.floor(rawSeconds);
+    }
+    etaState.set(downloadId, seconds);
+  } else {
+    seconds = Math.floor(rawSeconds);
+  }
+
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) {
     const mins = Math.floor(seconds / 60);
@@ -25,4 +43,8 @@ export function formatETA(remainingBytes: number, speed: number): string {
   const hours = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
   return `${hours}h ${mins}m`;
+}
+
+export function clearETAState(downloadId: string): void {
+  etaState.delete(downloadId);
 }

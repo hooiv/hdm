@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { error as logError } from '../utils/logger';
 import { formatBytes, formatSpeed, formatETA } from '../utils/formatters';
 import { ZipPreviewModal } from './ZipPreviewModal';
 import type { DownloadTask } from '../types';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Folder, Play, Pause, Trash2, ChevronDown, FileText, ArrowUp, ArrowDown, Share2 } from 'lucide-react';
+import { Folder, Play, Pause, Trash2, ChevronDown, FileText, ArrowUp, ArrowDown, Share2, Package } from 'lucide-react';
 import P2PShareModal from './P2PShareModal';
 import { DownloadExpandedPanel } from './DownloadExpandedPanel';
 
@@ -70,6 +70,27 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
     const [showPreview, setShowPreview] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const [showP2PShare, setShowP2PShare] = useState(false);
+    const [archiveInfo, setArchiveInfo] = useState<{ archive_type: string; is_multi_part: boolean; part_number: number | null } | null>(null);
+    const [unrarMissing, setUnrarMissing] = useState(false);
+
+    // Detect archive type for completed downloads
+    useEffect(() => {
+        if (task.status !== 'Done' || !downloadDir) return;
+        let cancelled = false;
+        const detectPath = `${downloadDir}/${(task.filename || 'unknown').replace(/[\\/]/g, '_')}`;
+        invoke<{ archive_type: string; is_multi_part: boolean; part_number: number | null } | null>('detect_archive', { path: detectPath })
+            .then(info => {
+                if (cancelled) return;
+                setArchiveInfo(info ?? null);
+                if (info && info.archive_type === 'Rar') {
+                    invoke<boolean>('check_unrar_available').then(ok => {
+                        if (!cancelled && !ok) setUnrarMissing(true);
+                    }).catch(() => {});
+                }
+            })
+            .catch(() => {});
+        return () => { cancelled = true; };
+    }, [task.status, task.filename, downloadDir]);
 
     // Sanitize filename: strip any path separators to prevent path traversal in display/path construction
     const safeFilename = React.useMemo(() => {
@@ -82,7 +103,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
 
     // Derived values
     const remainingBytes = task.total - task.downloaded;
-    const eta = task.status === 'Downloading' ? formatETA(remainingBytes, task.speed) : task.status === 'Done' ? 'Complete' : task.status === 'Paused' ? 'Paused' : '';
+    const eta = task.status === 'Downloading' ? formatETA(remainingBytes, task.speed, task.id) : task.status === 'Done' ? 'Complete' : task.status === 'Paused' ? 'Paused' : '';
 
     // Memoize category calculation
     const category = React.useMemo(() => getFileCategory(safeFilename), [safeFilename]);
@@ -128,12 +149,44 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                         <div className="font-semibold text-slate-100 truncate flex-1 tracking-tight text-sm text-glow" title={task.filename}>
                             {task.filename}
                         </div>
+                        {task.url && task.url.toLowerCase().endsWith('.m3u8') && (
+                            <span className="text-[10px] text-blue-300 bg-blue-800/30 px-1 rounded uppercase ml-2">HLS</span>
+                        )}
+                        {task.mirrorStats && task.mirrorStats.length > 1 && (
+                            <span className="text-[10px] text-emerald-300 bg-emerald-800/30 px-1.5 rounded uppercase ml-1" title={`${task.mirrorStats.filter(m => !m.disabled).length}/${task.mirrorStats.length} mirrors active`}>
+                                ⚡ {task.mirrorStats.filter(m => !m.disabled).length} mirrors
+                            </span>
+                        )}
                         <span className={`text-[9px] uppercase font-bold px-2 py-0.5 rounded-full border border-white/5 ${category.bgColor} ${category.color}`}>
                             {category.label}
                         </span>
                         {task.speed > 0 && (
                             <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded shadow-[0_0_10px_rgba(6,182,212,0.1)]">
                                 {formatSpeed(task.speed)}
+                            </span>
+                        )}
+                        {task.status === 'Downloading' && task.segments && task.segments.length > 0 && (
+                            <span className="text-[10px] font-mono text-violet-300 bg-violet-500/10 border border-violet-500/20 px-1.5 py-0.5 rounded" title={`${task.segments.filter(s => s.state === 'Downloading').length} active / ${task.segments.length} total segments`}>
+                                ⚡ {task.segments.filter(s => s.state === 'Downloading').length}/{task.segments.length}
+                            </span>
+                        )}
+                        {archiveInfo && (
+                            <span
+                                className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded border ${
+                                    archiveInfo.archive_type === 'Rar'
+                                        ? 'text-orange-300 bg-orange-500/10 border-orange-500/20'
+                                        : archiveInfo.archive_type === 'Zip'
+                                        ? 'text-amber-300 bg-amber-500/10 border-amber-500/20'
+                                        : archiveInfo.archive_type === 'SevenZip'
+                                        ? 'text-yellow-300 bg-yellow-500/10 border-yellow-500/20'
+                                        : 'text-slate-300 bg-slate-500/10 border-slate-500/20'
+                                }`}
+                                title={`${archiveInfo.archive_type} archive${archiveInfo.is_multi_part ? ` (part ${archiveInfo.part_number ?? '?'})` : ''}${unrarMissing ? ' — unrar not installed' : ''}`}
+                            >
+                                <Package size={10} />
+                                {archiveInfo.archive_type === 'SevenZip' ? '7Z' : archiveInfo.archive_type.toUpperCase()}
+                                {archiveInfo.is_multi_part && <span className="text-[8px] opacity-70">P{archiveInfo.part_number ?? '?'}</span>}
+                                {unrarMissing && <span className="text-red-400" title="unrar not installed">⚠</span>}
                             </span>
                         )}
                     </div>

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, Suspense } from "react
 import { AnimatePresence } from "framer-motion";
 import { safeInvoke as invoke, safeListen as listen, safeGetWindowByLabel } from "./utils/tauri";
 import { debug, error as logError } from "./utils/logger";
+import { clearETAState } from "./utils/formatters";
 import "./App.css";
 import { Layout } from "./components/Layout";
 import { DownloadList } from "./components/DownloadList";
@@ -10,8 +11,11 @@ import { DropTarget } from "./components/DropTarget";
 import { ToastManager, ToastRef } from "./components/ToastManager";
 import { TorrentList } from "./components/TorrentList";
 import { FeedsTab } from "./components/FeedsTab";
+import { HistoryTab } from "./components/HistoryTab";
+import { ActivityTab } from "./components/ActivityTab";
+import { QueueManager } from "./components/QueueManager";
 import { SearchTab } from "./components/SearchTab";
-import type { AddTorrentResult, DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings, DownloadTask } from "./types";
+import type { AddTorrentResult, DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings, DownloadTask, MirrorStat } from "./types";
 import { toTaskStatus } from "./types";
 
 // Lazy load modals to improve initial render time
@@ -20,6 +24,11 @@ const SettingsPage = React.lazy(() => import("./components/SettingsPage").then(m
 const BatchDownloadModal = React.lazy(() => import("./components/BatchDownloadModal").then(m => ({ default: m.BatchDownloadModal })));
 const ScheduleModal = React.lazy(() => import("./components/ScheduleModal").then(m => ({ default: m.ScheduleModal })));
 const SpiderModal = React.lazy(() => import("./components/SpiderModal").then(m => ({ default: m.SpiderModal })));
+const CrashRecoveryModal = React.lazy(() => import("./components/CrashRecoveryModal").then(m => ({ default: m.CrashRecoveryModal })));
+const StreamDetectorModal = React.lazy(() => import("./components/StreamDetectorModal").then(m => ({ default: m.StreamDetectorModal })));
+const NetworkDiagnosticsModal = React.lazy(() => import("./components/NetworkDiagnosticsModal").then(m => ({ default: m.NetworkDiagnosticsModal })));
+const MediaProcessingModal = React.lazy(() => import("./components/MediaProcessingModal").then(m => ({ default: m.MediaProcessingModal })));
+const IpfsDownloadModal = React.lazy(() => import("./components/IpfsDownloadModal").then(m => ({ default: m.IpfsDownloadModal })));
 const AddTorrentModal = React.lazy(() => import("./components/AddTorrentModal").then(m => ({ default: m.AddTorrentModal })));
 const PluginEditor = React.lazy(() => import("./components/PluginEditor"));
 
@@ -42,11 +51,16 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isScheduleOpen, setIsScheduleOpen] = useState(false);
   const [isSpiderOpen, setIsSpiderOpen] = useState(false);
+  const [isCrashRecoveryOpen, setIsCrashRecoveryOpen] = useState(false);
+  const [isStreamDetectorOpen, setIsStreamDetectorOpen] = useState(false);
+  const [isNetworkDiagOpen, setIsNetworkDiagOpen] = useState(false);
+  const [isMediaProcessingOpen, setIsMediaProcessingOpen] = useState(false);
+  const [isIpfsOpen, setIsIpfsOpen] = useState(false);
   const [isTorrentModalOpen, setIsTorrentModalOpen] = useState(false);
   const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
   const [batchLinks, setBatchLinks] = useState<BatchLink[]>([]);
   const [droppedUrl, setDroppedUrl] = useState<string | undefined>(undefined);
-  const [activeTab, setActiveTab] = useState<'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins'>('downloads');
+  const [activeTab, setActiveTab] = useState<'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue'>('downloads');
   const [downloadDir, setDownloadDir] = useState<string>('');
 
   const [, setIsOverlayVisible] = useState(false);
@@ -66,12 +80,30 @@ function App() {
     }
   }, []);
 
-  // keyboard shortcut: Ctrl+Shift+O toggles overlay
+  // keyboard shortcuts — refs updated after pauseAll/resumeAll are defined
+  const pauseAllRef = useRef<(() => void) | null>(null);
+  const resumeAllRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
       if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'o') {
         e.preventDefault();
         toggleOverlay();
+      } else if (e.ctrlKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        setIsModalOpen(true);
+      } else if (e.ctrlKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        pauseAllRef.current?.();
+      } else if (e.ctrlKey && e.key.toLowerCase() === 'r') {
+        e.preventDefault();
+        resumeAllRef.current?.();
+      } else if (e.ctrlKey && e.key === ',') {
+        e.preventDefault();
+        setIsSettingsOpen(true);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -86,7 +118,7 @@ function App() {
   // Track auto-remove timers so they can be cleaned on unmount
   const autoRemoveTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   // Stable ref for startDownload to avoid stale closures in event listeners
-  const startDownloadRef = useRef<(url: string, filename: string, force?: boolean, customHeaders?: Record<string,string>) => Promise<void>>(null!);
+  const startDownloadRef = useRef<(url: string, filename: string, force?: boolean, customHeaders?: Record<string,string>, mirrors?: [string, string][]) => Promise<void>>(null!);
 
   useEffect(() => {
     const unlistenPromise = listen<DownloadProgressPayload>('download_progress', (event) => {
@@ -147,7 +179,15 @@ function App() {
             const last = lastUpdate.current.get(id);
             let speed = last?.speed || 0;
 
-            if (last) {
+            // Primary: use backend EMA-smoothed per-segment speeds
+            const backendSpeed = segments.reduce((sum, s) => sum + (s.speed_bps || 0), 0);
+
+            if (backendSpeed > 0) {
+              // Backend already applies EMA — use directly with light frontend smoothing
+              const alpha = 0.4;
+              speed = last ? alpha * backendSpeed + (1 - alpha) * (last.speed || 0) : backendSpeed;
+              lastUpdate.current.set(id, { time: now, bytes: downloaded, speed });
+            } else if (last) {
               const timeDiff = (now - last.time) / 1000;
               const bytesDiff = downloaded - last.bytes;
 
@@ -155,7 +195,9 @@ function App() {
                 lastUpdate.current.set(id, { time: now, bytes: downloaded, speed: 0 });
                 speed = 0;
               } else if (timeDiff >= 0.3 && bytesDiff > 0) {
-                speed = bytesDiff / timeDiff;
+                const instantSpeed = bytesDiff / timeDiff;
+                const alpha = 0.3;
+                speed = alpha * instantSpeed + (1 - alpha) * (last.speed || 0);
                 lastUpdate.current.set(id, { time: now, bytes: downloaded, speed });
               }
             } else {
@@ -180,6 +222,7 @@ function App() {
                 invoke("remove_download_entry", { id }).catch(() => {});
                 setTasks(curr => curr.filter(t => t.id !== id));
                 lastUpdate.current.delete(id);
+                clearETAState(id);
                 completedIds.current.delete(id);
                 autoRemoveTimers.current.delete(id);
               }, 30000);
@@ -201,6 +244,15 @@ function App() {
       }
       autoRemoveTimers.current.clear();
     };
+  }, []);
+
+  // Listen for mirror stats from multi-source downloads
+  useEffect(() => {
+    const unlistenPromise = listen<{ id: string; mirrors: MirrorStat[] }>('mirror_stats', (event) => {
+      const { id, mirrors } = event.payload;
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, mirrorStats: mirrors } : t));
+    });
+    return () => { unlistenPromise.then(unlisten => unlisten()); };
   }, []);
 
   // Load settings + saved downloads on app start
@@ -301,6 +353,22 @@ function App() {
     };
   }, []);
 
+  // Listen for quiet hours deferral notifications
+  useEffect(() => {
+    const unlistenPromise = listen<{ deferred_count: number; resume_at: string }>('quiet_hours_deferred', (event) => {
+      const { deferred_count, resume_at } = event.payload;
+      const resumeTime = new Date(resume_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      toastRef.current?.addToast(
+        `${deferred_count} scheduled download${deferred_count > 1 ? 's' : ''} deferred — quiet hours active until ${resumeTime}`,
+        'info'
+      );
+    });
+
+    return () => {
+      unlistenPromise.then(unlisten => unlisten());
+    };
+  }, []);
+
   // Listen for URL refresh events (update task URL when address is hot-swapped)
   useEffect(() => {
     const unlistenPromise = listen<{ id: string; url: string }>('download_refreshed', (event) => {
@@ -341,7 +409,7 @@ function App() {
     return safe.trim() || 'download';
   };
 
-  const startDownload = async (url: string, filename: string, force: boolean = false, customHeaders?: Record<string, string>) => {
+  const startDownload = async (url: string, filename: string, force: boolean = false, customHeaders?: Record<string, string>, mirrors?: [string, string][]) => {
     const safeFilename = sanitizeFilename(filename);
     const downloadId = generateId();
 
@@ -362,13 +430,23 @@ function App() {
     setTasks(prev => [...prev, newTask]);
 
     try {
-      await invoke("start_download", {
-        id: downloadId,
-        url,
-        path: `${downloadDir}/${safeFilename}`,
-        force,
-        customHeaders: customHeaders || null
-      });
+      if (mirrors && mirrors.length > 0) {
+        await invoke("start_multi_source_download", {
+          id: downloadId,
+          primaryUrl: url,
+          mirrors,
+          path: `${downloadDir}/${safeFilename}`,
+          customHeaders: customHeaders || null
+        });
+      } else {
+        await invoke("start_download", {
+          id: downloadId,
+          url,
+          path: `${downloadDir}/${safeFilename}`,
+          force,
+          customHeaders: customHeaders || null
+        });
+      }
     } catch (error) {
       logError(error);
       toastRef.current?.addToast(`Failed to start download: ${error}`, 'error');
@@ -523,6 +601,10 @@ function App() {
     });
   };
 
+  // Keep keyboard shortcut refs in sync
+  pauseAllRef.current = pauseAll;
+  resumeAllRef.current = resumeAll;
+
   const handleClipboardDownload = (url: string, filename: string) => {
     startDownload(url, filename);
     setClipboardData(null);
@@ -578,6 +660,11 @@ function App() {
         onAddTorrentClick={() => setIsTorrentModalOpen(true)}
         onScheduleClick={() => setIsScheduleOpen(true)}
         onSpiderClick={() => setIsSpiderOpen(true)}
+        onCrashRecoveryClick={() => setIsCrashRecoveryOpen(true)}
+        onStreamDetectorClick={() => setIsStreamDetectorOpen(true)}
+        onNetworkDiagClick={() => setIsNetworkDiagOpen(true)}
+        onMediaProcessingClick={() => setIsMediaProcessingOpen(true)}
+        onIpfsClick={() => setIsIpfsOpen(true)}
         onSettingsClick={() => setIsSettingsOpen(true)}
         onOverlayClick={toggleOverlay}
         stats={stats}
@@ -651,6 +738,12 @@ function App() {
           <Suspense fallback={<div className="flex-1 flex items-center justify-center text-slate-500">Loading plugins...</div>}>
             <PluginEditor />
           </Suspense>
+        ) : activeTab === 'history' ? (
+          <HistoryTab />
+        ) : activeTab === 'activity' ? (
+          <ActivityTab />
+        ) : activeTab === 'queue' ? (
+          <QueueManager />
         ) : (
           <SearchTab onStartDownload={startDownload} />
         )}
@@ -714,6 +807,40 @@ function App() {
               files.forEach(f => startDownload(f.url, f.filename));
               setIsSpiderOpen(false);
             }}
+          />
+        )}
+        {isCrashRecoveryOpen && (
+          <CrashRecoveryModal
+            isOpen={isCrashRecoveryOpen}
+            onClose={() => setIsCrashRecoveryOpen(false)}
+          />
+        )}
+        {isStreamDetectorOpen && (
+          <StreamDetectorModal
+            isOpen={isStreamDetectorOpen}
+            onClose={() => setIsStreamDetectorOpen(false)}
+            onDownload={(url, filename) => {
+              startDownload(url, filename || url.split('/').pop() || 'stream');
+              setIsStreamDetectorOpen(false);
+            }}
+          />
+        )}
+        {isNetworkDiagOpen && (
+          <NetworkDiagnosticsModal
+            isOpen={isNetworkDiagOpen}
+            onClose={() => setIsNetworkDiagOpen(false)}
+          />
+        )}
+        {isMediaProcessingOpen && (
+          <MediaProcessingModal
+            isOpen={isMediaProcessingOpen}
+            onClose={() => setIsMediaProcessingOpen(false)}
+          />
+        )}
+        {isIpfsOpen && (
+          <IpfsDownloadModal
+            isOpen={isIpfsOpen}
+            onClose={() => setIsIpfsOpen(false)}
           />
         )}
       </Suspense>

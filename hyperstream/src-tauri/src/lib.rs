@@ -21,6 +21,10 @@ mod http_server;
 use crate::http_server::StreamingSource;
 mod settings;
 mod speed_limiter;
+mod speed_profiles;
+mod download_history;
+mod site_rules;
+mod file_categorizer;
 mod clipboard;
 mod network;
 mod scheduler;
@@ -34,7 +38,7 @@ mod zip_preview;
 mod proxy;
 mod adaptive_threads;
 
-// mod virus_scanner;
+mod virus_scanner;
 mod import_export;
 mod lan_api;
 mod system_monitor;
@@ -63,6 +67,8 @@ mod usb_flasher;
 mod api_replay;
 mod c2pa_validator;
 mod bandwidth_arb;
+mod bandwidth_allocator;
+mod crash_recovery;
 mod stego_vault;
 mod tui_dashboard;
 mod auto_extract;
@@ -75,6 +81,12 @@ mod rclone_bridge;
 mod subtitle_gen;
 mod virtual_drive;
 mod geofence;
+mod queue_manager;
+mod integrity;
+mod network_monitor;
+mod event_bus;
+mod event_sourcing;
+mod video_detector;
 
 use persistence::SavedDownload;
 
@@ -1121,6 +1133,42 @@ async fn start_download(
     force: Option<bool>,
     custom_headers: Option<std::collections::HashMap<String, String>>
 ) -> Result<(), String> {
+    // HLS detection path - when the URL appears to be an HLS manifest we
+    // hand the request off to the specialised downloader.  this also ensures
+    // resume behaviour works correctly for previously paused HLS tasks.
+    if url.to_lowercase().ends_with(".m3u8") {
+        return crate::engine::hls::start_hls_download_impl(
+            &app,
+            &state,
+            id,
+            url,
+            path,
+            force.unwrap_or(false),
+            custom_headers,
+        )
+        .await;
+    }
+
+    // DASH/MPD detection — hand off to the DASH engine
+    if url.to_lowercase().ends_with(".mpd") {
+        return crate::engine::dash::start_dash_download_impl(
+            &app,
+            &state,
+            id,
+            url,
+            path,
+            force.unwrap_or(false),
+            custom_headers,
+        )
+        .await;
+    }
+
+    // Track this download in the queue as active (for concurrency counting)
+    {
+        let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        queue.mark_active(&id);
+    }
+
     start_download_impl(&app, &state, id, url, path, None, custom_headers, force.unwrap_or(false)).await
 }
 
@@ -1132,45 +1180,120 @@ async fn pause_download(
     id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(session) = downloads.remove(&id) {
-        // Capture segment state BEFORE sending stop signal to avoid losing up to 5s of progress
-        let segments = session.manager.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
-        let total_downloaded: u64 = segments.iter()
-            .map(|s| s.downloaded_cursor.saturating_sub(s.start_byte))
-            .sum();
-        
-        let _ = session.stop_tx.send(());
-        
-        // Update persistence with accurate segment state
-        let filename = std::path::Path::new(&session.path)
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| "download".to_string());
-        
-        let saved = persistence::SavedDownload {
-            id: id.clone(),
-            url: session.url.clone(),
-            path: session.path.clone(),
-            filename,
-            total_size: session.manager.lock().unwrap_or_else(|e| e.into_inner()).file_size,
-            downloaded_bytes: total_downloaded,
-            status: "Paused".to_string(),
-            segments: Some(segments),
-        };
-        let _ = persistence::upsert_download(saved);
-        
-        return Ok(());
+    // first try regular downloads
+    {
+        let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(session) = downloads.remove(&id) {
+            // Capture segment state BEFORE sending stop signal to avoid losing up to 5s of progress
+            let segments = session.manager.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
+            let total_downloaded: u64 = segments.iter()
+                .map(|s| s.downloaded_cursor.saturating_sub(s.start_byte))
+                .sum();
+            
+            let _ = session.stop_tx.send(());
+            
+            // Update persistence with accurate segment state
+            let filename = std::path::Path::new(&session.path)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "download".to_string());
+            
+            let saved = persistence::SavedDownload {
+                id: id.clone(),
+                url: session.url.clone(),
+                path: session.path.clone(),
+                filename,
+                total_size: session.manager.lock().unwrap_or_else(|e| e.into_inner()).file_size,
+                downloaded_bytes: total_downloaded,
+                status: "Paused".to_string(),
+                segments: Some(segments),
+                last_active: Some(chrono::Utc::now().to_rfc3339()),
+                error_message: None,
+            };
+            let _ = persistence::upsert_download(saved);
+            
+            // Notify queue manager that a slot opened (download paused)
+            {
+                let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                queue.mark_finished(&id);
+            }
+            
+            return Ok(());
+        }
+    }
+    // then try hls-specific sessions
+    {
+        let mut hls = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(session) = hls.remove(&id) {
+            let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = session.stop_tx.send(());
+            // simply persist the byte count; URL is stored as manifest_url
+            let saved = persistence::SavedDownload {
+                id: id.clone(),
+                url: session.manifest_url.clone(),
+                path: std::path::Path::new(&session.manifest_url)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "download".into()),
+                filename: std::path::Path::new(&session.manifest_url)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "".to_string()),
+                total_size: session.segment_sizes.iter().sum(),
+                downloaded_bytes: downloaded,
+                status: "Paused".to_string(),
+                segments: None,
+                last_active: Some(chrono::Utc::now().to_rfc3339()),
+                error_message: None,
+            };
+            let _ = persistence::upsert_download(saved);
+            // Notify queue manager that a slot opened (HLS paused)
+            {
+                let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                queue.mark_finished(&id);
+            }
+            return Ok(());
+        }
+    }
+    // then try DASH sessions
+    {
+        let mut dash = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(session) = dash.remove(&id) {
+            let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = session.stop_tx.send(());
+            let total = session.video_total + session.audio_total;
+            let saved = persistence::SavedDownload {
+                id: id.clone(),
+                url: session.manifest_url.clone(),
+                path: std::path::Path::new(&session.manifest_url)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "download".into()),
+                filename: std::path::Path::new(&session.manifest_url)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "".to_string()),
+                total_size: total,
+                downloaded_bytes: downloaded,
+                status: "Paused".to_string(),
+                segments: None,
+                last_active: Some(chrono::Utc::now().to_rfc3339()),
+                error_message: None,
+            };
+            let _ = persistence::upsert_download(saved);
+            {
+                let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                queue.mark_finished(&id);
+            }
+            return Ok(());
+        }
     }
     
     // Fallback: update persistence if session wasn't found (already stopped)
-    // Use upsert_download (which acquires PERSISTENCE_LOCK) to avoid data races
-    // with the periodic save loop running on active downloads.
     if let Ok(downloads) = persistence::load_downloads() {
-        if let Some(d) = downloads.into_iter().find(|d| d.id == id) {
-            let mut updated = d;
-            updated.status = "Paused".to_string();
-            let _ = persistence::upsert_download(updated);
+        if let Some(mut d) = downloads.into_iter().find(|d| d.id == id) {
+            d.status = "Paused".to_string();
+            let _ = persistence::upsert_download(d);
         }
     }
     Ok(())
@@ -1181,9 +1304,193 @@ fn get_downloads() -> Result<Vec<SavedDownload>, String> {
     persistence::load_downloads()
 }
 
+// Return a snapshot of currently active downloads, useful for extension status polling
+#[derive(serde::Serialize)]
+struct ActiveDownloadInfo {
+    id: String,
+    url: String,
+    filename: Option<String>,
+    downloaded: u64,
+    total: u64,
+}
+
+#[tauri::command]
+fn list_active_downloads(state: State<'_, AppState>) -> Vec<ActiveDownloadInfo> {
+    let mut result = Vec::new();
+    {
+        let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, session) in downloads.iter() {
+            let mgr = session.manager.lock().unwrap_or_else(|e| e.into_inner());
+            result.push(ActiveDownloadInfo {
+                id: id.clone(),
+                url: session.url.clone(),
+                filename: std::path::Path::new(&session.path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string()),
+                downloaded: mgr.total_downloaded(),
+                total: mgr.file_size,
+            });
+        }
+    }
+    // append HLS sessions
+    {
+        let hls = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, session) in hls.iter() {
+            let total: u64 = session.segment_sizes.iter().sum();
+            let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
+            result.push(ActiveDownloadInfo {
+                id: id.clone(),
+                url: session.manifest_url.clone(),
+                filename: None,
+                downloaded,
+                total,
+            });
+        }
+    }
+    // append DASH sessions
+    {
+        let dash = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, session) in dash.iter() {
+            let total = session.video_total + session.audio_total;
+            let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
+            result.push(ActiveDownloadInfo {
+                id: id.clone(),
+                url: session.manifest_url.clone(),
+                filename: None,
+                downloaded,
+                total,
+            });
+        }
+    }
+    result
+}
+
 #[tauri::command]
 fn remove_download_entry(id: String) -> Result<(), String> {
     persistence::remove_download(&id)
+}
+
+// ─── Queue Management Commands ───────────────────────────────────────────
+
+#[tauri::command]
+fn enqueue_download(
+    id: String,
+    url: String,
+    path: String,
+    priority: Option<String>,
+    expected_checksum: Option<String>,
+    custom_headers: Option<std::collections::HashMap<String, String>>,
+) -> Result<(), String> {
+    let prio = priority.map(|p| queue_manager::DownloadPriority::from_str(&p))
+        .unwrap_or(queue_manager::DownloadPriority::Normal);
+
+    let item = queue_manager::QueuedDownload {
+        id,
+        url,
+        path,
+        priority: prio,
+        added_at: chrono::Utc::now().timestamp_millis(),
+        custom_headers,
+        expected_checksum,
+        retry_count: 0,
+        max_retries: 3,
+        retry_delay_ms: 0,
+    };
+
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    queue.enqueue(item);
+    drop(queue);
+    queue_manager::persist_queue();
+    Ok(())
+}
+
+#[tauri::command]
+fn get_queue_status() -> queue_manager::QueueStatus {
+    let queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    queue.status()
+}
+
+#[tauri::command]
+fn remove_from_queue(id: String) -> Result<bool, String> {
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let removed = queue.remove(&id);
+    drop(queue);
+    queue_manager::persist_queue();
+    Ok(removed)
+}
+
+#[tauri::command]
+fn set_queue_priority(id: String, priority: String) -> Result<bool, String> {
+    let prio = queue_manager::DownloadPriority::from_str(&priority);
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let changed = queue.set_priority(&id, prio);
+    drop(queue);
+    queue_manager::persist_queue();
+    Ok(changed)
+}
+
+#[tauri::command]
+fn move_queue_item_to_front(id: String) -> Result<bool, String> {
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let moved = queue.move_to_front(&id);
+    drop(queue);
+    queue_manager::persist_queue();
+    Ok(moved)
+}
+
+#[tauri::command]
+fn set_max_concurrent_downloads(max: u32) -> Result<(), String> {
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    queue.set_max_concurrent(max);
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_download_queue() -> Result<(), String> {
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    queue.clear_queue();
+    drop(queue);
+    queue_manager::persist_queue();
+    Ok(())
+}
+
+// ─── Integrity Verification Commands ─────────────────────────────────────
+
+#[tauri::command]
+async fn verify_download_checksum(path: String, expected: String) -> Result<integrity::ChecksumResult, String> {
+    integrity::verify_file_checksum(&path, &expected).await
+}
+
+#[tauri::command]
+async fn compute_file_checksums(path: String) -> Result<Vec<integrity::ChecksumResult>, String> {
+    integrity::compute_all_checksums(&path).await
+}
+
+#[tauri::command]
+async fn compute_file_hash(path: String, algorithm: String) -> Result<String, String> {
+    let algo = match algorithm.to_lowercase().as_str() {
+        "sha256" | "sha-256" => integrity::HashAlgorithm::SHA256,
+        "md5" => integrity::HashAlgorithm::MD5,
+        "crc32" => integrity::HashAlgorithm::CRC32,
+        _ => return Err(format!("Unsupported algorithm: {}. Use sha256, md5, or crc32.", algorithm)),
+    };
+    integrity::compute_file_hash(&path, algo).await
+}
+
+// ─── Network Monitor Commands ────────────────────────────────────────────
+
+#[tauri::command]
+async fn check_network_status() -> Result<bool, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .no_proxy()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match client.head("http://www.gstatic.com/generate_204").send().await {
+        Ok(resp) => Ok(resp.status().is_success() || resp.status().as_u16() == 204),
+        Err(_) => Ok(false),
+    }
 }
 
 #[tauri::command]
@@ -1197,6 +1504,46 @@ fn get_auth_token() -> Result<String, String> {
     let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
     let token_path = home.join(".hyperstream").join("auth_token");
     std::fs::read_to_string(&token_path).map_err(|e| format!("Failed to read auth token: {}", e))
+}
+
+// Writes a native messaging host manifest to common locations.  The
+// extension must still populate "allowed_origins" with its ID(s) after
+// installation.
+#[tauri::command]
+fn install_native_host() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_str = exe.to_string_lossy();
+    let manifest = serde_json::json!({
+        "name": "com.hyperstream",
+        "description": "HyperStream native messaging host",
+        "path": exe_str,
+        "type": "stdio",
+        "allowed_origins": Vec::<String>::new()
+    });
+    let manifest_str = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    let locations = if cfg!(target_os = "windows") {
+        if let Some(local) = dirs::data_local_dir() {
+            vec![local.join("Google/Chrome/User Data/NativeMessagingHosts/com.hyperstream.json")]
+        } else { vec![] }
+    } else if cfg!(target_os = "macos") {
+        if let Some(home) = dirs::home_dir() {
+            vec![home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts/com.hyperstream.json")]
+        } else { vec![] }
+    } else {
+        if let Some(home) = dirs::home_dir() {
+            vec![home.join(".config/google-chrome/NativeMessagingHosts/com.hyperstream.json"), home.join(".config/chromium/NativeMessagingHosts/com.hyperstream.json")]
+        } else { vec![] }
+    };
+    for path in locations.iter() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(path, &manifest_str) {
+            return Err(format!("Failed to write manifest {}: {}", path.display(), e));
+        }
+    }
+    Ok(format!("Manifest written to {} (edit allowed_origins manually)",
+        locations.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")))
 }
 
 #[tauri::command]
@@ -1583,6 +1930,287 @@ fn parse_dash_manifest(content: String, base_url: String) -> Result<media::dash_
     media::dash_parser::parse_mpd(&content, &base_url)
 }
 
+#[tauri::command]
+async fn fetch_dash_manifest(url: String) -> Result<media::dash_parser::DashManifest, String> {
+    let settings = settings::load_settings();
+    let proxy_config = proxy::ProxyConfig::from_settings(&settings);
+    let client = if settings.dpi_evasion {
+        network::masq::build_impersonator_client(network::masq::BrowserProfile::Chrome, Some(&proxy_config), None)
+    } else {
+        network::masq::build_client(Some(&proxy_config), None)
+    }
+    .map_err(|e| e.to_string())?;
+
+    let body = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch MPD: {}", e))?
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read MPD body: {}", e))?;
+
+    media::dash_parser::parse_mpd(&body, &url)
+}
+
+// ============ Multi-Source / Mirror Download Commands ============
+
+#[tauri::command]
+async fn start_multi_source_download(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+    primary_url: String,
+    mirrors: Vec<(String, String)>,
+    path: String,
+    custom_headers: Option<std::collections::HashMap<String, String>>,
+) -> Result<(), String> {
+    engine::multi_source::start_multi_source_download(
+        &app, &state, id, primary_url, mirrors, path, custom_headers,
+    ).await
+}
+
+#[tauri::command]
+async fn probe_mirrors(
+    primary_url: String,
+    mirror_urls: Vec<(String, String)>,
+) -> Result<Vec<engine::multi_source::MirrorStats>, String> {
+    let settings = settings::load_settings();
+    let proxy_config = proxy::ProxyConfig::from_settings(&settings);
+    let client = if settings.dpi_evasion {
+        network::masq::build_impersonator_client(
+            network::masq::BrowserProfile::Chrome, Some(&proxy_config), None,
+        )
+    } else {
+        network::masq::build_client(Some(&proxy_config), None)
+    }.map_err(|e| e.to_string())?;
+
+    let pool = engine::multi_source::MirrorPool::new(&primary_url, &mirror_urls);
+    pool.probe_all(&client).await;
+    Ok(pool.get_stats())
+}
+
+#[tauri::command]
+fn check_ffmpeg_available() -> bool {
+    media::muxer::is_ffmpeg_available()
+}
+
+// ============ Download History Commands ============
+
+#[tauri::command]
+fn get_download_history(filter: download_history::HistoryFilter) -> download_history::HistoryPage {
+    download_history::query(&filter)
+}
+
+#[tauri::command]
+fn search_download_history(query: String, limit: Option<usize>) -> Vec<download_history::HistoryEntry> {
+    download_history::search(&query, limit.unwrap_or(100))
+}
+
+#[tauri::command]
+fn clear_download_history() -> Result<(), String> {
+    download_history::clear()
+}
+
+#[tauri::command]
+fn delete_history_entry(id: String) -> Result<(), String> {
+    download_history::delete_entry(&id)
+}
+
+#[tauri::command]
+fn export_download_history_csv() -> Result<String, String> {
+    download_history::export_csv()
+}
+
+#[tauri::command]
+fn get_history_summary() -> download_history::HistorySummary {
+    download_history::summary()
+}
+
+// ============ Activity Log Commands ============
+
+#[tauri::command]
+fn get_activity_log(
+    app: tauri::AppHandle,
+    limit: Option<usize>,
+    event_type: Option<String>,
+) -> Result<Vec<event_sourcing::LedgerEvent>, String> {
+    let log = app.state::<std::sync::Arc<event_sourcing::SharedLog>>();
+    log.read_recent(
+        limit.unwrap_or(200),
+        event_type.as_deref(),
+    )
+}
+
+// ============ CAS Duplicate Detection Commands ============
+
+#[tauri::command]
+fn check_cas_duplicate(etag: Option<String>, md5: Option<String>) -> Option<String> {
+    cas_manager::check_cas(etag.as_deref(), md5.as_deref())
+}
+
+#[tauri::command]
+fn register_cas_entry(etag: Option<String>, md5: Option<String>, path: String) {
+    cas_manager::register_cas(etag.as_deref(), md5.as_deref(), &path);
+}
+
+#[derive(serde::Serialize)]
+struct HeadUrlMetadata {
+    etag: Option<String>,
+    content_md5: Option<String>,
+}
+
+#[tauri::command]
+async fn head_url_metadata(url: String) -> Result<HeadUrlMetadata, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.head(&url).send().await.map_err(|e| e.to_string())?;
+    let headers = resp.headers();
+    let etag = headers.get("etag").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let content_md5 = headers.get("content-md5").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    Ok(HeadUrlMetadata { etag, content_md5 })
+}
+
+// ============ Site Rules Commands ============
+
+#[tauri::command]
+fn list_site_rules() -> Vec<site_rules::SiteRule> {
+    site_rules::list_rules()
+}
+
+#[tauri::command]
+fn get_site_rule(id: String) -> Result<site_rules::SiteRule, String> {
+    site_rules::get_rule(&id).ok_or_else(|| format!("Rule '{}' not found", id))
+}
+
+#[tauri::command]
+fn add_site_rule(rule: site_rules::SiteRule) -> Result<(), String> {
+    site_rules::add_rule(rule)
+}
+
+#[tauri::command]
+fn update_site_rule(rule: site_rules::SiteRule) -> Result<(), String> {
+    site_rules::update_rule(rule)
+}
+
+#[tauri::command]
+fn delete_site_rule(id: String) -> Result<(), String> {
+    site_rules::delete_rule(&id)
+}
+
+#[tauri::command]
+fn import_site_rule_presets() -> Result<usize, String> {
+    site_rules::import_presets()
+}
+
+#[tauri::command]
+fn test_site_rule(url: String) -> site_rules::EffectiveConfig {
+    site_rules::test_url(&url)
+}
+
+#[tauri::command]
+fn get_site_rule_presets() -> Vec<site_rules::SiteRule> {
+    site_rules::builtin_presets()
+}
+
+// ============ File Categorizer Commands ============
+
+#[tauri::command]
+fn list_file_categories() -> Vec<file_categorizer::FileCategory> {
+    file_categorizer::list_categories()
+}
+
+#[tauri::command]
+fn get_file_category(id: String) -> Result<file_categorizer::FileCategory, String> {
+    file_categorizer::get_category(&id).ok_or_else(|| format!("Category '{}' not found", id))
+}
+
+#[tauri::command]
+fn add_file_category(category: file_categorizer::FileCategory) -> Result<(), String> {
+    file_categorizer::add_category(category)
+}
+
+#[tauri::command]
+fn update_file_category(category: file_categorizer::FileCategory) -> Result<(), String> {
+    file_categorizer::update_category(category)
+}
+
+#[tauri::command]
+fn delete_file_category(id: String) -> Result<(), String> {
+    file_categorizer::delete_category(&id)
+}
+
+#[tauri::command]
+fn categorize_file(filename: String) -> file_categorizer::CategorizeResult {
+    file_categorizer::categorize(&filename)
+}
+
+#[tauri::command]
+fn categorize_files_batch(filenames: Vec<String>) -> Vec<file_categorizer::CategorizeResult> {
+    file_categorizer::categorize_batch(&filenames)
+}
+
+#[tauri::command]
+fn get_file_category_stats(download_dir: String) -> Vec<file_categorizer::CategoryStats> {
+    file_categorizer::compute_stats(&download_dir)
+}
+
+#[tauri::command]
+fn reset_file_categories() -> Result<(), String> {
+    file_categorizer::reset_to_defaults()
+}
+
+// ============ Bandwidth Allocator Commands ============
+
+#[tauri::command]
+fn register_download_bandwidth(id: String, config: bandwidth_allocator::BandwidthConfig) {
+    bandwidth_allocator::ALLOCATOR.register(&id, config);
+}
+
+#[tauri::command]
+fn deregister_download_bandwidth(id: String) {
+    bandwidth_allocator::ALLOCATOR.deregister(&id);
+}
+
+#[tauri::command]
+fn get_bandwidth_allocations() -> Vec<bandwidth_allocator::AllocationSnapshot> {
+    bandwidth_allocator::ALLOCATOR.snapshot()
+}
+
+#[tauri::command]
+fn rebalance_bandwidth() {
+    bandwidth_allocator::ALLOCATOR.rebalance();
+}
+
+// ============ Crash Recovery Commands ============
+
+#[tauri::command]
+fn scan_crashed_downloads() -> Result<crash_recovery::RecoveryReport, String> {
+    crash_recovery::scan_and_recover()
+}
+
+#[tauri::command]
+fn get_interrupted_downloads() -> Result<Vec<persistence::SavedDownload>, String> {
+    crash_recovery::get_interrupted()
+}
+
+#[tauri::command]
+fn resume_interrupted_download(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    crash_recovery::resume_one(&app, &id)
+}
+
+#[tauri::command]
+fn resume_all_interrupted(app: tauri::AppHandle) -> Result<u32, String> {
+    let interrupted = crash_recovery::get_interrupted()?;
+    let count = interrupted.len() as u32;
+    for dl in &interrupted {
+        let _ = crash_recovery::resume_one(&app, &dl.id);
+    }
+    Ok(count)
+}
+
 // ============ Muxer Commands ============
 
 #[tauri::command]
@@ -1715,7 +2343,7 @@ async fn test_proxy(config: proxy::ProxyConfig) -> Result<bool, String> {
 
 // ============ Cloud Commands ============
 #[tauri::command]
-async fn upload_to_cloud(_app_handle: tauri::AppHandle, path: String, target_name: Option<String>) -> Result<String, String> {
+async fn upload_to_cloud(app_handle: tauri::AppHandle, path: String, target_name: Option<String>) -> Result<String, String> {
     let settings = settings::load_settings();
 
     let filename = std::path::Path::new(&path)
@@ -1748,7 +2376,7 @@ async fn upload_to_cloud(_app_handle: tauri::AppHandle, path: String, target_nam
          p
     };
 
-    cloud_bridge::CloudBridge::upload_file(&settings, final_path.to_str().ok_or_else(|| "Invalid path encoding".to_string())?, &key).await
+    cloud_bridge::CloudBridge::upload_file_with_progress(&settings, final_path.to_str().ok_or_else(|| "Invalid path encoding".to_string())?, &key, &app_handle).await
 }
 
 // ============ Media Commands ============
@@ -1883,6 +2511,21 @@ fn set_speed_limit(limit_kbps: u64, state: State<'_, AppState>) {
 #[tauri::command]
 fn get_speed_limit() -> u64 {
     speed_limiter::GLOBAL_LIMITER.get_limit() / 1024
+}
+
+#[tauri::command]
+fn get_active_speed_profile() -> Option<settings::SpeedProfile> {
+    let settings = settings::load_settings();
+    if !settings.speed_profiles_enabled || settings.speed_profiles.is_empty() {
+        return None;
+    }
+    let now = chrono::Local::now();
+    use chrono::{Timelike, Datelike};
+    let current_minutes = now.hour() as u16 * 60 + now.minute() as u16;
+    let current_day = now.weekday().num_days_from_monday() as u8;
+    settings.speed_profiles.iter().find(|p| {
+        speed_profiles::profile_matches_pub(p, current_minutes, current_day)
+    }).cloned()
 }
 
 // ============ ChatOps Commands ============
@@ -2097,31 +2740,24 @@ fn get_file_size(path: String) -> Result<u64, String> {
 
 // ============ Adaptive Thread Commands ============
 
-lazy_static::lazy_static! {
-    static ref THREAD_CONTROLLER: adaptive_threads::AdaptiveThreadController = 
-        adaptive_threads::AdaptiveThreadController::new(2, 16);
-    static ref BANDWIDTH_MONITOR: adaptive_threads::BandwidthMonitor = 
-        adaptive_threads::BandwidthMonitor::new(5);
-}
-
 #[tauri::command]
 fn get_adaptive_thread_count() -> u32 {
-    THREAD_CONTROLLER.get_threads()
+    adaptive_threads::THREAD_CONTROLLER.get_threads()
 }
 
 #[tauri::command]
 fn update_thread_count(current_speed: u64, max_speed: u64) -> u32 {
-    THREAD_CONTROLLER.update(current_speed, max_speed)
+    adaptive_threads::THREAD_CONTROLLER.update(current_speed, max_speed)
 }
 
 #[tauri::command]
 fn add_bandwidth_sample(bytes: u64) {
-    BANDWIDTH_MONITOR.add_sample(bytes);
+    adaptive_threads::BANDWIDTH_MONITOR.add_sample(bytes);
 }
 
 #[tauri::command]
 fn get_average_bandwidth() -> u64 {
-    BANDWIDTH_MONITOR.get_average_speed()
+    adaptive_threads::BANDWIDTH_MONITOR.get_average_speed()
 }
 
 // ============ More Scheduler Commands ============
@@ -2157,13 +2793,33 @@ fn get_feeds() -> Vec<feeds::FeedConfig> {
 }
 
 #[tauri::command]
+fn get_feed_items(feed_id: String) -> Vec<feeds::FeedItem> {
+    feeds::FEED_MANAGER.get_items(&feed_id)
+}
+
+#[tauri::command]
+fn mark_feed_item_read(feed_id: String, link: String) {
+    feeds::FEED_MANAGER.mark_item_read(&feed_id, &link);
+}
+
+#[tauri::command]
 fn add_feed(config: feeds::FeedConfig) -> Result<(), String> {
     feeds::FEED_MANAGER.add_feed(config)
 }
 
 #[tauri::command]
+fn update_feed(config: feeds::FeedConfig) -> Result<(), String> {
+    feeds::FEED_MANAGER.update_feed(config)
+}
+
+#[tauri::command]
 fn remove_feed(id: String) {
     feeds::FEED_MANAGER.remove_feed(&id);
+}
+
+#[tauri::command]
+async fn manual_refresh_feed(app: tauri::AppHandle, feed_id: String) -> Result<(), String> {
+    feeds::FEED_MANAGER.refresh_feed(&app, &feed_id).await
 }
 
 // ============ Tray & Setup ============
@@ -2808,8 +3464,31 @@ pub fn run() {
 
     // Create channel for HTTP server to send download requests
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<http_server::DownloadRequest>();
+
+// ── Video Stream Detection Commands ──────────────────────────────────
+
+#[tauri::command]
+async fn probe_video_url(url: String) -> Result<Option<video_detector::DetectedStream>, String> {
+    video_detector::probe_url(&url).await
+}
+
+#[tauri::command]
+async fn scan_page_for_streams(url: String) -> Result<Vec<video_detector::DetectedStream>, String> {
+    video_detector::scan_page_for_streams(&url).await
+}
+
+#[tauri::command]
+fn classify_network_requests(
+    requests: Vec<(String, String)>,
+) -> Vec<video_detector::DetectedStream> {
+    video_detector::classify_network_requests(&requests)
+}
+
     // Create channel for batch link requests from browser extension
     let (batch_tx, mut batch_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<http_server::BatchLink>>();
+
+    // Create channel for detected video/audio streams from browser extension
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<http_server::DetectedStreamRequest>>();
     
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -2817,6 +3496,8 @@ pub fn run() {
             start_download, 
             pause_download, 
             get_downloads, 
+            list_active_downloads,
+            install_native_host,
             remove_download_entry, 
             get_settings,
             get_auth_token,
@@ -2837,6 +3518,7 @@ pub fn run() {
             acquire_bandwidth,
             set_speed_limit,
             get_speed_limit,
+            get_active_speed_profile,
             // ChatOps Commands
             get_chatops_pending_urls,
             // Clipboard Commands
@@ -2911,6 +3593,53 @@ pub fn run() {
             // HLS/Dash Commands
             parse_hls_stream,
             parse_dash_manifest,
+            fetch_dash_manifest,
+            check_ffmpeg_available,
+            // Multi-Source / Mirror Commands
+            start_multi_source_download,
+            probe_mirrors,
+            // Download History Commands
+            get_download_history,
+            search_download_history,
+            clear_download_history,
+            delete_history_entry,
+            export_download_history_csv,
+            get_history_summary,
+            // Activity Log Commands
+            get_activity_log,
+            // CAS Duplicate Detection Commands
+            check_cas_duplicate,
+            register_cas_entry,
+            head_url_metadata,
+            // Site Rules Commands
+            list_site_rules,
+            get_site_rule,
+            add_site_rule,
+            update_site_rule,
+            delete_site_rule,
+            import_site_rule_presets,
+            test_site_rule,
+            get_site_rule_presets,
+            // File Categorizer Commands
+            list_file_categories,
+            get_file_category,
+            add_file_category,
+            update_file_category,
+            delete_file_category,
+            categorize_file,
+            categorize_files_batch,
+            get_file_category_stats,
+            reset_file_categories,
+            // Bandwidth Allocator Commands
+            register_download_bandwidth,
+            deregister_download_bandwidth,
+            get_bandwidth_allocations,
+            rebalance_bandwidth,
+            // Crash Recovery Commands
+            scan_crashed_downloads,
+            get_interrupted_downloads,
+            resume_interrupted_download,
+            resume_all_interrupted,
             // Network Validation Commands
             analyze_http_status,
             check_captive_portal,
@@ -2937,8 +3666,12 @@ pub fn run() {
             // Feeds
             fetch_feed,          // Q5
             get_feeds,
+            get_feed_items,
+            mark_feed_item_read,
             add_feed,
+            update_feed,
             remove_feed,
+            manual_refresh_feed,
             extract_single_file,
             preview_zip_remote,  // Remote Q3
             download_zip_entry,  // Remote Q3
@@ -3036,7 +3769,25 @@ pub fn run() {
             get_geofence_rules,
             upscale_image,
             set_app_firewall_rule,
-            fetch_with_ja3
+            fetch_with_ja3,
+            // Queue Management
+            enqueue_download,
+            get_queue_status,
+            remove_from_queue,
+            set_queue_priority,
+            move_queue_item_to_front,
+            set_max_concurrent_downloads,
+            clear_download_queue,
+            // Integrity Verification
+            verify_download_checksum,
+            compute_file_checksums,
+            compute_file_hash,
+            // Network Monitor
+            check_network_status,
+            // Video Stream Detection
+            probe_video_url,
+            scan_page_for_streams,
+            classify_network_requests
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -3049,6 +3800,15 @@ pub fn run() {
             
             clipboard::CLIPBOARD_MONITOR.start(app.handle().clone());
             scheduler::start_scheduler(app.handle().clone());
+            feeds::start_poller(app.handle().clone());
+            queue_manager::init_queue(&app.handle().clone());
+            network_monitor::start_network_monitor(app.handle().clone());
+            speed_profiles::start_speed_profile_scheduler();
+            bandwidth_allocator::start_rebalancer();
+            crash_recovery::recover_on_startup(&handle);
+            // Initialize event bus and event sourcing
+            event_bus::init_event_bus(&handle);
+            app.manage(std::sync::Arc::new(event_sourcing::SharedLog::new(&handle)));
             
             tauri::async_runtime::spawn(async move {
                 let lan_server = lan_api::LanApiServer::new(8765);
@@ -3123,14 +3883,7 @@ pub fn run() {
                  }
             });
 
-            // Spawn HTTP server
-            let tx_clone = tx.clone();
-            let batch_tx_clone = batch_tx.clone();
-            let map_clone = p2p_file_map.clone();
-            let tm_clone = torrent_manager.clone();
-            tauri::async_runtime::spawn(async move {
-                crate::http_server::start_server(tx_clone, batch_tx_clone, map_clone, tm_clone).await;
-            });
+            // HTTP server spawn is deferred until after AppState initialization
 
             // Spawn Game Mode Monitor
             tauri::async_runtime::spawn(async move {
@@ -3190,15 +3943,37 @@ pub fn run() {
             ));
             chatops_manager.start();
 
-            // Manage AppState (Matching struct definition)
+            // Manage AppState for Tauri's State<> system
             app.handle().manage(AppState { 
                  downloads: Mutex::new(HashMap::new()),
+                 hls_sessions: Mutex::new(HashMap::new()),
+                 dash_sessions: Mutex::new(HashMap::new()),
                  p2p_node: p2p_node.clone(),
                  p2p_file_map: p2p_file_map.clone(),
                  torrent_manager: torrent_manager.clone(),
                  connection_manager: network::connection_manager::ConnectionManager::default(),
                  chatops_manager: chatops_manager.clone(),
             });
+
+            // Spawn HTTP server (after AppState is managed)
+            {
+                let tx_clone = tx.clone();
+                let batch_tx_clone = batch_tx.clone();
+                let stream_tx_clone = stream_tx.clone();
+                let map_clone = p2p_file_map.clone();
+                let tm_clone = torrent_manager.clone();
+                let app_handle_clone = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::http_server::start_server(
+                        tx_clone,
+                        batch_tx_clone,
+                        stream_tx_clone,
+                        map_clone,
+                        tm_clone,
+                        app_handle_clone,
+                    ).await;
+                });
+            }
 
             // Automatic torrent queue management (active slot enforcement).
             let queue_app_handle = app.handle().clone();
@@ -3299,6 +4074,8 @@ pub fn run() {
                                             downloaded_bytes: total_downloaded,
                                             status: "Paused".to_string(),
                                             segments: Some(segments),
+                                            last_active: Some(chrono::Utc::now().to_rfc3339()),
+                                            error_message: None,
                                         });
                                     }
                                 }
@@ -3315,6 +4092,12 @@ pub fn run() {
                         "url": req.url,
                         "filename": req.filename
                     }));
+                    // broadcast to any HTTP listeners
+                    let _ = crate::http_server::get_event_sender().send(serde_json::json!({
+                        "type": "extension_download",
+                        "url": req.url,
+                        "filename": req.filename
+                    }));
                 }
             });
 
@@ -3324,6 +4107,23 @@ pub fn run() {
                 while let Some(links) = batch_rx.recv().await {
                     println!("DEBUG: Batch links received from extension: {} links", links.len());
                     let _ = batch_handle.emit("batch_links", &links);
+                    let _ = crate::http_server::get_event_sender().send(serde_json::json!({
+                        "type": "batch_links",
+                        "links": links
+                    }));
+                }
+            });
+
+            // Handle detected video/audio streams from browser extension
+            let stream_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(streams) = stream_rx.recv().await {
+                    println!("DEBUG: Detected {} video/audio streams from extension", streams.len());
+                    let _ = stream_handle.emit("detected_streams", &streams);
+                    let _ = crate::http_server::get_event_sender().send(serde_json::json!({
+                        "type": "detected_streams",
+                        "streams": streams
+                    }));
                 }
             });
             

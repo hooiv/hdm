@@ -209,8 +209,8 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose })
                                 {timeInfo.hour.toString().padStart(2, '0')}:{timeInfo.minute.toString().padStart(2, '0')}
                             </span>
                             {timeInfo.is_quiet_hours ? (
-                                <span className="text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full border border-violet-500/20 text-[10px] font-medium">
-                                    Quiet Hours Active
+                                <span className="text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full border border-violet-500/20 text-[10px] font-medium" title="Scheduled downloads will be deferred or throttled until quiet hours end">
+                                    Quiet Hours Active — Downloads Deferred
                                 </span>
                             ) : (
                                 <span className="text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 text-[10px] font-medium">

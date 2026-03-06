@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle, ArrowDownToLine } from 'lucide-react';
+import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle, ArrowDownToLine, History, Activity, ListOrdered, ShieldAlert, Video, Wifi, Film, Globe2 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { TitleBar } from './TitleBar';
 import { motion } from 'framer-motion';
@@ -12,6 +12,11 @@ interface LayoutProps {
     onAddTorrentClick: () => void;
     onScheduleClick: () => void;
     onSpiderClick: () => void;
+    onCrashRecoveryClick: () => void;
+    onStreamDetectorClick: () => void;
+    onNetworkDiagClick: () => void;
+    onMediaProcessingClick: () => void;
+    onIpfsClick: () => void;
     onSettingsClick: () => void;
     onOverlayClick: () => void;
     stats: {
@@ -21,8 +26,8 @@ interface LayoutProps {
         totalBytes: number;
     };
     onSpeedLimitChange: (limit: number) => void;
-    activeTab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins';
-    onTabChange: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins') => void;
+    activeTab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue';
+    onTabChange: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue') => void;
     globalSpeed?: number;
 }
 
@@ -64,6 +69,11 @@ export const Layout: React.FC<LayoutProps> = ({
     onAddTorrentClick,
     onScheduleClick,
     onSpiderClick,
+    onCrashRecoveryClick,
+    onStreamDetectorClick,
+    onNetworkDiagClick,
+    onMediaProcessingClick,
+    onIpfsClick,
     onSettingsClick,
     onOverlayClick,
     stats,
@@ -157,6 +167,24 @@ export const Layout: React.FC<LayoutProps> = ({
                             active={activeTab === 'plugins'}
                             onClick={() => onTabChange('plugins')}
                         />
+                        <NavItem
+                            icon={History}
+                            label="History"
+                            active={activeTab === 'history'}
+                            onClick={() => onTabChange('history')}
+                        />
+                        <NavItem
+                            icon={Activity}
+                            label="Activity Log"
+                            active={activeTab === 'activity'}
+                            onClick={() => onTabChange('activity')}
+                        />
+                        <NavItem
+                            icon={ListOrdered}
+                            label="Queue"
+                            active={activeTab === 'queue'}
+                            onClick={() => onTabChange('queue')}
+                        />
 
                         <div className="px-4 mt-8 mb-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest pl-4">Tools</div>
 
@@ -176,6 +204,41 @@ export const Layout: React.FC<LayoutProps> = ({
 
                     {/* Footer Actions */}
                     <div className="p-4 border-t border-white/5 space-y-2 bg-black/20">
+                        <button
+                            onClick={onCrashRecoveryClick}
+                            className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all flex items-center gap-2 group"
+                        >
+                            <ShieldAlert size={16} className="group-hover:text-orange-400 transition-colors" />
+                            <span>Crash Recovery</span>
+                        </button>
+                        <button
+                            onClick={onStreamDetectorClick}
+                            className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all flex items-center gap-2 group"
+                        >
+                            <Video size={16} className="group-hover:text-cyan-400 transition-colors" />
+                            <span>Stream Detector</span>
+                        </button>
+                        <button
+                            onClick={onNetworkDiagClick}
+                            className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all flex items-center gap-2 group"
+                        >
+                            <Wifi size={16} className="group-hover:text-emerald-400 transition-colors" />
+                            <span>Network Diagnostics</span>
+                        </button>
+                        <button
+                            onClick={onMediaProcessingClick}
+                            className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all flex items-center gap-2 group"
+                        >
+                            <Film size={16} className="group-hover:text-violet-400 transition-colors" />
+                            <span>Media Processing</span>
+                        </button>
+                        <button
+                            onClick={onIpfsClick}
+                            className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all flex items-center gap-2 group"
+                        >
+                            <Globe2 size={16} className="group-hover:text-teal-400 transition-colors" />
+                            <span>IPFS Download</span>
+                        </button>
                         <button
                             onClick={onOverlayClick}
                             className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all flex items-center gap-2 group"
@@ -204,6 +267,9 @@ export const Layout: React.FC<LayoutProps> = ({
                                 {activeTab === 'feeds' && 'RSS Feeds'}
                                 {activeTab === 'search' && 'Search & Discover'}
                                 {activeTab === 'plugins' && 'Plugin Editor'}
+                                {activeTab === 'history' && 'Download History'}
+                                {activeTab === 'activity' && 'Activity Log'}
+                                {activeTab === 'queue' && 'Download Queue'}
                             </h1>
                             {activeTab === 'downloads' && (
                                 <span className="bg-white/5 text-slate-300 text-[10px] px-2.5 py-1 rounded-full font-bold border border-white/10 shadow-sm backdrop-blur-md">

@@ -17,7 +17,7 @@ pub struct VirusScanner {
 #[allow(dead_code)]
 impl VirusScanner {
     pub fn new() -> Self {
-        Self { enabled: false }
+        Self { enabled: true }
     }
 
     /// Check if Windows Defender is available

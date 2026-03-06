@@ -10,6 +10,7 @@ import {
   Save,
   Volume2,
   Activity,
+  Gauge,
 } from "lucide-react";
 import { error as logError } from "../utils/logger";
 
@@ -19,13 +20,19 @@ import { NetworkTab } from "./settings/NetworkTab";
 import { CloudTab } from "./settings/CloudTab";
 import { NotificationsTab } from "./settings/NotificationsTab";
 import { AdvancedTab } from "./settings/AdvancedTab";
+import { SiteRulesTab } from "./settings/SiteRulesTab";
+import { FileCategoriesTab } from "./settings/FileCategoriesTab";
+import { GeofenceTab } from "./settings/GeofenceTab";
+import { VirtualDrivesTab } from "./settings/VirtualDrivesTab";
+import { BandwidthTab } from "./settings/BandwidthTab";
+import { RcloneBridgeTab } from "./settings/RcloneBridgeTab";
 
 interface SettingsPageProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type TabId = "general" | "network" | "cloud" | "notifications" | "advanced";
+type TabId = "general" | "network" | "cloud" | "notifications" | "advanced" | "siterules" | "categories" | "geofence" | "drives" | "bandwidth" | "rclone";
 
 export const SettingsPage: React.FC<SettingsPageProps> = ({
   isOpen,
@@ -84,6 +91,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     custom_sound_complete: null,
     custom_sound_error: null,
     auto_scrub_metadata: false,
+    quiet_hours_enabled: false,
+    quiet_hours_start: 23,
+    quiet_hours_end: 7,
+    quiet_hours_action: 'defer',
+    quiet_hours_throttle_kbps: 50,
+    speed_profiles_enabled: false,
+    speed_profiles: [],
   });
 
   const [saved, setSaved] = useState(false);
@@ -169,6 +183,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     { id: "cloud", label: "Cloud", icon: Cloud },
     { id: "notifications", label: "Notifications", icon: Volume2 },
     { id: "advanced", label: "Advanced", icon: Activity },
+    { id: "siterules", label: "Site Rules", icon: Globe },
+    { id: "categories", label: "Categories", icon: Activity },
+    { id: "geofence", label: "Geofence", icon: Globe },
+    { id: "drives", label: "Drives", icon: Activity },
+    { id: "bandwidth", label: "Bandwidth", icon: Gauge },
+    { id: "rclone", label: "Rclone", icon: Cloud },
   ] as const;
 
   return (
@@ -261,6 +281,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                       setSettings={setSettings}
                     />
                   )}
+                  {activeTab === "siterules" && <SiteRulesTab />}
+                  {activeTab === "categories" && <FileCategoriesTab />}
+                  {activeTab === "geofence" && <GeofenceTab />}
+                  {activeTab === "drives" && <VirtualDrivesTab />}
+                  {activeTab === "bandwidth" && <BandwidthTab />}
+                  {activeTab === "rclone" && <RcloneBridgeTab />}
                 </motion.div>
               </AnimatePresence>
             </div>

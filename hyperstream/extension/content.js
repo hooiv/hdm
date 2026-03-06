@@ -30,7 +30,7 @@ function scanPage() {
     });
 
     // 2. Scan Links for common extensions
-    const extensions = ['.exe', '.msi', '.zip', '.rar', '.7z', '.iso', '.mp4', '.mkv', '.mp3', '.pdf', '.dmg', '.pkg'];
+    const extensions = ['.exe', '.msi', '.zip', '.rar', '.7z', '.iso', '.mp4', '.mkv', '.mp3', '.pdf', '.dmg', '.pkg', '.m3u8', '.ts'];
     document.querySelectorAll('a').forEach(a => {
         if (a.href) {
             const lower = a.href.toLowerCase();

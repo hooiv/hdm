@@ -1,6 +1,21 @@
 // HyperStream Popup Logic V2
 
-const API_URL = "http://localhost:14733";
+let API_URL = "http://localhost:14733";
+
+// Allow overriding the API URL via storage to support custom ports or remote hosts
+async function initApiUrl() {
+    const { apiUrl } = await chrome.storage.local.get({ apiUrl: API_URL });
+    API_URL = apiUrl || API_URL;
+    const input = document.getElementById('apiUrlInput');
+    if (input) {
+        input.value = API_URL;
+        input.addEventListener('change', async () => {
+            API_URL = input.value.trim() || API_URL;
+            await chrome.storage.local.set({ apiUrl: API_URL });
+            updateStatus();
+        });
+    }
+}
 
 // State
 let allItems = []; // { id, name, type, url, category }
@@ -9,6 +24,7 @@ let currentFilter = 'all';
 let searchQuery = '';
 
 document.addEventListener('DOMContentLoaded', async () => {
+    await initApiUrl();
     checkHealth();
     setupEventListeners();
     scanCurrentTab();
@@ -34,6 +50,8 @@ function setupEventListeners() {
     // Buttons
     document.getElementById('rescan-btn').addEventListener('click', scanCurrentTab);
     document.getElementById('download-selected-btn').addEventListener('click', downloadSelected);
+    const statusBtn = document.getElementById('refresh-status-btn');
+    if (statusBtn) statusBtn.addEventListener('click', refreshStatus);
 
     // Settings
     const toggle = document.getElementById('intercept-toggle');
@@ -202,19 +220,151 @@ async function downloadSelected() {
     }, 1500);
 }
 
+// Active download status helpers
+async function initEventSource() {
+    if (!window.EventSource) return;
+    try {
+        const es = new EventSource(`${API_URL}/events`);
+        es.onmessage = (e) => {
+            try {
+                const msg = JSON.parse(e.data);
+                if (msg.type === 'download_requested' || msg.type === 'extension_download') {
+                    refreshStatus();
+                    chrome.notifications.create({
+                        type: 'basic',
+                        iconUrl: 'icons/icon48.png',
+                        title: 'HyperStream',
+                        message: 'New download queued',
+                    });
+                } else if (msg.type === 'batch_links') {
+                    chrome.notifications.create({
+                        type: 'basic',
+                        iconUrl: 'icons/icon48.png',
+                        title: 'HyperStream',
+                        message: `${msg.count || msg.links?.length || 0} links added to queue`,
+                    });
+                } else if (msg.type === 'download_progress') {
+                    // update status badge and the list if visible
+                    refreshStatus();
+                }
+            } catch {}
+        };
+    } catch (e) {
+        console.warn('EventSource init failed', e);
+    }
+}
+
+async function refreshStatus() {
+    try {
+        const res = await fetch(`${API_URL}/downloads`);
+        if (res.ok) {
+            const list = await res.json();
+            renderStatusList(list);
+        }
+    } catch (e) {
+        console.error('Status fetch failed', e);
+    }
+}
+
+function formatSpeed(bps) {
+    if (!bps || bps === 0) return '';
+    const units = ['B/s','KB/s','MB/s','GB/s'];
+    let i = 0;
+    let val = bps;
+    while (val >= 1024 && i < units.length - 1) {
+        val /= 1024;
+        i++;
+    }
+    return `${val.toFixed(1)} ${units[i]}`;
+}
+
+function renderStatusList(list) {
+    const container = document.getElementById('status-list');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!list || list.length === 0) {
+        container.textContent = 'No active downloads';
+        return;
+    }
+    let count = 0;
+    list.forEach(item => {
+        count++;
+        const div = document.createElement('div');
+        div.className = 'status-item';
+        let label = `${item.filename || '(unknown)'} ${((item.downloaded/item.total)*100).toFixed(1)}% ${item.status}`;
+        if (item.speed_bps) label += ` ${formatSpeed(item.speed_bps)}`;
+        div.textContent = label;
+        // add pause/cancel buttons
+        const pauseBtn = document.createElement('button');
+        pauseBtn.textContent = '⏸';
+        pauseBtn.title = 'Pause';
+        pauseBtn.onclick = () => controlDownload(item.id, 'pause');
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = '✖';
+        cancelBtn.title = 'Cancel';
+        cancelBtn.onclick = () => controlDownload(item.id, 'cancel');
+        div.appendChild(pauseBtn);
+        div.appendChild(cancelBtn);
+        container.appendChild(div);
+    });
+    chrome.action.setBadgeText({ text: count > 0 ? count.toString() : '' });
+}
+
+// expose for unit tests
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { formatSpeed };
+}
+
+async function controlDownload(id, action) {
+    try {
+        await fetch(`${API_URL}/control`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, action })
+        });
+        refreshStatus();
+    } catch (e) {
+        console.error('control call failed', e);
+    }
+}
+
 // ... existing helpers ...
+const EXT_VERSION = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest)
+    ? chrome.runtime.getManifest().version
+    : '0.0.0';
+
 async function checkHealth() {
     const statusEl = document.getElementById('status');
     const btn = document.getElementById('download-selected-btn');
     try {
         const res = await fetch(`${API_URL}/health`);
         if (res.ok) {
+            // attempt to fetch version
+            let verText = 'CONNECTED';
+            try {
+                const vres = await fetch(`${API_URL}/version`);
+                if (vres.ok) {
+                    const vdata = await vres.json();
+                    verText = `v${vdata.version}`;
+                    if (vdata.version !== EXT_VERSION) {
+                        chrome.notifications.create({
+                            type: 'basic',
+                            iconUrl: 'icons/icon48.png',
+                            title: 'Version mismatch',
+                            message: `Server v${vdata.version} vs extension v${EXT_VERSION}`
+                        });
+                    }
+                }
+            } catch {}
             statusEl.className = 'status-badge online';
-            statusEl.innerText = 'CONNECTED';
+            statusEl.innerText = verText;
         } else { throw new Error(); }
     } catch (e) {
         statusEl.className = 'status-badge offline';
         statusEl.innerText = 'OFFLINE';
+        if (chrome.runtime && chrome.runtime.sendNativeMessage) {
+            chrome.runtime.sendNativeMessage('com.hyperstream', { action: 'launch' }, () => {});
+        }
     }
 }
 

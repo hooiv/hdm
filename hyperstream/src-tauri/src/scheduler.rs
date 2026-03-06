@@ -9,6 +9,8 @@ lazy_static::lazy_static! {
     static ref SCHEDULED_DOWNLOADS: Mutex<HashMap<String, ScheduledDownload>> = Mutex::new(HashMap::new());
     /// Set to true to signal the scheduler thread to stop.
     static ref SCHEDULER_STOP: AtomicBool = AtomicBool::new(false);
+    /// Tracks whether we are currently applying the quiet hours throttle to restore the user limit later.
+    static ref QUIET_THROTTLE_ACTIVE: AtomicBool = AtomicBool::new(false);
 }
 
 /// Tracks whether the scheduler thread is already running to prevent duplicates.
@@ -85,6 +87,9 @@ pub fn get_scheduled_downloads() -> Vec<ScheduledDownload> {
 
 pub fn check_scheduled_downloads<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
     let now = Local::now();
+    let quiet = is_quiet_hours();
+    let settings = crate::settings::load_settings();
+    let defer_mode = settings.quiet_hours_action != "throttle";
     let mut to_start = Vec::new();
     
     {
@@ -99,6 +104,10 @@ pub fn check_scheduled_downloads<R: tauri::Runtime>(app_handle: &tauri::AppHandl
                 let scheduled_local = scheduled_time.with_timezone(&Local);
                 
                 if now >= scheduled_local {
+                    if quiet && defer_mode {
+                        // Quiet hours with defer — skip starting, will retry next loop
+                        continue;
+                    }
                     download.status = "started".to_string();
                     to_start.push(download.clone());
                 }
@@ -107,12 +116,43 @@ pub fn check_scheduled_downloads<R: tauri::Runtime>(app_handle: &tauri::AppHandl
     }
     
     // Emit events for downloads that should start, then remove them from the map
-    for download in to_start {
+    for download in &to_start {
         let _ = app_handle.emit("scheduled_download_start", serde_json::json!({
             "id": download.id,
             "url": download.url,
             "filename": download.filename
         }));
+    }
+
+    // If quiet hours are active with defer mode and there are deferred items, notify frontend
+    if quiet && defer_mode {
+        let scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
+        let deferred_count = scheduled.values()
+            .filter(|d| d.status == "pending")
+            .filter(|d| {
+                d.scheduled_time.parse::<DateTime<chrono::FixedOffset>>()
+                    .map(|t| now >= t.with_timezone(&Local))
+                    .unwrap_or(false)
+            })
+            .count();
+        if deferred_count > 0 {
+            let next = get_next_download_time();
+            let _ = app_handle.emit("quiet_hours_deferred", serde_json::json!({
+                "deferred_count": deferred_count,
+                "resume_at": next.to_rfc3339()
+            }));
+        }
+    }
+
+    // Apply quiet hours throttle if in throttle mode
+    if quiet && !defer_mode && settings.quiet_hours_throttle_kbps > 0 {
+        if !QUIET_THROTTLE_ACTIVE.swap(true, Ordering::SeqCst) {
+            // Transitioning into quiet-hours throttle
+            crate::speed_limiter::GLOBAL_LIMITER.set_limit(settings.quiet_hours_throttle_kbps * 1024);
+        }
+    } else if QUIET_THROTTLE_ACTIVE.swap(false, Ordering::SeqCst) {
+        // Transitioning out of quiet hours — restore user's configured speed limit
+        crate::speed_limiter::GLOBAL_LIMITER.set_limit(settings.speed_limit_kbps * 1024);
     }
 
     // Purge non-pending entries to prevent unbounded accumulation of dead entries
@@ -164,35 +204,53 @@ pub fn stop_scheduler() {
     SCHEDULER_STOP.store(true, Ordering::SeqCst);
 }
 
-/// Check if current time is within quiet hours (using Timelike trait)
-/// Quiet hours: 11 PM to 7 AM by default
+/// Check if current time is within the configured quiet hours window.
+/// Returns false when quiet hours are disabled in settings.
 pub fn is_quiet_hours() -> bool {
-    let now = Local::now();
-    let hour = now.hour(); // Uses Timelike trait
-    hour >= 23 || hour < 7
-}
-
-/// Get the next optimal download time (outside quiet hours)
-pub fn get_next_download_time() -> DateTime<Local> {
+    let settings = crate::settings::load_settings();
+    if !settings.quiet_hours_enabled {
+        return false;
+    }
     let now = Local::now();
     let hour = now.hour();
-    
-    // If within quiet hours, schedule for 7 AM
-    if hour >= 23 || hour < 7 {
-        let next_day = if hour >= 23 {
-            now + chrono::Duration::days(1)
-        } else {
-            now
-        };
-        // Set to 7 AM
-        next_day
-            .with_hour(7)
-            .and_then(|t| t.with_minute(0))
-            .and_then(|t| t.with_second(0))
-            .unwrap_or(now)
+    let start = settings.quiet_hours_start;
+    let end = settings.quiet_hours_end;
+    if start == end {
+        return false; // zero-length window
+    }
+    if start < end {
+        // e.g. 9..17 — simple range
+        hour >= start && hour < end
+    } else {
+        // wraps midnight, e.g. 23..7
+        hour >= start || hour < end
+    }
+}
+
+/// Get the next time outside quiet hours, respecting configured window.
+pub fn get_next_download_time() -> DateTime<Local> {
+    let settings = crate::settings::load_settings();
+    let now = Local::now();
+    if !settings.quiet_hours_enabled || !is_quiet_hours() {
+        return now;
+    }
+    let end = settings.quiet_hours_end;
+    let hour = now.hour();
+    let need_next_day = if settings.quiet_hours_start < settings.quiet_hours_end {
+        false // same-day window, end is later today
+    } else {
+        // wraps midnight: if hour >= start we need to go to next day's end
+        hour >= settings.quiet_hours_start
+    };
+    let base = if need_next_day {
+        now + chrono::Duration::days(1)
     } else {
         now
-    }
+    };
+    base.with_hour(end)
+        .and_then(|t| t.with_minute(0))
+        .and_then(|t| t.with_second(0))
+        .unwrap_or(now)
 }
 
 /// Get formatted time info for scheduling UI

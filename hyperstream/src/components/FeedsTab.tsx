@@ -2,9 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import { error as logError } from '../utils/logger';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
-import { RefreshCw, Plus, Trash2, Download, Rss, ExternalLink } from 'lucide-react';
+import { RefreshCw, Plus, Trash2, Download, Rss, ExternalLink, Cog } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
+// notification type definitions are missing under certain build setups;
+// silence the error by ignoring the import type check.
+// @ts-ignore
+import { notify } from '@tauri-apps/api/notification';
 import { AppSettings } from '../types';
+import { safeListen } from '../utils/tauri';
 
 interface FeedConfig {
     id: string;
@@ -14,6 +19,7 @@ interface FeedConfig {
     auto_download_regex?: string;
     last_checked?: number;
     enabled: boolean;
+    unread_count?: number; // backend will supply this
 }
 
 interface FeedItem {
@@ -32,26 +38,45 @@ export const FeedsTab: React.FC = () => {
     const [items, setItems] = useState<FeedItem[]>([]);
     const [loading, setLoading] = useState(false);
 
-    // Modal State
+    // Modal State / add & edit
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
     const [newFeedUrl, setNewFeedUrl] = useState('');
     const [newFeedName, setNewFeedName] = useState('');
+    const [newRefresh, setNewRefresh] = useState<number>(60);
+    const [newAutoRegex, setNewAutoRegex] = useState('');
+    const [newEnabled, setNewEnabled] = useState(true);
+    const [editingFeed, setEditingFeed] = useState<FeedConfig | null>(null);
 
     useEffect(() => {
         loadFeeds();
     }, []);
 
+    // Listen for background poller events
+    useEffect(() => {
+        let unlisten: () => void = () => {};
+        safeListen<{feed_id:string, new_items:FeedItem[]}>('feed_update', async event => {
+            const { feed_id, new_items } = event.payload;
+            toast.success(`${new_items.length} new item${new_items.length !== 1 ? 's' : ''} received`);
+            // fire OS notification as well (ignore failures)
+            try {
+                await notify({ title: 'RSS Feed', body: `${new_items.length} new item${new_items.length !== 1 ? 's' : ''}` });
+            } catch(_) {}
+            // refresh feed list counts
+            loadFeeds();
+            if (selectedFeedId === feed_id) {
+                setItems(prev => [...new_items, ...prev]);
+            }
+        }).then(u => { unlisten = u; });
+        return () => { unlisten(); };
+    }, [selectedFeedId]);
+
     useEffect(() => {
         let cancelled = false;
         if (selectedFeedId) {
-            const feed = feeds.find(f => f.id === selectedFeedId);
-            if (feed) {
-                setLoading(true);
-                invoke<FeedItem[]>('fetch_feed', { url: feed.url })
-                    .then(fetched => { if (!cancelled) setItems(fetched); })
-                    .catch(e => { if (!cancelled) { logError("Failed to fetch feed items", e); toast.error("Failed to fetch feed items"); } })
-                    .finally(() => { if (!cancelled) setLoading(false); });
-            }
+            // load stored items first
+            invoke<FeedItem[]>('get_feed_items', { feed_id: selectedFeedId })
+                .then(list => { if (!cancelled) setItems(list); })
+                .catch(e => { if (!cancelled) { logError("Failed to load stored items", e); } });
         } else {
             setItems([]);
         }
@@ -72,19 +97,17 @@ export const FeedsTab: React.FC = () => {
         }
     };
 
-    const fetchItems = async (url: string) => {
-        setLoading(true);
-        try {
-            const fetchedItems = await invoke<FeedItem[]>('fetch_feed', { url });
-            setItems(fetchedItems);
-        } catch (e) {
-            logError("Failed to fetch feed items", e);
-            toast.error("Failed to fetch feed items");
-        }
-        setLoading(false);
+
+    const clearModalFields = () => {
+        setNewFeedUrl('');
+        setNewFeedName('');
+        setNewRefresh(60);
+        setNewAutoRegex('');
+        setNewEnabled(true);
+        setEditingFeed(null);
     };
 
-    const handleAddFeed = async () => {
+    const handleSaveFeed = async () => {
         if (!newFeedUrl || !newFeedName) return;
 
         // Validate URL format
@@ -99,25 +122,35 @@ export const FeedsTab: React.FC = () => {
             return;
         }
 
-        const newFeed: FeedConfig = {
+        const config: FeedConfig = editingFeed ? {
+            ...editingFeed,
+            url: newFeedUrl,
+            name: newFeedName,
+            refresh_interval_mins: newRefresh,
+            auto_download_regex: newAutoRegex || undefined,
+            enabled: newEnabled,
+        } : {
             id: Date.now().toString(),
             url: newFeedUrl,
             name: newFeedName,
-            refresh_interval_mins: 60,
-            auto_download_regex: undefined,
+            refresh_interval_mins: newRefresh,
+            auto_download_regex: newAutoRegex || undefined,
             last_checked: undefined,
-            enabled: true
+            enabled: newEnabled,
         };
 
         try {
-            await invoke('add_feed', { config: newFeed });
-            setNewFeedUrl('');
-            setNewFeedName('');
+            if (editingFeed) {
+                await invoke('update_feed', { config });
+            } else {
+                await invoke('add_feed', { config });
+            }
+            clearModalFields();
             setIsAddModalOpen(false);
             loadFeeds();
         } catch (e) {
-            logError("Failed to add feed", e);
-            toast.error("Failed to add feed");
+            logError(editingFeed ? "Failed to update feed" : "Failed to add feed", e);
+            toast.error(editingFeed ? "Failed to update feed" : "Failed to add feed");
         }
     };
 
@@ -135,6 +168,17 @@ export const FeedsTab: React.FC = () => {
         }
     };
 
+    const openEditFeed = (feed: FeedConfig, e: React.MouseEvent) => {
+        e.stopPropagation();
+        setEditingFeed(feed);
+        setNewFeedUrl(feed.url);
+        setNewFeedName(feed.name);
+        setNewRefresh(feed.refresh_interval_mins);
+        setNewAutoRegex(feed.auto_download_regex || '');
+        setNewEnabled(feed.enabled);
+        setIsAddModalOpen(true);
+    };
+
     const handleDownload = async (url: string, title: string) => {
         try {
             const urlExt = url.split('/').pop()?.split('?')[0]?.match(/\.[a-zA-Z0-9]+$/)?.[0] || '';
@@ -149,6 +193,27 @@ export const FeedsTab: React.FC = () => {
         } catch (e) {
             logError("Failed to start download", e);
             toast.error("Failed to start download");
+        }
+    };
+
+    const markItemRead = async (item: FeedItem) => {
+        if (!selectedFeedId) return;
+        try {
+            await invoke('mark_feed_item_read', { feed_id: selectedFeedId, link: item.link });
+            setItems(prev => prev.map(i => i.link === item.link ? { ...i, read: true } : i));
+        } catch (e) {
+            logError("Failed to mark item read", e);
+        }
+    };
+
+    const handleItemClick = async (item: FeedItem) => {
+        try {
+            await invoke('open_file', { path: item.link });
+        } catch {
+            window.open(item.link, '_blank');
+        }
+        if (!item.read) {
+            markItemRead(item);
         }
     };
 
@@ -183,19 +248,32 @@ export const FeedsTab: React.FC = () => {
                             <div className="flex items-center gap-3 overflow-hidden">
                                 <Rss size={14} className={selectedFeedId === feed.id ? 'text-blue-200' : 'text-slate-500 group-hover:text-slate-400'} />
                                 <span className="truncate text-sm font-medium">{feed.name}</span>
+                                {(feed.unread_count ?? 0) > 0 && (
+                                    <span className="ml-auto bg-red-600 text-white text-xs px-2 py-0.5 rounded-full">
+                                        {feed.unread_count ?? 0}
+                                    </span>
+                                )}
                             </div>
-                            <button
-                                onClick={(e) => handleRemoveFeed(feed.id, e)}
-                                className={`
-                                    p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity
-                                    ${selectedFeedId === feed.id
-                                        ? 'hover:bg-blue-500 text-blue-100'
-                                        : 'hover:bg-red-500/10 hover:text-red-400 text-slate-500'
-                                    }
-                                `}
-                            >
-                                <Trash2 size={12} />
-                            </button>
+                            <div className="flex items-center gap-1">
+                                <button
+                                    onClick={(e) => openEditFeed(feed, e)}
+                                    className="p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity text-slate-500 hover:text-blue-400"
+                                >
+                                    <Cog size={12} />
+                                </button>
+                                <button
+                                    onClick={(e) => handleRemoveFeed(feed.id, e)}
+                                    className={`
+                                        p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity
+                                        ${selectedFeedId === feed.id
+                                            ? 'hover:bg-blue-500 text-blue-100'
+                                            : 'hover:bg-red-500/10 hover:text-red-400 text-slate-500'
+                                        }
+                                    `}
+                                >
+                                    <Trash2 size={12} />
+                                </button>
+                            </div>
                         </div>
                     ))}
                     {feeds.length === 0 && (
@@ -216,9 +294,21 @@ export const FeedsTab: React.FC = () => {
                             </h3>
                             <motion.button
                                 whileTap={{ rotate: 180 }}
-                                onClick={() => {
+                                onClick={async () => {
+                                    if (!selectedFeedId) return;
                                     const feed = feeds.find(f => f.id === selectedFeedId);
-                                    if (feed) fetchItems(feed.url);
+                                    if (!feed) return;
+                                    setLoading(true);
+                                    try {
+                                        await invoke('manual_refresh_feed', { feed_id: feed.id });
+                                        await loadFeeds();
+                                        const list = await invoke<FeedItem[]>('get_feed_items', { feed_id: feed.id });
+                                        setItems(list);
+                                    } catch (e) {
+                                        logError('Manual refresh failed', e);
+                                        toast.error('Refresh failed');
+                                    }
+                                    setLoading(false);
                                 }}
                                 className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
                             >
@@ -244,8 +334,8 @@ export const FeedsTab: React.FC = () => {
                                         >
                                             <div className="flex justify-between items-start mb-2">
                                                 <button
-                                                    onClick={() => { invoke('open_file', { path: item.link }).catch(() => window.open(item.link, '_blank')); }}
-                                                    className="text-base font-semibold text-slate-200 hover:text-blue-400 transition-colors flex items-center gap-2 text-left"
+                                                    onClick={() => handleItemClick(item)}
+                                                    className={`text-base font-semibold ${item.read ? 'text-slate-500' : 'text-slate-200'} hover:text-blue-400 transition-colors flex items-center gap-2 text-left`}
                                                 >
                                                     {item.title}
                                                     <ExternalLink size={12} className="opacity-0 group-hover:opacity-50" />
@@ -269,6 +359,14 @@ export const FeedsTab: React.FC = () => {
                                                     <Download size={14} />
                                                     Download
                                                 </button>
+                                        {!item.read && (
+                                            <button
+                                                onClick={() => markItemRead(item)}
+                                                className="text-xs text-slate-400 hover:text-slate-200 ml-3"
+                                            >
+                                                Mark read
+                                            </button>
+                                        )}
                                             </div>
                                         </motion.div>
                                     ))}
@@ -284,7 +382,7 @@ export const FeedsTab: React.FC = () => {
                 )}
             </div>
 
-            {/* Add Feed Modal */}
+            {/* Add/Edit Feed Modal */}
             <AnimatePresence>
                 {isAddModalOpen && (
                     <>
@@ -292,7 +390,7 @@ export const FeedsTab: React.FC = () => {
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
                             exit={{ opacity: 0 }}
-                            onClick={() => setIsAddModalOpen(false)}
+                            onClick={() => { setIsAddModalOpen(false); clearModalFields(); }}
                             className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50"
                         />
                         <motion.div
@@ -304,12 +402,14 @@ export const FeedsTab: React.FC = () => {
                                 animate={{ scale: 1, opacity: 1, y: 0 }}
                                 exit={{ scale: 0.95, opacity: 0, y: 10 }}
                                 onClick={e => e.stopPropagation()}
-                                onKeyDown={e => { if (e.key === 'Escape') setIsAddModalOpen(false); else if (e.key === 'Enter') handleAddFeed(); }}
+                                onKeyDown={e => { if (e.key === 'Escape') { setIsAddModalOpen(false); clearModalFields(); } else if (e.key === 'Enter') handleSaveFeed(); }}
                                 role="dialog"
                                 aria-modal="true"
-                                aria-label="Add RSS Feed"
+                                aria-label={editingFeed ? "Edit RSS Feed" : "Add RSS Feed"}
                             >
-                                <h3 className="text-lg font-bold text-white mb-4">Add RSS Feed</h3>
+                                <h3 className="text-lg font-bold text-white mb-4">
+                                    {editingFeed ? 'Edit RSS Feed' : 'Add RSS Feed'}
+                                </h3>
                                 <div className="space-y-4">
                                     <div className="space-y-2">
                                         <label className="text-sm font-medium text-slate-400">Feed Name</label>
@@ -330,18 +430,47 @@ export const FeedsTab: React.FC = () => {
                                             placeholder="https://example.com/feed.xml"
                                         />
                                     </div>
+                                    <div className="space-y-2">
+                                        <label className="text-sm font-medium text-slate-400">Refresh Interval (mins)</label>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                                            value={newRefresh}
+                                            onChange={e => setNewRefresh(parseInt(e.target.value) || 1)}
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-sm font-medium text-slate-400">Auto-download Regex (optional)</label>
+                                        <input
+                                            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                                            value={newAutoRegex}
+                                            onChange={e => setNewAutoRegex(e.target.value)}
+                                            placeholder="e.g. .*\\.mp3$"
+                                        />
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={newEnabled}
+                                            onChange={e => setNewEnabled(e.target.checked)}
+                                            id="feed-enabled-checkbox"
+                                            className="accent-blue-500"
+                                        />
+                                        <label htmlFor="feed-enabled-checkbox" className="text-sm text-slate-400">Enabled</label>
+                                    </div>
                                     <div className="flex justify-end gap-3 pt-2">
                                         <button
                                             className="px-4 py-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors text-sm font-medium"
-                                            onClick={() => setIsAddModalOpen(false)}
+                                            onClick={() => { setIsAddModalOpen(false); clearModalFields(); }}
                                         >
                                             Cancel
                                         </button>
                                         <button
                                             className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-lg shadow-blue-900/20 transition-all text-sm font-bold"
-                                            onClick={handleAddFeed}
+                                            onClick={handleSaveFeed}
                                         >
-                                            Add Feed
+                                            {editingFeed ? 'Save' : 'Add'}
                                         </button>
                                     </div>
                                 </div>

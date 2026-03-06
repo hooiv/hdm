@@ -2,7 +2,38 @@
 // HyperStream Background Script
 // Handles context menus and download interception
 
-const API_URL = "http://localhost:14733";
+let API_URL = "http://localhost:14733";
+
+// read optional override from storage
+async function initApiUrl() {
+    const { apiUrl } = await chrome.storage.local.get({ apiUrl: API_URL });
+    API_URL = apiUrl || API_URL;
+}
+
+initApiUrl();
+
+// periodically update badge to show connectivity
+async function updateConnectionBadge() {
+    const connected = await checkConnection();
+    chrome.action.setBadgeText({ text: connected ? '' : '!' });
+    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
+}
+setInterval(updateConnectionBadge, 15000);
+updateConnectionBadge();
+
+// intercept network requests
+const downloadExtensions = ['.exe', '.msi', '.zip', '.rar', '.7z', '.iso', '.mp4', '.mkv', '.mp3', '.pdf', '.dmg', '.pkg', '.torrent'];
+chrome.webRequest.onBeforeRequest.addListener(
+    (details) => {
+        const url = details.url.toLowerCase();
+        if (downloadExtensions.some(ext => url.endsWith(ext))) {
+            sendToHyperStream(details.url);
+            return { cancel: true };
+        }
+    },
+    { urls: ["<all_urls>"] },
+    ["blocking"]
+);
 
 // Create context menu
 chrome.runtime.onInstalled.addListener(() => {
@@ -39,19 +70,11 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
         if (result.intercept) {
             // Check if valid URL (http/https/magnet)
             if (downloadItem.url.startsWith('http') || downloadItem.url.startsWith('magnet')) {
-                // Pause immediately
-                // We cannot "prevent" creation, but we can cancel.
                 chrome.downloads.cancel(downloadItem.id, async () => {
                     if (chrome.runtime.lastError) console.warn(chrome.runtime.lastError);
-
-                    // Send to HyperStream
                     const success = await sendToHyperStream(downloadItem.url, getFilename(downloadItem));
-
                     if (!success) {
-                        // Fallback: If failed, we could re-download, but that's tricky since we just cancelled.
-                        // Ideally we warn user.
-                        // HyperStream failed; user must download manually
-                        // Optional: Create a notification?
+                        // Optionally notify user
                     }
                 });
             }
@@ -67,31 +90,48 @@ function getFilename(item) {
 
 // Function to send URL to HyperStream (using Local API)
 async function sendToHyperStream(url, filename = null) {
-    try {
-        const response = await fetch(`${API_URL}/download`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                url: url,
-                filename: filename
-            })
-        });
+    let lastErr;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const response = await fetch(`${API_URL}/download`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    url: url,
+                    filename: filename
+                })
+            });
 
-        if (response.ok) {
-            // sent to HyperStream
-            // Badge
-            chrome.action.setBadgeText({ text: "HS" });
-            chrome.action.setBadgeBackgroundColor({ color: "#06b6d4" });
-            setTimeout(() => chrome.action.setBadgeText({ text: "" }), 3000);
-            return true;
-        } else {
-            // hyperstream returned error
-            return false;
+            if (response.ok) {
+                chrome.action.setBadgeText({ text: "HS" });
+                chrome.action.setBadgeBackgroundColor({ color: "#06b6d4" });
+                setTimeout(() => chrome.action.setBadgeText({ text: "" }), 3000);
+                return true;
+            } else {
+                chrome.notifications.create({
+                    type: 'basic',
+                    iconUrl: 'icons/icon48.png',
+                    title: 'HyperStream error',
+                    message: `Server returned ${response.status}`
+                });
+                return false;
+            }
+        } catch (err) {
+            lastErr = err;
+            if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
         }
-    } catch (error) {
-        // hyperstream connection error
-        return false;
     }
+    console.warn('sendToHyperStream failed after retries', lastErr);
+    chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon48.png',
+        title: 'HyperStream error',
+        message: `Connection failed: ${lastErr?.message}`
+    });
+    if (url.startsWith('http')) {
+        chrome.downloads.download({ url });
+    }
+    return false;
 }

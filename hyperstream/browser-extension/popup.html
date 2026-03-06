@@ -147,6 +147,32 @@
       color: #f59e0b;
     }
 
+    .status-section {
+      margin-top: 12px;
+    }
+
+    .status-item {
+      font-size: 12px;
+      padding: 4px 6px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+    .status-item button {
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px;
+    }
+    .status-item button:hover {
+      background: rgba(255,255,255,0.1);
+    }
+
     .toggle-container {
       display: flex;
       align-items: center;
@@ -221,6 +247,11 @@
     <div class="status-dot" id="statusDot"></div>
     <span class="status-text" id="statusText">Checking connection...</span>
   </div>
+  <div class="section" style="margin-top:8px;">
+    <div class="section-label">Server URL</div>
+    <input type="text" id="apiUrlInput" class="token-input" placeholder="http://localhost:14733" style="width:100%;" />
+    <div class="token-hint" style="margin-top:4px;">Custom API endpoint (optional).</div>
+  </div>
 
   <div class="section">
     <div class="section-label">Auth Token</div>
@@ -238,6 +269,18 @@
       <input type="checkbox" id="enableToggle">
       <span class="slider"></span>
     </label>
+  </div>
+
+  <!-- Active downloads status -->
+  <div class="section" style="margin-top:12px;">
+    <button id="refresh-status-btn" class="btn-save" style="width:100%;">Refresh Active Downloads</button>
+    <div id="status-list" style="margin-top:8px;font-size:11px;color:#94a3b8;"></div>
+  </div>
+
+  <!-- RSS feeds status -->
+  <div class="section" style="margin-top:12px;">
+    <button id="refresh-feeds-btn" class="btn-save" style="width:100%;">Refresh Feeds</button>
+    <div id="feeds-list" style="margin-top:8px;font-size:11px;color:#94a3b8;"></div>
   </div>
 
   <div class="footer">

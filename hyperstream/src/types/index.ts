@@ -178,6 +178,24 @@ export interface AppSettings {
     torrent_seed_time_limit_mins: number;
     torrent_priority_overrides: Record<string, string>;
     torrent_pinned_hashes: string[];
+    // Quiet Hours
+    quiet_hours_enabled: boolean;
+    quiet_hours_start: number;
+    quiet_hours_end: number;
+    quiet_hours_action: string;
+    quiet_hours_throttle_kbps: number;
+    // Speed Profiles
+    speed_profiles_enabled: boolean;
+    speed_profiles: SpeedProfile[];
+}
+
+/** Time-based speed limit profile */
+export interface SpeedProfile {
+    name: string;
+    start_time: string;
+    end_time: string;
+    speed_limit_kbps: number;
+    days: number[];
 }
 
 /** Download progress event payload from Tauri backend */
@@ -204,6 +222,22 @@ export interface ExtensionDownloadPayload {
 export interface BatchLink {
     url: string;
     filename: string;
+}
+
+/** Status record returned by HTTP API for active downloads */
+export interface DownloadStatus {
+    id: string;
+    url: string;
+    filename?: string;
+    downloaded: number;
+    total: number;
+    speed_bps?: number;
+    status: string;
+}
+
+export interface ControlRequest {
+    id: string;
+    action: 'pause' | 'cancel';
 }
 
 /** Scheduled download start payload */
@@ -235,6 +269,23 @@ export interface WaybackSnapshot {
     status: string;
 }
 
+// ---- HLS helpers ---------------------------------------------------------
+
+/** Variant entry from an HLS master playlist */
+export interface HlsVariant {
+    bandwidth: number;
+    resolution?: string;
+    url: string;
+}
+
+/** Stream details returned by the `parse_hls_stream` command */
+export interface HlsStream {
+    variants: HlsVariant[];
+    segments: Array<{ url: string; duration: number; sequence: number; key_uri?: string; key_iv?: string }>;
+    target_duration: number;
+    is_master: boolean;
+}
+
 /** Upscale result from upscale_image */
 export interface UpscaleResult {
     success: boolean;
@@ -243,6 +294,18 @@ export interface UpscaleResult {
 }
 
 // Represents an active download inside the UI (including segments when available)
+export interface MirrorStat {
+    url: string;
+    source: string;
+    avg_speed_bps: number;
+    total_bytes: number;
+    success_count: number;
+    error_count: number;
+    supports_range: boolean;
+    latency_ms: number;
+    disabled: boolean;
+}
+
 export interface DownloadTask {
     id: string;
     filename: string;
@@ -253,6 +316,7 @@ export interface DownloadTask {
     speed: number; // bytes/sec
     status: 'Downloading' | 'Paused' | 'Error' | 'Done';
     segments?: Segment[];
+    mirrorStats?: MirrorStat[];
     // used by overlays/trackers for internal timing, not persisted
     lastUpdate?: number;
 }

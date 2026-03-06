@@ -17,8 +17,14 @@ pub struct SavedDownload {
     pub filename: String,
     pub total_size: u64,
     pub downloaded_bytes: u64,
-    pub status: String, // "Paused", "Error", "Done"
+    pub status: String, // "Paused", "Error", "Done", "Downloading", "Interrupted"
     pub segments: Option<Vec<Segment>>, // Saved state of dynamic segments
+    /// ISO 8601 timestamp of last activity (for crash staleness detection)
+    #[serde(default)]
+    pub last_active: Option<String>,
+    /// Human-readable error message (when status is "Error")
+    #[serde(default)]
+    pub error_message: Option<String>,
 }
 
 /// Get the path to the downloads.json file

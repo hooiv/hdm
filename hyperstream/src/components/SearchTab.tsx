@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { error as logError } from '../utils/logger';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
-import { Search, Download, Database, Loader2, HardDrive, ArrowDown, ArrowUp, Brain } from 'lucide-react';
+import { Search, Download, Database, Loader2, HardDrive, ArrowDown, ArrowUp, Brain, RefreshCw } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
 import { AppSettings } from '../types';
 
@@ -27,6 +27,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({ onStartDownload }) => {
     const [loading, setLoading] = useState(false);
     const [searched, setSearched] = useState(false);
     const [aiMode, setAiMode] = useState(false);
+    const [isIndexing, setIsIndexing] = useState(false);
 
     const handleSearch = async (e?: React.FormEvent) => {
         if (e) e.preventDefault();
@@ -110,9 +111,31 @@ export const SearchTab: React.FC<SearchTabProps> = ({ onStartDownload }) => {
             <div className="flex-1 bg-slate-900/50 border border-slate-700/50 rounded-xl overflow-hidden shadow-xl flex flex-col relative">
                 <div className="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center bg-slate-900/50 backdrop-blur-sm">
                     <h3 className="font-semibold text-slate-200">Results {searched && `(${results.length})`}</h3>
-                    <div className={`flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-full border ${aiMode ? 'bg-purple-900/20 text-purple-400 border-purple-500/20' : 'bg-slate-800/50 text-slate-500 border-slate-700/50'}`}>
-                        {aiMode ? <Brain size={12} /> : <Database size={12} />}
-                        <span>{aiMode ? 'Neural Index' : 'Lua Engine'}</span>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={async () => {
+                                setIsIndexing(true);
+                                try {
+                                    const count = await invoke<number>('index_all_downloads');
+                                    toast.success(`Indexed ${count} downloads`);
+                                } catch (e) {
+                                    logError("Indexing failed", e);
+                                    toast.error("Indexing failed: " + e);
+                                } finally {
+                                    setIsIndexing(false);
+                                }
+                            }}
+                            disabled={isIndexing}
+                            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border bg-slate-800/50 text-slate-500 border-slate-700/50 hover:text-cyan-400 hover:border-cyan-500/30 transition-colors disabled:opacity-50"
+                            title="Rebuild semantic search index"
+                        >
+                            <RefreshCw size={12} className={isIndexing ? 'animate-spin' : ''} />
+                            {isIndexing ? 'Indexing...' : 'Rebuild Index'}
+                        </button>
+                        <div className={`flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-full border ${aiMode ? 'bg-purple-900/20 text-purple-400 border-purple-500/20' : 'bg-slate-800/50 text-slate-500 border-slate-700/50'}`}>
+                            {aiMode ? <Brain size={12} /> : <Database size={12} />}
+                            <span>{aiMode ? 'Neural Index' : 'Lua Engine'}</span>
+                        </div>
                     </div>
                 </div>
 

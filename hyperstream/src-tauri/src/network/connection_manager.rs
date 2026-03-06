@@ -7,7 +7,6 @@ use url::Url;
 #[derive(Debug, Clone)]
 pub struct ConnectionManager {
     // Map domain -> Semaphore
-    // Default limit: 4 connections per domain
     semaphores: Arc<DashMap<String, Arc<Semaphore>>>,
     default_limit: usize,
 }
@@ -17,6 +16,24 @@ impl ConnectionManager {
         Self {
             semaphores: Arc::new(DashMap::new()),
             default_limit,
+        }
+    }
+
+    /// Set a custom connection limit for a specific domain.
+    /// Must be called BEFORE any `acquire()` for that domain to take effect,
+    /// since the semaphore is created lazily on first access.
+    pub fn set_domain_limit(&self, domain: &str, limit: usize) {
+        let limit = limit.max(1); // At least 1 connection
+        self.semaphores.insert(domain.to_string(), Arc::new(Semaphore::new(limit)));
+    }
+
+    /// Configure connection limit for a URL using site rules.
+    /// Extracts the domain and applies matching site rules if any.
+    pub fn configure_for_url(&self, url_str: &str) {
+        let domain = self.extract_domain(url_str);
+        let effective = crate::site_rules::resolve_config(url_str);
+        if let Some(max_conn) = effective.max_connections {
+            self.set_domain_limit(&domain, max_conn as usize);
         }
     }
 

@@ -6,6 +6,7 @@
 import { useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
+import { formatBytes } from '../utils/formatters';
 import type { DownloadTask } from '../types';
 import type {
     WaybackSnapshot,
@@ -26,6 +27,7 @@ import type {
     DlnaDevice,
     UsbDrive,
     ApiFuzzResult,
+    ReplayResult,
 } from '../api/commands';
 
 export function useDownloadActions(task: DownloadTask, filePath: string) {
@@ -111,6 +113,27 @@ export function useDownloadActions(task: DownloadTask, filePath: string) {
         } catch (err) { toastRef.current.error('API Fuzz failed: ' + err); }
     }, [task.url]);
 
+    const handleApiReplay = useCallback(async () => {
+        if (!task.url) {
+            toastRef.current.error('No URL available for replay');
+            return;
+        }
+        try {
+            toastRef.current.info('Replaying HTTP request...');
+            const result = await invoke<ReplayResult>('replay_request', {
+                url: task.url,
+                method: 'GET',
+                headers: null,
+                body: null,
+            });
+            const headerLines = Object.entries(result.headers).slice(0, 8)
+                .map(([k, v]) => `  ${k}: ${v}`).join('\n');
+            toastRef.current.success(
+                `HTTP ${result.status_code} — ${result.response_time_ms}ms — ${result.body_size} bytes\n\nHeaders:\n${headerLines}\n\nBody preview:\n${result.body_preview.slice(0, 200)}`
+            );
+        } catch (err) { toastRef.current.error('HTTP Replay failed: ' + err); }
+    }, [task.url]);
+
     const handleStegoHide = useCallback(async () => {
         const secret = prompt('Enter secret message to hide:');
         if (!secret) return;
@@ -133,6 +156,29 @@ export function useDownloadActions(task: DownloadTask, filePath: string) {
             const result = await invoke<ExtractResult>('auto_extract_archive', { path: filePath, destination: null });
             toastRef.current.success(`📦 Extracted ${result.files_extracted} files to:\n${result.destination}`);
         } catch (err) { toastRef.current.error('Extract failed: ' + err); }
+    }, [filePath]);
+
+    const handleVerifyChecksum = useCallback(async () => {
+        const expected = prompt('Enter expected checksum (sha256:abc... or md5:abc... or plain hash):');
+        if (!expected) {
+            // No expected hash — compute all checksums
+            try {
+                toastRef.current.info('Computing checksums...');
+                const results = await invoke<{ algorithm: string; hash: string; file_size: number }[]>('compute_file_checksums', { path: filePath });
+                const lines = results.map(r => `${r.algorithm}: ${r.hash}`).join('\n');
+                toastRef.current.success(`File Checksums (${formatBytes(results[0]?.file_size ?? 0)}):\n\n${lines}`);
+            } catch (err) { toastRef.current.error('Checksum failed: ' + err); }
+            return;
+        }
+        try {
+            toastRef.current.info('Verifying checksum...');
+            const result = await invoke<{ algorithm: string; hash: string; verified: boolean | null; expected: string | null }>('verify_download_checksum', { path: filePath, expected });
+            if (result.verified) {
+                toastRef.current.success(`✅ Checksum VERIFIED\n${result.algorithm}: ${result.hash}`);
+            } else {
+                toastRef.current.error(`❌ Checksum MISMATCH\n${result.algorithm}\nExpected: ${result.expected}\nActual:   ${result.hash}`);
+            }
+        } catch (err) { toastRef.current.error('Checksum verification failed: ' + err); }
     }, [filePath]);
 
     const handleSqlQuery = useCallback(async () => {
@@ -235,9 +281,11 @@ export function useDownloadActions(task: DownloadTask, filePath: string) {
         handleFlashToUsb,
         handleValidateC2pa,
         handleApiFuzz,
+        handleApiReplay,
         handleStegoHide,
         handleStegoExtract,
         handleAutoExtract,
+        handleVerifyChecksum,
         handleSqlQuery,
         handleDlnaCast,
         handleGenerateSubtitles,

@@ -1,11 +1,12 @@
-import React from "react";
+import React, { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Folder, Activity } from "lucide-react";
+import { Folder, Activity, Moon, Clock, Plus, Trash2 } from "lucide-react";
 import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { motion } from "framer-motion";
 import { useToast } from "../../contexts/ToastContext";
 import { error as logError } from "../../utils/logger";
+import type { SpeedProfile } from "../../types";
 
 interface GeneralTabProps {
   settings: SettingsData;
@@ -17,6 +18,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
   setSettings,
 }) => {
   const toast = useToast();
+  const [editingProfile, setEditingProfile] = useState<number | null>(null);
 
   const handleSelectDir = async () => {
     try {
@@ -178,6 +180,287 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
             </p>
           </div>
         </div>
+      </div>
+
+      {/* Quiet Hours */}
+      <div className="space-y-4">
+        <SectionHeader icon={Moon} title="Quiet Hours" />
+        <div className="bg-slate-800/20 rounded-xl p-5 border border-slate-700/30 space-y-4">
+          <div className="space-y-1">
+            <Toggle
+              label="Enable Quiet Hours"
+              checked={!!settings.quiet_hours_enabled}
+              onChange={(v) => setSettings({ ...settings, quiet_hours_enabled: v })}
+            />
+            <p className="text-xs text-slate-500 ml-1">
+              Restrict download activity during a configurable time window.
+            </p>
+          </div>
+
+          {settings.quiet_hours_enabled && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              className="space-y-4 pt-4 border-t border-slate-700/30"
+            >
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-slate-400">Start Hour</label>
+                  <select
+                    value={settings.quiet_hours_start ?? 23}
+                    onChange={(e) => setSettings({ ...settings, quiet_hours_start: Number(e.target.value) })}
+                    className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-violet-500/50"
+                  >
+                    {Array.from({ length: 24 }, (_, i) => (
+                      <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-slate-400">End Hour</label>
+                  <select
+                    value={settings.quiet_hours_end ?? 7}
+                    onChange={(e) => setSettings({ ...settings, quiet_hours_end: Number(e.target.value) })}
+                    className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-violet-500/50"
+                  >
+                    {Array.from({ length: 24 }, (_, i) => (
+                      <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-slate-400">Action During Quiet Hours</label>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setSettings({ ...settings, quiet_hours_action: 'defer' })}
+                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors ${
+                      (settings.quiet_hours_action || 'defer') === 'defer'
+                        ? 'bg-violet-500/20 border-violet-500/40 text-violet-300'
+                        : 'bg-slate-800/50 border-slate-700 text-slate-400 hover:text-slate-300'
+                    }`}
+                  >
+                    Defer New Downloads
+                  </button>
+                  <button
+                    onClick={() => setSettings({ ...settings, quiet_hours_action: 'throttle' })}
+                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors ${
+                      settings.quiet_hours_action === 'throttle'
+                        ? 'bg-violet-500/20 border-violet-500/40 text-violet-300'
+                        : 'bg-slate-800/50 border-slate-700 text-slate-400 hover:text-slate-300'
+                    }`}
+                  >
+                    Throttle Speed
+                  </button>
+                </div>
+              </div>
+
+              {settings.quiet_hours_action === 'throttle' && (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-slate-400">Throttle Speed (KB/s)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={99999}
+                    value={settings.quiet_hours_throttle_kbps ?? 50}
+                    onChange={(e) => setSettings({ ...settings, quiet_hours_throttle_kbps: Math.max(1, Number(e.target.value) || 50) })}
+                    className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm font-mono focus:outline-none focus:border-violet-500/50"
+                  />
+                  <p className="text-xs text-slate-500">Maximum download speed during quiet hours.</p>
+                </div>
+              )}
+
+              <div className="bg-violet-500/5 border border-violet-500/10 rounded-lg px-3 py-2">
+                <p className="text-xs text-violet-400/80">
+                  {(settings.quiet_hours_action || 'defer') === 'defer'
+                    ? `Scheduled downloads due between ${String(settings.quiet_hours_start ?? 23).padStart(2, '0')}:00 and ${String(settings.quiet_hours_end ?? 7).padStart(2, '0')}:00 will be deferred until quiet hours end.`
+                    : `Downloads will be throttled to ${settings.quiet_hours_throttle_kbps ?? 50} KB/s between ${String(settings.quiet_hours_start ?? 23).padStart(2, '0')}:00 and ${String(settings.quiet_hours_end ?? 7).padStart(2, '0')}:00.`}
+                </p>
+              </div>
+            </motion.div>
+          )}
+        </div>
+      </div>
+
+      {/* Speed Profiles */}
+      <div className="bg-slate-800/30 rounded-xl p-5 border border-white/5">
+        <div className="flex items-center justify-between mb-4">
+          <SectionHeader icon={Clock} title="Speed Profiles" subtitle="Time-based bandwidth scheduling" />
+          <Toggle
+            checked={settings.speed_profiles_enabled ?? false}
+            onChange={(val) => setSettings({ ...settings, speed_profiles_enabled: val })}
+          />
+        </div>
+
+        {settings.speed_profiles_enabled && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="space-y-3 pt-4 border-t border-slate-700/30"
+          >
+            {(settings.speed_profiles ?? []).map((profile: SpeedProfile, idx: number) => (
+              <div key={idx} className="bg-slate-900/50 border border-slate-700/30 rounded-lg p-3 space-y-2">
+                {editingProfile === idx ? (
+                  <div className="space-y-3">
+                    <input
+                      type="text"
+                      value={profile.name}
+                      onChange={(e) => {
+                        const profiles = [...(settings.speed_profiles ?? [])];
+                        profiles[idx] = { ...profiles[idx], name: e.target.value };
+                        setSettings({ ...settings, speed_profiles: profiles });
+                      }}
+                      placeholder="Profile Name"
+                      className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-cyan-500/50"
+                    />
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-xs text-slate-400">Start Time</label>
+                        <input
+                          type="time"
+                          value={profile.start_time}
+                          onChange={(e) => {
+                            const profiles = [...(settings.speed_profiles ?? [])];
+                            profiles[idx] = { ...profiles[idx], start_time: e.target.value };
+                            setSettings({ ...settings, speed_profiles: profiles });
+                          }}
+                          className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-cyan-500/50"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs text-slate-400">End Time</label>
+                        <input
+                          type="time"
+                          value={profile.end_time}
+                          onChange={(e) => {
+                            const profiles = [...(settings.speed_profiles ?? [])];
+                            profiles[idx] = { ...profiles[idx], end_time: e.target.value };
+                            setSettings({ ...settings, speed_profiles: profiles });
+                          }}
+                          className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:outline-none focus:border-cyan-500/50"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs text-slate-400">Speed (KB/s)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={profile.speed_limit_kbps}
+                          onChange={(e) => {
+                            const profiles = [...(settings.speed_profiles ?? [])];
+                            profiles[idx] = { ...profiles[idx], speed_limit_kbps: Math.max(0, Number(e.target.value) || 0) };
+                            setSettings({ ...settings, speed_profiles: profiles });
+                          }}
+                          placeholder="0 = unlimited"
+                          className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm font-mono focus:outline-none focus:border-cyan-500/50"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-400">Active Days</label>
+                      <div className="flex gap-1.5">
+                        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day, dayIdx) => {
+                          const isActive = (profile.days ?? []).length === 0 || (profile.days ?? []).includes(dayIdx);
+                          return (
+                            <button
+                              key={day}
+                              onClick={() => {
+                                const profiles = [...(settings.speed_profiles ?? [])];
+                                const currentDays = profiles[idx].days ?? [];
+                                if (currentDays.length === 0) {
+                                  // Was "every day" — switch to all except this one
+                                  profiles[idx] = { ...profiles[idx], days: [0,1,2,3,4,5,6].filter(d => d !== dayIdx) };
+                                } else if (currentDays.includes(dayIdx)) {
+                                  const newDays = currentDays.filter((d: number) => d !== dayIdx);
+                                  profiles[idx] = { ...profiles[idx], days: newDays };
+                                } else {
+                                  const newDays = [...currentDays, dayIdx].sort();
+                                  // If all 7 selected, set to empty (= every day)
+                                  profiles[idx] = { ...profiles[idx], days: newDays.length === 7 ? [] : newDays };
+                                }
+                                setSettings({ ...settings, speed_profiles: profiles });
+                              }}
+                              className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                                isActive
+                                  ? 'bg-cyan-500/20 border border-cyan-500/40 text-cyan-300'
+                                  : 'bg-slate-800/50 border border-slate-700 text-slate-500'
+                              }`}
+                            >
+                              {day}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="text-xs text-slate-500">{(profile.days ?? []).length === 0 ? 'Active every day' : `Active ${(profile.days ?? []).length} days/week`}</p>
+                    </div>
+                    <button
+                      onClick={() => setEditingProfile(null)}
+                      className="text-xs text-cyan-400 hover:text-cyan-300"
+                    >
+                      Done Editing
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between">
+                    <div
+                      className="flex-1 cursor-pointer"
+                      onClick={() => setEditingProfile(idx)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-slate-200">{profile.name || 'Unnamed Profile'}</span>
+                        <span className="text-xs text-slate-500">
+                          {profile.start_time} — {profile.end_time}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="text-xs text-cyan-400 font-mono">
+                          {profile.speed_limit_kbps === 0 ? 'Unlimited' : `${profile.speed_limit_kbps} KB/s`}
+                        </span>
+                        <span className="text-xs text-slate-600">
+                          {(profile.days ?? []).length === 0 ? 'Every day' : (profile.days ?? []).map((d: number) => ['Mo','Tu','We','Th','Fr','Sa','Su'][d]).join(', ')}
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const profiles = (settings.speed_profiles ?? []).filter((_: SpeedProfile, i: number) => i !== idx);
+                        setSettings({ ...settings, speed_profiles: profiles });
+                      }}
+                      className="p-1.5 text-slate-500 hover:text-red-400 transition-colors"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+
+            <button
+              onClick={() => {
+                const profiles = [...(settings.speed_profiles ?? []), {
+                  name: `Profile ${(settings.speed_profiles ?? []).length + 1}`,
+                  start_time: '09:00',
+                  end_time: '17:00',
+                  speed_limit_kbps: 500,
+                  days: [],
+                }];
+                setSettings({ ...settings, speed_profiles: profiles });
+                setEditingProfile(profiles.length - 1);
+              }}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2.5 border border-dashed border-slate-600 rounded-lg text-sm text-slate-400 hover:text-cyan-400 hover:border-cyan-500/40 transition-colors"
+            >
+              <Plus size={14} />
+              Add Speed Profile
+            </button>
+
+            <div className="bg-cyan-500/5 border border-cyan-500/10 rounded-lg px-3 py-2">
+              <p className="text-xs text-cyan-400/80">
+                Speed profiles override the base speed limit during their active time window. First matching profile wins. Set speed to 0 for unlimited.
+              </p>
+            </div>
+          </motion.div>
+        )}
       </div>
     </div>
   );

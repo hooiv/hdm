@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { debug, warn, error as logError } from '../utils/logger';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Archive, X, File, Folder, AlertTriangle, Loader2 } from 'lucide-react';
+import { Archive, X, File, Folder, AlertTriangle, Loader2, Search, Download, PackageOpen, Trash2, Check } from 'lucide-react';
 
 interface ZipEntry {
     name: string;
@@ -38,6 +38,55 @@ export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url,
     const [data, setData] = useState<ZipPreviewData | null>(null);
     const [loading, setLoading] = useState(false);
     const [errMsg, setError] = useState<string | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [extracting, setExtracting] = useState<string | null>(null);
+    const [extracted, setExtracted] = useState<Set<string>>(new Set());
+    const [extractAllDone, setExtractAllDone] = useState(false);
+
+    const filteredEntries = data?.entries.filter(e =>
+        !searchQuery || e.name.toLowerCase().includes(searchQuery.toLowerCase())
+    ) ?? [];
+
+    const handleExtractSingle = async (entryName: string) => {
+        const destDir = filePath.replace(/[/\\][^/\\]+$/, '');
+        setExtracting(entryName);
+        try {
+            if (url && isPartial) {
+                await invoke('download_zip_entry', { url, entryName, destPath: `${destDir}/${entryName.split('/').pop()}` });
+            } else {
+                await invoke('extract_single_file', { zipPath: filePath, entryName, destPath: `${destDir}/${entryName.split('/').pop()}` });
+            }
+            setExtracted(prev => new Set(prev).add(entryName));
+        } catch (err) {
+            logError('Failed to extract file:', err);
+        } finally {
+            setExtracting(null);
+        }
+    };
+
+    const handleExtractAll = async () => {
+        const destDir = filePath.replace(/[/\\][^/\\]+$/, '');
+        setExtracting('__all__');
+        try {
+            const count = await invoke<number>('extract_zip_all', { zipPath: filePath, destDir });
+            setExtractAllDone(true);
+            debug(`Extracted ${count} files`);
+        } catch (err) {
+            logError('Failed to extract all:', err);
+        } finally {
+            setExtracting(null);
+        }
+    };
+
+    const handleCleanup = async () => {
+        if (!window.confirm('Delete the archive file after extraction?')) return;
+        try {
+            await invoke('cleanup_archive', { archivePath: filePath });
+            onClose();
+        } catch (err) {
+            logError('Failed to cleanup archive:', err);
+        }
+    };
 
     const loadPreview = useCallback(async () => {
         setLoading(true);
@@ -167,6 +216,39 @@ export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url,
                                     </div>
                                 </div>
 
+                                {/* Search & Actions */}
+                                <div className="flex items-center gap-2">
+                                    <div className="flex-1 relative">
+                                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                                        <input
+                                            type="text"
+                                            value={searchQuery}
+                                            onChange={e => setSearchQuery(e.target.value)}
+                                            placeholder="Search files..."
+                                            className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-slate-200 focus:outline-none focus:border-cyan-500/50"
+                                        />
+                                    </div>
+                                    {!isPartial && (
+                                        <>
+                                            <button
+                                                onClick={handleExtractAll}
+                                                disabled={extracting !== null || extractAllDone}
+                                                className="px-3 py-1.5 rounded-lg text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors disabled:opacity-40 flex items-center gap-1 whitespace-nowrap"
+                                            >
+                                                {extractAllDone ? <><Check size={12} /> Extracted</> : extracting === '__all__' ? <><Loader2 size={12} className="animate-spin" /> Extracting...</> : <><PackageOpen size={12} /> Extract All</>}
+                                            </button>
+                                            {extractAllDone && (
+                                                <button
+                                                    onClick={handleCleanup}
+                                                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-red-400 bg-red-500/10 border border-red-500/20 hover:bg-red-500/20 transition-colors flex items-center gap-1 whitespace-nowrap"
+                                                >
+                                                    <Trash2 size={12} /> Delete Archive
+                                                </button>
+                                            )}
+                                        </>
+                                    )}
+                                </div>
+
                                 {/* File Table */}
                                 <div className="rounded-xl border border-white/5 overflow-hidden">
                                     <table className="w-full text-sm">
@@ -175,10 +257,11 @@ export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url,
                                                 <th className="text-left px-4 py-2.5 font-medium">Name</th>
                                                 <th className="text-right px-4 py-2.5 font-medium w-24">Size</th>
                                                 <th className="text-right px-4 py-2.5 font-medium w-28">Compressed</th>
+                                                <th className="text-center px-2 py-2.5 font-medium w-10"></th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {data.entries.map((entry, idx) => (
+                                            {filteredEntries.map((entry, idx) => (
                                                 <tr
                                                     key={idx}
                                                     className="border-t border-white/[0.03] hover:bg-white/[0.03] transition-colors"
@@ -198,6 +281,22 @@ export const ZipPreviewModal: React.FC<ZipPreviewModalProps> = ({ filePath, url,
                                                     </td>
                                                     <td className="px-4 py-2 text-right text-slate-500 font-mono text-xs">
                                                         {formatSize(entry.compressed_size)}
+                                                    </td>
+                                                    <td className="px-2 py-2 text-center">
+                                                        {!entry.is_directory && (
+                                                            extracted.has(entry.name) ? (
+                                                                <Check size={12} className="text-emerald-400 mx-auto" />
+                                                            ) : (
+                                                                <button
+                                                                    onClick={() => handleExtractSingle(entry.name)}
+                                                                    disabled={extracting !== null}
+                                                                    className="p-1 text-slate-500 hover:text-cyan-400 transition-colors disabled:opacity-30"
+                                                                    title="Extract this file"
+                                                                >
+                                                                    {extracting === entry.name ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+                                                                </button>
+                                                            )
+                                                        )}
                                                     </td>
                                                 </tr>
                                             ))}

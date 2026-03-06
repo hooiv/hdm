@@ -1,7 +1,7 @@
 use tokio::sync::broadcast;
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SystemEvent {

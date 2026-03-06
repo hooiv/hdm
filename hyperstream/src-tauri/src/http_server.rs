@@ -1,8 +1,35 @@
 use warp::Filter;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, broadcast};
 use std::collections::HashMap;
+use once_cell::sync::Lazy;
+use tokio_stream::wrappers::BroadcastStream;
+use futures::StreamExt;
+use tauri::Emitter;
+
+/// A video/audio stream detected by the browser extension via Content-Type sniffing.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DetectedStreamRequest {
+    pub url: String,
+    pub content_type: Option<String>,
+    pub stream_type: String, // "hls" | "dash" | "video" | "audio"
+    pub page_url: Option<String>,
+    pub page_title: Option<String>,
+    pub quality: Option<String>,
+    pub size: Option<u64>,
+}
+
+pub type StreamSender = mpsc::UnboundedSender<Vec<DetectedStreamRequest>>;
+
+// Global broadcast channel for server-sent events
+pub static EVENT_SENDER: Lazy<broadcast::Sender<serde_json::Value>> = Lazy::new(|| {
+    broadcast::channel(256).0
+});
+
+pub fn get_event_sender() -> broadcast::Sender<serde_json::Value> {
+    EVENT_SENDER.clone()
+}
 
 
 use std::path::PathBuf;
@@ -11,6 +38,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::io::{AsyncRead, AsyncSeek};
 use tokio_util::io::ReaderStream;
 use crate::network::bittorrent::manager::TorrentManager;
+use crate::feeds;
 
 #[derive(Debug, Clone)]
 pub enum StreamingSource {
@@ -41,10 +69,20 @@ pub type DownloadSender = mpsc::UnboundedSender<DownloadRequest>;
 pub type BatchSender = mpsc::UnboundedSender<Vec<BatchLink>>;
 pub type FileMap = Arc<std::sync::Mutex<HashMap<String, StreamingSource>>>;
 
-pub async fn start_server(tx: DownloadSender, batch_tx: BatchSender, file_map: FileMap, torrent_manager: Option<Arc<TorrentManager>>) {
+// Add state so the HTTP API can inspect and control active downloads
+pub async fn start_server(
+    tx: DownloadSender,
+    batch_tx: BatchSender,
+    stream_tx: StreamSender,
+    file_map: FileMap,
+    torrent_manager: Option<Arc<TorrentManager>>,
+    app_handle: tauri::AppHandle,
+) {
     let tx = Arc::new(tx);
     let batch_tx = Arc::new(batch_tx);
+    let stream_tx = Arc::new(stream_tx);
     let torrent_manager = torrent_manager.clone();
+    let app_handle_arc = Arc::new(app_handle.clone());
 
     // CORS: Allow any origin because browser-extension origins
     // (chrome-extension://<id>, moz-extension://<uuid>) are dynamic and
@@ -111,9 +149,58 @@ pub async fn start_server(tx: DownloadSender, batch_tx: BatchSender, file_map: F
         .and(batch_tx_filter)
         .and_then(handle_batch);
 
+    // Route for browser extension to report detected video/audio streams
+    let stream_tx_filter = warp::any().map(move || stream_tx.clone());
+    let streams_route = warp::path("streams")
+        .and(warp::post())
+        .and(auth_token_filter.clone())
+        .and(warp::body::content_length_limit(256 * 1024))
+        .and(warp::body::json())
+        .and(stream_tx_filter)
+        .and_then(handle_streams);
+
+    // Route for querying current download status
+    let ah_clone = app_handle_arc.clone();
+    let state_filter = warp::any().map(move || ah_clone.clone());
+    let status_route = warp::path("downloads")
+        .and(warp::get())
+        .and(state_filter.clone())
+        .and_then(handle_status);
+
+    // Control route for pause/cancel actions
+    let control_route = warp::path("control")
+        .and(warp::post())
+        .and(auth_token_filter.clone())
+        .and(warp::body::json())
+        .and(state_filter.clone())
+        .and_then(handle_control);
+
     let health_route = warp::path("health")
         .and(warp::get())
         .map(|| warp::reply::json(&serde_json::json!({"status": "ok", "app": "hyperstream"})));
+
+    // Version info (useful for extension compatibility checks)
+    let version_route = warp::path("version")
+        .and(warp::get())
+        .map(|| warp::reply::json(&serde_json::json!({"version": env!("CARGO_PKG_VERSION")})));
+
+    // Server-sent events endpoint
+    let events_route = warp::path("events")
+        .and(warp::get())
+        .map(|| {
+            let rx = EVENT_SENDER.subscribe();
+            let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
+                .filter_map(|res| async move { res.ok() })
+                .map(|val| {
+                    Ok::<_, std::convert::Infallible>(warp::sse::Event::default().data(val.to_string()))
+                });
+            warp::sse::reply(warp::sse::keep_alive().stream(stream))
+        });
+
+    // Version info (useful for extension compatibility checks)
+    let version_route = warp::path("version")
+        .and(warp::get())
+        .map(|| warp::reply::json(&serde_json::json!({"version": env!("CARGO_PKG_VERSION")})));
 
     // Auth token endpoint removed for security — token should be exchanged
     // via native messaging or secure file-based handshake, not an unauthenticated HTTP endpoint.
@@ -131,7 +218,90 @@ pub async fn start_server(tx: DownloadSender, batch_tx: BatchSender, file_map: F
         .and(tm_filter)
         .and_then(handle_p2p_request);
 
-    let routes = download_route.or(batch_route).or(health_route).or(p2p_route).with(cors);
+    // Feed management endpoints
+    let list_feeds = warp::path("feeds")
+        .and(warp::get())
+        .and(auth_token_filter.clone())
+        .and_then(|| async move {
+            let feeds = feeds::FEED_MANAGER.get_feeds();
+            Ok::<_, warp::Rejection>(warp::reply::json(&feeds))
+        });
+
+    let feed_items = warp::path!("feeds" / String / "items")
+        .and(warp::get())
+        .and(auth_token_filter.clone())
+        .and_then(|id: String| async move {
+            let items = feeds::FEED_MANAGER.get_items(&id);
+            Ok::<_, warp::Rejection>(warp::reply::json(&items))
+        });
+
+    let add_feed = warp::path("feeds")
+        .and(warp::post())
+        .and(auth_token_filter.clone())
+        .and(warp::body::json())
+        .and_then(|cfg: feeds::FeedConfig| async move {
+            let res = feeds::FEED_MANAGER.add_feed(cfg);
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "success": res.is_ok(),
+                "message": res.err().unwrap_or_default()
+            })))
+        });
+
+    let update_feed = warp::path!("feeds" / String)
+        .and(warp::put())
+        .and(auth_token_filter.clone())
+        .and(warp::body::json())
+        .and_then(|_id: String, cfg: feeds::FeedConfig| async move {
+            let res = feeds::FEED_MANAGER.update_feed(cfg);
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "success": res.is_ok(),
+                "message": res.err().unwrap_or_default()
+            })))
+        });
+
+    let remove_feed = warp::path!("feeds" / String)
+        .and(warp::delete())
+        .and(auth_token_filter.clone())
+        .and_then(|id: String| async move {
+            feeds::FEED_MANAGER.remove_feed(&id);
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "success": true
+            })))
+        });
+
+    let refresh_feed = {
+        let app_clone = app_handle.clone();
+        warp::path!("feeds" / String / "refresh")
+            .and(warp::post())
+            .and(auth_token_filter.clone())
+            .and_then(move |id: String| {
+                let ah = app_clone.clone();
+                async move {
+                    let r = feeds::FEED_MANAGER.refresh_feed(&ah, &id).await;
+                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                        "success": r.is_ok(),
+                        "message": r.err().unwrap_or_default()
+                    })))
+                }
+            })
+    };
+
+    let routes = download_route
+        .or(batch_route)
+        .or(streams_route)
+        .or(status_route)
+        .or(control_route)
+        .or(health_route)
+        .or(version_route)
+        .or(events_route)
+        .or(p2p_route)
+        .or(list_feeds)
+        .or(feed_items)
+        .or(add_feed)
+        .or(update_feed)
+        .or(remove_feed)
+        .or(refresh_feed)
+        .with(cors);
 
     warp::serve(routes).run(([127, 0, 0, 1], 14733)).await; 
 }
@@ -273,6 +443,12 @@ async fn handle_download(
     req: DownloadRequest,
     tx: Arc<DownloadSender>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // broadcast event for listeners
+    let _ = get_event_sender().send(serde_json::json!({
+        "type": "download_requested",
+        "url": req.url,
+        "filename": req.filename
+    }));
     // URL validation: only allow http/https schemes, block private/loopback IPs
     if let Ok(parsed) = reqwest::Url::parse(&req.url) {
         match parsed.scheme() {
@@ -315,6 +491,84 @@ async fn handle_download(
     }
 }
 
+
+// Additional structures for new endpoints
+#[derive(Debug, serde::Serialize)]
+struct DownloadStatus {
+    id: String,
+    url: String,
+    filename: Option<String>,
+    downloaded: u64,
+    total: u64,
+    speed_bps: u64,
+    status: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ControlRequest {
+    id: String,
+    action: String, // "pause" or "cancel"
+}
+
+async fn handle_status(
+    app_handle: Arc<tauri::AppHandle>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    use tauri::Manager;
+    let state = app_handle.state::<crate::core_state::AppState>();
+    let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = Vec::with_capacity(downloads.len());
+    for (id, session) in downloads.iter() {
+        // get basic info from session manager
+        let mgr = session.manager.lock().unwrap_or_else(|e| e.into_inner());
+        let downloaded = mgr.total_downloaded();
+        let total = mgr.file_size;
+        let status = if mgr.is_complete() {
+            "Complete".to_string()
+        } else {
+            "Downloading".to_string()
+        };
+        let speed = mgr.total_speed();
+        list.push(DownloadStatus {
+            id: id.clone(),
+            url: session.url.clone(),
+            filename: std::path::Path::new(&session.path)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string()),
+            downloaded,
+            total,
+            speed_bps: speed,
+            status,
+        });
+    }
+    Ok(warp::reply::json(&list))
+}
+
+async fn handle_control(
+    req: ControlRequest,
+    app_handle: Arc<tauri::AppHandle>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    use tauri::Manager;
+    let state = app_handle.state::<crate::core_state::AppState>();
+    let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(session) = downloads.get(&req.id) {
+        match req.action.as_str() {
+            "pause" => {
+                let _ = session.stop_tx.send(());
+                return Ok(warp::reply::json(&serde_json::json!({"success":true})));    
+            }
+            "cancel" => {
+                let _ = session.stop_tx.send(());
+                downloads.remove(&req.id);
+                return Ok(warp::reply::json(&serde_json::json!({"success":true})));    
+            }
+            _ => {
+                return Ok(warp::reply::json(&serde_json::json!({"success":false, "message":"unknown action"})));    
+            }
+        }
+    }
+    Ok(warp::reply::json(&serde_json::json!({"success":false, "message":"id not found"})))
+}
+
 async fn handle_batch(
     links: Vec<BatchLink>,
     batch_tx: Arc<BatchSender>,
@@ -344,6 +598,10 @@ async fn handle_batch(
     }
 
     let count = links.len();
+    if let Ok(_) = get_event_sender().send(serde_json::json!({
+        "type": "batch_links",
+        "count": count
+    })) {}
     match batch_tx.send(links) {
         Ok(_) => {
             let response = DownloadResponse {
@@ -357,6 +615,60 @@ async fn handle_batch(
             let response = DownloadResponse {
                 success: false,
                 message: format!("Failed to queue batch: {}", e),
+                id: None,
+            };
+            Ok(warp::reply::json(&response))
+        }
+    }
+}
+
+async fn handle_streams(
+    streams: Vec<DetectedStreamRequest>,
+    stream_tx: Arc<StreamSender>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    // Validate URLs
+    for s in &streams {
+        match url::Url::parse(&s.url) {
+            Ok(parsed) => {
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    let response = DownloadResponse {
+                        success: false,
+                        message: format!("Invalid URL scheme: {}", s.url),
+                        id: None,
+                    };
+                    return Ok(warp::reply::json(&response));
+                }
+            }
+            Err(_) => {
+                let response = DownloadResponse {
+                    success: false,
+                    message: format!("Invalid URL: {}", s.url),
+                    id: None,
+                };
+                return Ok(warp::reply::json(&response));
+            }
+        }
+    }
+
+    let count = streams.len();
+    let _ = get_event_sender().send(serde_json::json!({
+        "type": "detected_streams",
+        "count": count
+    }));
+
+    match stream_tx.send(streams) {
+        Ok(_) => {
+            let response = DownloadResponse {
+                success: true,
+                message: format!("{} streams detected", count),
+                id: None,
+            };
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let response = DownloadResponse {
+                success: false,
+                message: format!("Failed to forward streams: {}", e),
                 id: None,
             };
             Ok(warp::reply::json(&response))

@@ -317,6 +317,17 @@ impl ResponseValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn default_retry_config() {
+        let cfg = RetryConfig::default();
+        assert_eq!(cfg.max_immediate_retries, 3);
+        assert_eq!(cfg.max_delayed_retries, 5);
+        assert_eq!(cfg.initial_delay, Duration::from_secs(1));
+        assert!(cfg.max_delay >= cfg.initial_delay);
+        assert!(cfg.jitter_factor >= 0.0 && cfg.jitter_factor <= 1.0);
+    }
 
     #[test]
     fn test_analyze_status() {
@@ -331,6 +342,8 @@ mod tests {
         let d1 = Duration::from_secs(1);
         let d2 = calculate_backoff(d1, &config);
         assert!(d2 >= Duration::from_secs(2));
+        // jitter should keep result <= max_delay
+        assert!(d2 <= config.max_delay);
         
         // Should cap at max
         let big = Duration::from_secs(100);
@@ -339,8 +352,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_retry_after() {
+        assert_eq!(parse_retry_after("10"), Some(Duration::from_secs(10)));
+        assert_eq!(parse_retry_after("0"), Some(Duration::from_secs(0)));
+        assert_eq!(parse_retry_after("not-a-number"), None);
+    }
+
+    #[test]
     fn test_captive_portal_detection() {
         assert!(is_captive_portal(b"<!DOCTYPE html><html>Login required</html>"));
         assert!(!is_captive_portal(b"\x50\x4B\x03\x04")); // ZIP magic bytes
+    }
+
+    #[test]
+    fn response_validator_checks() {
+        let mut v = ResponseValidator::new();
+        // missing range support
+        v.require_range_support = true;
+        let res = v.validate(StatusCode::OK, Some(100), Some("text/html"), Some("none"));
+        assert!(res.is_err());
+
+        // allow partial content
+        let res2 = v.validate(StatusCode::PARTIAL_CONTENT, Some(100), Some("application/octet-stream"), Some("bytes"));
+        assert!(res2.is_ok());
     }
 }

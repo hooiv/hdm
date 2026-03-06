@@ -149,6 +149,70 @@ pub struct Settings {
     pub torrent_priority_overrides: HashMap<String, String>,
     #[serde(default)]
     pub torrent_pinned_hashes: HashSet<String>,
+
+    // Download Queue Management
+    #[serde(default = "default_max_concurrent_downloads")]
+    pub max_concurrent_downloads: u32,
+
+    // Network Recovery
+    #[serde(default = "default_true")]
+    pub auto_resume_on_reconnect: bool,
+
+    // Crash Recovery
+    #[serde(default = "default_true")]
+    pub auto_resume_after_crash: bool,
+
+    // Auto-sort downloads into category folders
+    #[serde(default = "default_true")]
+    pub auto_sort_downloads: bool,
+
+    // Scan downloads with system antivirus after completion
+    #[serde(default)]
+    pub scan_after_download: bool,
+
+    // Integrity Verification
+    #[serde(default)]
+    pub auto_checksum_verify: bool,
+
+    // Speed Profiles (time-based bandwidth scheduling)
+    #[serde(default)]
+    pub speed_profiles: Vec<SpeedProfile>,
+    #[serde(default)]
+    pub speed_profiles_enabled: bool,
+
+    // Quiet Hours — defer new/scheduled downloads during specified window
+    #[serde(default)]
+    pub quiet_hours_enabled: bool,
+    #[serde(default = "default_quiet_hours_start")]
+    pub quiet_hours_start: u32, // 0-23, hour of day
+    #[serde(default = "default_quiet_hours_end")]
+    pub quiet_hours_end: u32,   // 0-23, hour of day
+    /// "defer" = don't start new downloads, "throttle" = apply speed_limit during window
+    #[serde(default = "default_quiet_hours_action")]
+    pub quiet_hours_action: String,
+    /// Speed limit KB/s when quiet hours action is "throttle" (0 = 50 KB/s minimum)
+    #[serde(default = "default_quiet_hours_throttle_kbps")]
+    pub quiet_hours_throttle_kbps: u64,
+}
+
+/// A time-based speed limit profile (e.g. "limit to 500 KB/s from 9:00 to 17:00")
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeedProfile {
+    /// Human-readable name (e.g. "Work Hours")
+    pub name: String,
+    /// Start time as "HH:MM" (24h format)
+    pub start_time: String,
+    /// End time as "HH:MM" (24h format)
+    pub end_time: String,
+    /// Speed limit in KB/s (0 = unlimited)
+    pub speed_limit_kbps: u64,
+    /// Days of the week this profile applies (0=Mon, 6=Sun). Empty = every day.
+    #[serde(default)]
+    pub days: Vec<u8>,
+}
+
+fn default_max_concurrent_downloads() -> u32 {
+    5
 }
 
 fn default_torrent_max_active_downloads() -> u32 {
@@ -165,6 +229,22 @@ fn default_torrent_seed_ratio_limit() -> f64 {
 
 fn default_torrent_seed_time_limit_mins() -> u32 {
     180
+}
+
+fn default_quiet_hours_start() -> u32 {
+    23
+}
+
+fn default_quiet_hours_end() -> u32 {
+    7
+}
+
+fn default_quiet_hours_action() -> String {
+    "defer".to_string()
+}
+
+fn default_quiet_hours_throttle_kbps() -> u64 {
+    50
 }
 
 impl Default for Settings {
@@ -247,6 +327,19 @@ impl Default for Settings {
             torrent_seed_time_limit_mins: default_torrent_seed_time_limit_mins(),
             torrent_priority_overrides: HashMap::new(),
             torrent_pinned_hashes: HashSet::new(),
+            max_concurrent_downloads: default_max_concurrent_downloads(),
+            auto_resume_on_reconnect: true,
+            auto_resume_after_crash: true,
+            auto_sort_downloads: true,
+            scan_after_download: false,
+            auto_checksum_verify: false,
+            speed_profiles: Vec::new(),
+            speed_profiles_enabled: false,
+            quiet_hours_enabled: false,
+            quiet_hours_start: default_quiet_hours_start(),
+            quiet_hours_end: default_quiet_hours_end(),
+            quiet_hours_action: default_quiet_hours_action(),
+            quiet_hours_throttle_kbps: default_quiet_hours_throttle_kbps(),
         }
     }
 }
