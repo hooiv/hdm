@@ -1,0 +1,2 @@
+src/components/settings/GeneralTab.tsx(289,62): error TS2322: Type '{ icon: ForwardRefExoticComponent<Omit<LucideProps, "ref"> & RefAttributes<SVGSVGElement>>; title: string; subtitle: string; }' is not assignable to type 'IntrinsicAttributes & { icon: LucideIcon; title: string; }'.
+  Property 'subtitle' does not exist on type 'IntrinsicAttributes & { icon: LucideIcon; title: string; }'.

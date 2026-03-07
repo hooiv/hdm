@@ -1175,129 +1175,101 @@ async fn start_download(
 
 
 
-#[tauri::command]
-async fn pause_download(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    // first try regular downloads
-    {
-        let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(session) = downloads.remove(&id) {
-            // Capture segment state BEFORE sending stop signal to avoid losing up to 5s of progress
-            let segments = session.manager.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
-            let total_downloaded: u64 = segments.iter()
-                .map(|s| s.downloaded_cursor.saturating_sub(s.start_byte))
-                .sum();
-            
-            let _ = session.stop_tx.send(());
-            
-            // Update persistence with accurate segment state
-            let filename = std::path::Path::new(&session.path)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_else(|| "download".to_string());
-            
-            let saved = persistence::SavedDownload {
-                id: id.clone(),
-                url: session.url.clone(),
-                path: session.path.clone(),
-                filename,
-                total_size: session.manager.lock().unwrap_or_else(|e| e.into_inner()).file_size,
-                downloaded_bytes: total_downloaded,
-                status: "Paused".to_string(),
-                segments: Some(segments),
-                last_active: Some(chrono::Utc::now().to_rfc3339()),
-                error_message: None,
-            };
-            let _ = persistence::upsert_download(saved);
-            
-            // Notify queue manager that a slot opened (download paused)
-            {
-                let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                queue.mark_finished(&id);
+mod pause_download_cmd {
+    use super::*;
+    #[tauri::command]
+    pub async fn pause_download(
+        id: String,
+        state: tauri::State<'_, AppState>,
+    ) -> Result<(), String> {
+        // first try regular downloads
+        {
+            let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(session) = downloads.remove(&id) {
+                let segments = session.manager.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
+                let total_downloaded: u64 = segments.iter()
+                    .map(|s| s.downloaded_cursor.saturating_sub(s.start_byte))
+                    .sum();
+                let _ = session.stop_tx.send(());
+                let filename = std::path::Path::new(&session.path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "download".to_string());
+                let saved = persistence::SavedDownload {
+                    id: id.clone(),
+                    url: session.url.clone(),
+                    path: session.path.clone(),
+                    filename,
+                    total_size: session.manager.lock().unwrap_or_else(|e| e.into_inner()).file_size,
+                    downloaded_bytes: total_downloaded,
+                    status: "Paused".to_string(),
+                    segments: Some(segments),
+                    last_active: Some(chrono::Utc::now().to_rfc3339()),
+                    error_message: None,
+                };
+                let _ = persistence::upsert_download(saved);
+                {
+                    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                    queue.mark_finished(&id);
+                }
+                return Ok(());
             }
-            
-            return Ok(());
         }
-    }
-    // then try hls-specific sessions
-    {
-        let mut hls = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(session) = hls.remove(&id) {
-            let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
-            let _ = session.stop_tx.send(());
-            // simply persist the byte count; URL is stored as manifest_url
-            let saved = persistence::SavedDownload {
-                id: id.clone(),
-                url: session.manifest_url.clone(),
-                path: std::path::Path::new(&session.manifest_url)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "download".into()),
-                filename: std::path::Path::new(&session.manifest_url)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "".to_string()),
-                total_size: session.segment_sizes.iter().sum(),
-                downloaded_bytes: downloaded,
-                status: "Paused".to_string(),
-                segments: None,
-                last_active: Some(chrono::Utc::now().to_rfc3339()),
-                error_message: None,
-            };
-            let _ = persistence::upsert_download(saved);
-            // Notify queue manager that a slot opened (HLS paused)
-            {
-                let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                queue.mark_finished(&id);
+        {
+            let mut hls = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(session) = hls.remove(&id) {
+                let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
+                let _ = session.stop_tx.send(());
+                let saved = persistence::SavedDownload {
+                    id: id.clone(),
+                    url: session.manifest_url.clone(),
+                    path: std::path::Path::new(&session.manifest_url).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "download".into()),
+                    filename: std::path::Path::new(&session.manifest_url).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "".to_string()),
+                    total_size: session.segment_sizes.iter().sum(),
+                    downloaded_bytes: downloaded,
+                    status: "Paused".to_string(),
+                    segments: None,
+                    last_active: Some(chrono::Utc::now().to_rfc3339()),
+                    error_message: None,
+                };
+                let _ = persistence::upsert_download(saved);
+                { let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner()); queue.mark_finished(&id); }
+                return Ok(());
             }
-            return Ok(());
         }
-    }
-    // then try DASH sessions
-    {
-        let mut dash = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(session) = dash.remove(&id) {
-            let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
-            let _ = session.stop_tx.send(());
-            let total = session.video_total + session.audio_total;
-            let saved = persistence::SavedDownload {
-                id: id.clone(),
-                url: session.manifest_url.clone(),
-                path: std::path::Path::new(&session.manifest_url)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "download".into()),
-                filename: std::path::Path::new(&session.manifest_url)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "".to_string()),
-                total_size: total,
-                downloaded_bytes: downloaded,
-                status: "Paused".to_string(),
-                segments: None,
-                last_active: Some(chrono::Utc::now().to_rfc3339()),
-                error_message: None,
-            };
-            let _ = persistence::upsert_download(saved);
-            {
-                let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                queue.mark_finished(&id);
+        {
+            let mut dash = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(session) = dash.remove(&id) {
+                let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
+                let _ = session.stop_tx.send(());
+                let total = session.video_total + session.audio_total;
+                let saved = persistence::SavedDownload {
+                    id: id.clone(),
+                    url: session.manifest_url.clone(),
+                    path: std::path::Path::new(&session.manifest_url).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "download".into()),
+                    filename: std::path::Path::new(&session.manifest_url).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "".to_string()),
+                    total_size: total,
+                    downloaded_bytes: downloaded,
+                    status: "Paused".to_string(),
+                    segments: None,
+                    last_active: Some(chrono::Utc::now().to_rfc3339()),
+                    error_message: None,
+                };
+                let _ = persistence::upsert_download(saved);
+                { let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner()); queue.mark_finished(&id); }
+                return Ok(());
             }
-            return Ok(());
         }
-    }
-    
-    // Fallback: update persistence if session wasn't found (already stopped)
-    if let Ok(downloads) = persistence::load_downloads() {
-        if let Some(mut d) = downloads.into_iter().find(|d| d.id == id) {
-            d.status = "Paused".to_string();
-            let _ = persistence::upsert_download(d);
+        if let Ok(downloads) = persistence::load_downloads() {
+            if let Some(mut d) = downloads.into_iter().find(|d| d.id == id) {
+                d.status = "Paused".to_string();
+                let _ = persistence::upsert_download(d);
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
+pub(crate) use pause_download_cmd::pause_download;
 
 #[tauri::command]
 fn get_downloads() -> Result<Vec<SavedDownload>, String> {
@@ -1383,6 +1355,8 @@ fn enqueue_download(
 ) -> Result<(), String> {
     let prio = priority.map(|p| queue_manager::DownloadPriority::from_str(&p))
         .unwrap_or(queue_manager::DownloadPriority::Normal);
+    let settings = settings::load_settings();
+    let max_retries = settings.queue_retry_max_retries;
 
     let item = queue_manager::QueuedDownload {
         id,
@@ -1393,7 +1367,7 @@ fn enqueue_download(
         custom_headers,
         expected_checksum,
         retry_count: 0,
-        max_retries: 3,
+        max_retries,
         retry_delay_ms: 0,
     };
 
@@ -1442,6 +1416,73 @@ fn move_queue_item_to_front(id: String) -> Result<bool, String> {
 fn set_max_concurrent_downloads(max: u32) -> Result<(), String> {
     let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     queue.set_max_concurrent(max);
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_download_url(
+    id: String,
+    new_url: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    // 1. Fetch from persistence to check status and size
+    let mut all_downloads = persistence::load_downloads()?;
+    
+    let mut download_to_update = None;
+    for d in all_downloads.iter_mut() {
+        if d.id == id {
+            download_to_update = Some(d);
+            break;
+        }
+    }
+    
+    let download = download_to_update.ok_or_else(|| "Download not found".to_string())?;
+    
+    // Safety check: Don't allow updating URL if it's currently downloading
+    if download.status == "Downloading" || download.status == "Initializing" {
+        return Err("Please pause the download before updating its address".to_string());
+    }
+    
+    let original_size = download.total_size;
+    
+    // 2. Head check the new URL
+    let config = crate::downloader::http_client::HttpClientConfig::default();
+    let client = crate::downloader::http_client::build_stealth_client(&config)
+        .map_err(|e| format!("Client error: {}", e))?;
+    
+    let scout = crate::downloader::http_client::FirstByteScout::new(client);
+    let caps = scout.probe(&new_url).await.map_err(|e| format!("Failed to probe new URL: {}", e))?;
+    
+    // 3. Verify size matches if we knew the original size
+    if original_size > 0 && caps.content_length.unwrap_or(0) > 0 {
+        let new_size = caps.content_length.unwrap();
+        if original_size != new_size {
+            return Err(format!(
+                "Size mismatch: The new URL points to a file of {} bytes, but the original was {} bytes. \
+                This would cause corruption. Please ensure the link is for the exact same file.", 
+                new_size, original_size
+            ));
+        }
+    }
+    
+    // 4. Update the URL
+    download.url = new_url.clone();
+    
+    // 5. Save back to disk
+    persistence::save_downloads(&all_downloads)?;
+    
+    // 6. Update in-memory state
+    if let Ok(mut map) = state.downloads.lock() {
+        if let Some(in_mem) = map.get_mut(&id) {
+            in_mem.url = new_url;
+        }
+    }
+    
+    // Emit refresh event
+    let _ = app.emit("downloads_refresh", ());
+    let _ = app.emit("queue_updated", ());
+    
     Ok(())
 }
 
@@ -1561,6 +1602,7 @@ async fn save_settings(
     }
     // Update clipboard monitor
     clipboard::CLIPBOARD_MONITOR.set_enabled(new_settings.clipboard_monitor);
+    state.connection_manager.set_default_limit(new_settings.max_connections_per_host.max(1).min(64) as usize);
     settings::save_settings(&new_settings)?;
 
     if let Some(tm) = state.torrent_manager.as_ref() {
@@ -1679,12 +1721,21 @@ fn open_folder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn schedule_download(id: String, url: String, filename: String, scheduled_time: String) -> Result<(), String> {
+fn schedule_download(
+    id: String, 
+    url: String, 
+    filename: String, 
+    scheduled_time: String,
+    stop_time: Option<String>,
+    end_action: Option<String>
+) -> Result<(), String> {
     scheduler::add_scheduled_download(scheduler::ScheduledDownload {
         id,
         url,
         filename,
         scheduled_time,
+        stop_time,
+        end_action,
         status: "pending".to_string(),
     });
     Ok(())
@@ -3494,11 +3545,12 @@ fn classify_network_requests(
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             start_download, 
-            pause_download, 
+            pause_download_cmd::pause_download, 
             get_downloads, 
             list_active_downloads,
             install_native_host,
             remove_download_entry, 
+            update_download_url,
             get_settings,
             get_auth_token,
             save_settings,
@@ -3943,6 +3995,7 @@ fn classify_network_requests(
             ));
             chatops_manager.start();
 
+            let conn_limit = crate::settings::load_settings().max_connections_per_host.max(1).min(64) as usize;
             // Manage AppState for Tauri's State<> system
             app.handle().manage(AppState { 
                  downloads: Mutex::new(HashMap::new()),
@@ -3951,7 +4004,7 @@ fn classify_network_requests(
                  p2p_node: p2p_node.clone(),
                  p2p_file_map: p2p_file_map.clone(),
                  torrent_manager: torrent_manager.clone(),
-                 connection_manager: network::connection_manager::ConnectionManager::default(),
+                 connection_manager: network::connection_manager::ConnectionManager::new(conn_limit),
                  chatops_manager: chatops_manager.clone(),
             });
 

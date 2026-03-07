@@ -34,12 +34,16 @@ export const Toggle: React.FC<{
   </div>
 );
 
-export const SectionHeader: React.FC<{ icon: LucideIcon; title: string }> = ({
+export const SectionHeader: React.FC<{ icon: LucideIcon; title: string, subtitle?: string }> = ({
   icon: Icon,
   title,
+  subtitle,
 }) => (
-  <div className="flex items-center gap-2 mb-4 pb-2 border-b border-slate-700/50 text-blue-400">
-    <Icon size={18} />
-    <h3 className="font-semibold text-sm uppercase tracking-wider">{title}</h3>
+  <div className="flex flex-col gap-1 mb-4 pb-2 border-b border-slate-700/50 text-blue-400">
+    <div className="flex items-center gap-2">
+      <Icon size={18} />
+      <h3 className="font-semibold text-sm uppercase tracking-wider">{title}</h3>
+    </div>
+    {subtitle && <p className="text-xs text-slate-500 font-normal">{subtitle}</p>}
   </div>
 );

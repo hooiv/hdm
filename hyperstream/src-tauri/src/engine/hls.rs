@@ -493,7 +493,7 @@ mod tests {
             p2p_node: Arc::new(network::p2p::P2PNode::new()),
             p2p_file_map: http_server::FileMap::new(),
             torrent_manager: None,
-            connection_manager: ConnectionManager::new(),
+            connection_manager: ConnectionManager::default(),
             chatops_manager: Arc::new(network::chatops::ChatOpsManager::new()),
         }
     }

@@ -2,10 +2,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  ListOrdered, Trash2, ArrowUp, ArrowBigUp, ChevronUp, ChevronDown,
+  ListOrdered, ArrowUp, ArrowBigUp, ChevronUp, ChevronDown,
   RefreshCw, Play, X, Settings2, AlertCircle
 } from 'lucide-react';
-import { formatBytes } from '../utils/formatters';
 
 interface QueuedDownload {
   id: string;

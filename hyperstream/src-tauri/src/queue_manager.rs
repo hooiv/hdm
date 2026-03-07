@@ -264,13 +264,17 @@ impl DownloadQueue {
 
     /// Re-queue a failed download for automatic retry.
     /// Returns `true` if the download was re-queued, `false` if max retries reached.
+    /// Uses settings for base/max delay (exponential backoff).
     pub fn requeue_failed(&mut self, mut item: QueuedDownload) -> bool {
         if item.retry_count >= item.max_retries {
             return false;
         }
         item.retry_count += 1;
-        // Exponential backoff: base 5s, doubled each retry, capped at 5 min
-        item.retry_delay_ms = (5000u64 * (1u64 << item.retry_count.min(6))).min(300_000);
+        let s = crate::settings::load_settings();
+        let base_ms = s.queue_retry_base_delay_secs as u64 * 1000;
+        let max_ms = s.queue_retry_max_delay_secs as u64 * 1000;
+        // Exponential backoff: base * 2^retry_count, capped at max
+        item.retry_delay_ms = (base_ms.saturating_mul(1u64 << item.retry_count.min(12))).min(max_ms);
         // Demote to low priority on retry so fresh downloads get priority
         if item.retry_count >= 2 {
             item.priority = DownloadPriority::Low;
@@ -347,14 +351,16 @@ pub fn persist_queue() {
     }
 }
 
-/// Restore the queue from disk on startup.
+/// Restore the queue from disk on startup. Skips invalid items (missing id/url) to avoid poisoning the queue.
 pub fn restore_queue() {
     let path = get_queue_store_path();
     if let Ok(data) = std::fs::read_to_string(&path) {
         if let Ok(items) = serde_json::from_str::<Vec<QueuedDownload>>(&data) {
             let mut queue = DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
             for item in items {
-                queue.enqueue(item);
+                if !item.id.is_empty() && !item.url.is_empty() {
+                    queue.enqueue(item);
+                }
             }
         }
     }

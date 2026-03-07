@@ -46,6 +46,25 @@ impl Default for RetryConfig {
     }
 }
 
+/// Build RetryConfig from numeric settings (e.g. from app Settings).
+/// Used so segment workers use consistent, configurable retry behavior.
+#[inline]
+pub fn retry_config_from(
+    max_immediate: u32,
+    max_delayed: u32,
+    initial_delay_secs: u64,
+    max_delay_secs: u64,
+    jitter_factor: f64,
+) -> RetryConfig {
+    RetryConfig {
+        max_immediate_retries: max_immediate,
+        max_delayed_retries: max_delayed,
+        initial_delay: Duration::from_secs(initial_delay_secs),
+        max_delay: Duration::from_secs(max_delay_secs),
+        jitter_factor: jitter_factor.clamp(0.0, 1.0),
+    }
+}
+
 /// Tracks retry state for a download
 #[derive(Debug, Clone)]
 pub struct RetryState {

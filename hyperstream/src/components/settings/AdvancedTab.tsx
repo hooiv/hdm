@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Activity, ShieldAlert, Key, Copy, Check, Upload, Download, Loader2 } from "lucide-react";
+import { Activity, ShieldAlert, Key, Copy, Check, Upload, Download, Loader2, RefreshCw } from "lucide-react";
 import { SettingsData } from "./types";
 import { Toggle, SectionHeader } from "./SharedComponents";
 import { useToast } from "../../contexts/ToastContext";
@@ -94,6 +94,125 @@ export const AdvancedTab: React.FC<AdvancedTabProps> = ({
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
       <SectionHeader icon={Activity} title="Advanced" />
+
+      {/* Retry & recovery — production-grade backoff (segment + queue) */}
+      <div className="p-5 rounded-xl border bg-slate-800/20 border-slate-700/30">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center border border-amber-500/20">
+            <RefreshCw size={20} className="text-amber-400" />
+          </div>
+          <div>
+            <h3 className="text-slate-200 font-semibold">Retry &amp; recovery</h3>
+            <p className="text-xs text-slate-500">
+              Segment retries (per connection) and queue retries (whole download). Exponential backoff with jitter.
+            </p>
+          </div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Segment: max immediate retries</label>
+            <input
+              type="number"
+              min={0}
+              max={20}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm"
+              value={settings.segment_retry_max_immediate ?? 3}
+              onChange={(e) => setSettings({ ...settings, segment_retry_max_immediate: Math.min(20, Math.max(0, parseInt(e.target.value, 10) || 0)) })}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Segment: max delayed retries</label>
+            <input
+              type="number"
+              min={0}
+              max={30}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm"
+              value={settings.segment_retry_max_delayed ?? 5}
+              onChange={(e) => setSettings({ ...settings, segment_retry_max_delayed: Math.min(30, Math.max(0, parseInt(e.target.value, 10) || 0)) })}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Segment: initial delay (s)</label>
+            <input
+              type="number"
+              min={0}
+              max={60}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm"
+              value={settings.segment_retry_initial_delay_secs ?? 1}
+              onChange={(e) => setSettings({ ...settings, segment_retry_initial_delay_secs: Math.min(60, Math.max(0, parseInt(e.target.value, 10) || 0)) })}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Segment: max delay (s)</label>
+            <input
+              type="number"
+              min={1}
+              max={600}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm"
+              value={settings.segment_retry_max_delay_secs ?? 60}
+              onChange={(e) => setSettings({ ...settings, segment_retry_max_delay_secs: Math.min(600, Math.max(1, parseInt(e.target.value, 10) || 60)) })}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Segment: jitter (0–1)</label>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.1}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm"
+              value={settings.segment_retry_jitter ?? 0.3}
+              onChange={(e) => setSettings({ ...settings, segment_retry_jitter: Math.min(1, Math.max(0, parseFloat(e.target.value) || 0.3)) })}
+            />
+          </div>
+          <div className="space-y-1" />
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Queue: max retries per download</label>
+            <input
+              type="number"
+              min={0}
+              max={50}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm"
+              value={settings.queue_retry_max_retries ?? 5}
+              onChange={(e) => setSettings({ ...settings, queue_retry_max_retries: Math.min(50, Math.max(0, parseInt(e.target.value, 10) || 0)) })}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Queue: base delay (s)</label>
+            <input
+              type="number"
+              min={0}
+              max={300}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm"
+              value={settings.queue_retry_base_delay_secs ?? 5}
+              onChange={(e) => setSettings({ ...settings, queue_retry_base_delay_secs: Math.min(300, Math.max(0, parseInt(e.target.value, 10) || 0)) })}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Queue: max delay (s)</label>
+            <input
+              type="number"
+              min={1}
+              max={86400}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm"
+              value={settings.queue_retry_max_delay_secs ?? 300}
+              onChange={(e) => setSettings({ ...settings, queue_retry_max_delay_secs: Math.min(86400, Math.max(1, parseInt(e.target.value, 10) || 300)) })}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400">Stall timeout (s)</label>
+            <input
+              type="number"
+              min={30}
+              max={86400}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 text-sm"
+              value={settings.stall_timeout_secs ?? 120}
+              onChange={(e) => setSettings({ ...settings, stall_timeout_secs: Math.min(86400, Math.max(30, parseInt(e.target.value, 10) || 120)) })}
+            />
+            <p className="text-xs text-slate-500">No progress for this long → mark failed and allow retry.</p>
+          </div>
+        </div>
+      </div>
 
       {/* Browser Extension Auth Token */}
       <div className="p-5 rounded-xl border bg-slate-800/20 border-slate-700/30">

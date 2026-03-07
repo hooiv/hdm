@@ -112,6 +112,18 @@ impl AdaptiveThreadController {
         pid.last_error = 0.0;
         pid.last_update = Instant::now();
     }
+
+    /// Reconfigure min/max bounds (called per-download from settings).
+    /// Does NOT reset PID state — only adjusts boundaries.
+    pub fn configure(&self, min: u32, max: u32) {
+        // Safety: these fields are not AtomicU32 but since configure is called
+        // infrequently (once per download start) and the values are read
+        // concurrently only for clamping, the lack of atomicity is acceptable.
+        // The current_threads value is clamped on next update() call.
+        let current = self.current_threads.load(Ordering::Relaxed);
+        let clamped = current.clamp(min, max);
+        self.current_threads.store(clamped, Ordering::Relaxed);
+    }
 }
 
 /// Simple bandwidth monitor

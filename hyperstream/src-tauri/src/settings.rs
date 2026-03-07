@@ -193,6 +193,48 @@ pub struct Settings {
     /// Speed limit KB/s when quiet hours action is "throttle" (0 = 50 KB/s minimum)
     #[serde(default = "default_quiet_hours_throttle_kbps")]
     pub quiet_hours_throttle_kbps: u64,
+
+    /// Enable adaptive segment splitting — dynamically add connections mid-download
+    /// when slow segments are detected (IDM-style acceleration).
+    #[serde(default = "default_true")]
+    pub adaptive_splitting: bool,
+
+    // ── Production-grade retry & backoff (segment-level) ─────────────────────
+    /// Max immediate retries per segment (connection errors, TCP reset).
+    #[serde(default = "default_segment_max_immediate_retries")]
+    pub segment_retry_max_immediate: u32,
+    /// Max delayed retries per segment (timeouts, 5xx, rate limit).
+    #[serde(default = "default_segment_retry_max_delayed")]
+    pub segment_retry_max_delayed: u32,
+    /// Initial backoff delay in seconds for segment retries.
+    #[serde(default = "default_segment_retry_initial_delay_secs")]
+    pub segment_retry_initial_delay_secs: u32,
+    /// Max backoff cap in seconds for segment retries.
+    #[serde(default = "default_segment_retry_max_delay_secs")]
+    pub segment_retry_max_delay_secs: u32,
+    /// Jitter factor 0.0–1.0 for segment backoff (reduces thundering herd).
+    #[serde(default = "default_segment_retry_jitter")]
+    pub segment_retry_jitter: f64,
+
+    // ── Queue-level retry (whole-download retry after failure) ──────────────
+    /// Max automatic retries for a failed download in the queue (0 = no auto-retry).
+    #[serde(default = "default_queue_max_retries")]
+    pub queue_retry_max_retries: u32,
+    /// Base delay in seconds before first queue retry (doubles each attempt).
+    #[serde(default = "default_queue_retry_base_delay_secs")]
+    pub queue_retry_base_delay_secs: u32,
+    /// Max delay cap in seconds between queue retries.
+    #[serde(default = "default_queue_retry_max_delay_secs")]
+    pub queue_retry_max_delay_secs: u32,
+
+    /// Stall timeout in seconds: if no bytes received for this long, the download is marked failed and can be retried.
+    #[serde(default = "default_stall_timeout_secs")]
+    pub stall_timeout_secs: u32,
+
+    /// Max concurrent connections per host (domain). Used by ConnectionManager for
+    /// new hosts when no site rule applies. IDM-style; reduces server load and avoids bans.
+    #[serde(default = "default_max_connections_per_host")]
+    pub max_connections_per_host: u32,
 }
 
 /// A time-based speed limit profile (e.g. "limit to 500 KB/s from 9:00 to 17:00")
@@ -245,6 +287,37 @@ fn default_quiet_hours_action() -> String {
 
 fn default_quiet_hours_throttle_kbps() -> u64 {
     50
+}
+
+fn default_segment_max_immediate_retries() -> u32 {
+    3
+}
+fn default_segment_retry_max_delayed() -> u32 {
+    5
+}
+fn default_segment_retry_initial_delay_secs() -> u32 {
+    1
+}
+fn default_segment_retry_max_delay_secs() -> u32 {
+    60
+}
+fn default_segment_retry_jitter() -> f64 {
+    0.3
+}
+fn default_queue_max_retries() -> u32 {
+    5
+}
+fn default_queue_retry_base_delay_secs() -> u32 {
+    5
+}
+fn default_queue_retry_max_delay_secs() -> u32 {
+    300
+}
+fn default_stall_timeout_secs() -> u32 {
+    120
+}
+fn default_max_connections_per_host() -> u32 {
+    8
 }
 
 impl Default for Settings {
@@ -340,6 +413,17 @@ impl Default for Settings {
             quiet_hours_end: default_quiet_hours_end(),
             quiet_hours_action: default_quiet_hours_action(),
             quiet_hours_throttle_kbps: default_quiet_hours_throttle_kbps(),
+            adaptive_splitting: true,
+            segment_retry_max_immediate: default_segment_max_immediate_retries(),
+            segment_retry_max_delayed: default_segment_retry_max_delayed(),
+            segment_retry_initial_delay_secs: default_segment_retry_initial_delay_secs(),
+            segment_retry_max_delay_secs: default_segment_retry_max_delay_secs(),
+            segment_retry_jitter: default_segment_retry_jitter(),
+            queue_retry_max_retries: default_queue_max_retries(),
+            queue_retry_base_delay_secs: default_queue_retry_base_delay_secs(),
+            queue_retry_max_delay_secs: default_queue_retry_max_delay_secs(),
+            stall_timeout_secs: default_stall_timeout_secs(),
+            max_connections_per_host: default_max_connections_per_host(),
         }
     }
 }
@@ -401,6 +485,31 @@ pub fn load_settings() -> Settings {
     if settings.torrent_seed_time_limit_mins > 10_080 {
         settings.torrent_seed_time_limit_mins = default_torrent_seed_time_limit_mins();
     }
+    // Retry settings: clamp to sane ranges
+    if settings.segment_retry_max_immediate > 20 {
+        settings.segment_retry_max_immediate = default_segment_max_immediate_retries();
+    }
+    if settings.segment_retry_max_delayed > 30 {
+        settings.segment_retry_max_delayed = default_segment_retry_max_delayed();
+    }
+    if settings.segment_retry_max_delay_secs > 600 {
+        settings.segment_retry_max_delay_secs = default_segment_retry_max_delay_secs();
+    }
+    if !(0.0..=1.0).contains(&settings.segment_retry_jitter) {
+        settings.segment_retry_jitter = default_segment_retry_jitter();
+    }
+    if settings.queue_retry_max_retries > 50 {
+        settings.queue_retry_max_retries = default_queue_max_retries();
+    }
+    if settings.queue_retry_max_delay_secs > 86400 {
+        settings.queue_retry_max_delay_secs = default_queue_retry_max_delay_secs();
+    }
+    if settings.max_connections_per_host == 0 || settings.max_connections_per_host > 64 {
+        settings.max_connections_per_host = default_max_connections_per_host();
+    }
+    if settings.stall_timeout_secs == 0 || settings.stall_timeout_secs > 86400 {
+        settings.stall_timeout_secs = default_stall_timeout_secs();
+    }
     let mut normalized_priorities = HashMap::new();
     for (hash, priority) in std::mem::take(&mut settings.torrent_priority_overrides) {
         if !is_valid_info_hash(&hash) {
@@ -460,6 +569,27 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
         if !is_valid_info_hash(hash) {
             return Err(format!("Invalid pinned torrent info hash: {}", hash));
         }
+    }
+    if settings.segment_retry_max_immediate > 20 {
+        return Err("segment_retry_max_immediate must be 0–20".to_string());
+    }
+    if settings.segment_retry_max_delayed > 30 {
+        return Err("segment_retry_max_delayed must be 0–30".to_string());
+    }
+    if !(0.0..=1.0).contains(&settings.segment_retry_jitter) {
+        return Err("segment_retry_jitter must be between 0.0 and 1.0".to_string());
+    }
+    if settings.queue_retry_max_retries > 50 {
+        return Err("queue_retry_max_retries must be 0–50".to_string());
+    }
+    if settings.queue_retry_base_delay_secs > settings.queue_retry_max_delay_secs {
+        return Err("queue_retry_base_delay_secs cannot exceed queue_retry_max_delay_secs".to_string());
+    }
+    if settings.max_connections_per_host == 0 || settings.max_connections_per_host > 64 {
+        return Err("max_connections_per_host must be between 1 and 64".to_string());
+    }
+    if settings.stall_timeout_secs == 0 || settings.stall_timeout_secs > 86400 {
+        return Err("stall_timeout_secs must be between 1 and 86400".to_string());
     }
     // Validate category rule regexes
     for rule in &settings.category_rules {

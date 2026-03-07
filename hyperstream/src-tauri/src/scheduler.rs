@@ -22,7 +22,9 @@ pub struct ScheduledDownload {
     pub url: String,
     pub filename: String,
     pub scheduled_time: String, // ISO 8601 format
-    pub status: String, // "pending", "started", "completed", "cancelled"
+    pub stop_time: Option<String>,
+    pub end_action: Option<String>,
+    pub status: String, // "pending", "started", "completed", "cancelled", "stopped"
 }
 
 fn get_store_path() -> std::path::PathBuf {
@@ -33,7 +35,7 @@ fn get_store_path() -> std::path::PathBuf {
 }
 
 fn save_to_disk(scheduled: &HashMap<String, ScheduledDownload>) {
-    let pending: Vec<_> = scheduled.values().filter(|d| d.status == "pending").collect();
+    let pending: Vec<_> = scheduled.values().filter(|d| d.status == "pending" || d.status == "started").collect();
     if let Ok(data) = serde_json::to_string_pretty(&pending) {
         let path = get_store_path();
         if let Some(parent) = path.parent() {
@@ -48,8 +50,13 @@ fn load_from_disk() {
     if let Ok(data) = std::fs::read_to_string(&path) {
         if let Ok(items) = serde_json::from_str::<Vec<ScheduledDownload>>(&data) {
             let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
-            for item in items {
-                if item.status == "pending" {
+            for mut item in items {
+                if item.status == "pending" || item.status == "started" {
+                    // After restart, "started" items are orphaned (no running download).
+                    // Treat as pending so they can be re-triggered on next scheduler tick.
+                    if item.status == "started" {
+                        item.status = "pending".to_string();
+                    }
                     scheduled.insert(item.id.clone(), item);
                 }
             }
@@ -85,6 +92,46 @@ pub fn get_scheduled_downloads() -> Vec<ScheduledDownload> {
     scheduled.values().cloned().collect()
 }
 
+pub fn handle_download_complete(id: &str) {
+    let end_action = {
+        let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(download) = scheduled.get_mut(id) {
+            download.status = "completed".to_string();
+            download.end_action.clone()
+        } else {
+            None
+        }
+    };
+    
+    if let Some(action) = end_action {
+        match action.to_lowercase().as_str() {
+            "exit" => {
+                println!("[Scheduler] End action triggered: exit");
+                std::process::exit(0);
+            },
+            "sleep" => {
+                println!("[Scheduler] End action triggered: sleep");
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("rundll32.exe")
+                        .args(["powrprof.dll,SetSuspendState", "0,1,0"])
+                        .spawn();
+                }
+            },
+            "shutdown" => {
+                println!("[Scheduler] End action triggered: shutdown");
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("shutdown")
+                        .args(["/s", "/t", "0"])
+                        .spawn();
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
 pub fn check_scheduled_downloads<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
     let now = Local::now();
     let quiet = is_quiet_hours();
@@ -96,6 +143,27 @@ pub fn check_scheduled_downloads<R: tauri::Runtime>(app_handle: &tauri::AppHandl
         let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
         
         for (_id, download) in scheduled.iter_mut() {
+            if download.status == "started" {
+                if let Some(stop_time_str) = &download.stop_time {
+                    if let Ok(stop_time) = DateTime::parse_from_rfc3339(stop_time_str) {
+                        let stop_local = stop_time.with_timezone(&Local);
+                        if now >= stop_local {
+                            println!("[Scheduler] Stop time reached for {}", download.id);
+                            download.status = "stopped".to_string();
+                            
+                            let dl_id = download.id.clone();
+                            let app_clone = app_handle.clone();
+                            tokio::spawn(async move {
+                                use tauri::Manager;
+                                let state = app_clone.state::<crate::core_state::AppState>();
+                                let _ = crate::pause_download(dl_id, state).await;
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+
             if download.status != "pending" {
                 continue;
             }

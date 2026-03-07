@@ -1,22 +1,29 @@
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Semaphore, OwnedSemaphorePermit};
 use url::Url;
 
-/// Manages concurrent connection limits per domain
+/// Manages concurrent connection limits per domain (IDM-style).
+/// Limits are applied per host; site rules can override per-URL.
 #[derive(Debug, Clone)]
 pub struct ConnectionManager {
-    // Map domain -> Semaphore
     semaphores: Arc<DashMap<String, Arc<Semaphore>>>,
-    default_limit: usize,
+    /// Default max connections for a host when no site rule applies. Updated at runtime when settings change.
+    default_limit: Arc<AtomicUsize>,
 }
 
 impl ConnectionManager {
     pub fn new(default_limit: usize) -> Self {
         Self {
             semaphores: Arc::new(DashMap::new()),
-            default_limit,
+            default_limit: Arc::new(AtomicUsize::new(default_limit.max(1))),
         }
+    }
+
+    /// Update the default per-host connection limit (for new hosts). Existing domain semaphores are unchanged.
+    pub fn set_default_limit(&self, limit: usize) {
+        self.default_limit.store(limit.max(1), Ordering::Relaxed);
     }
 
     /// Set a custom connection limit for a specific domain.
@@ -42,10 +49,10 @@ impl ConnectionManager {
     pub async fn acquire(&self, url_str: &str) -> Result<OwnedSemaphorePermit, String> {
         let domain = self.extract_domain(url_str);
         
-        // Get or create semaphore for this domain
+        let limit = self.default_limit.load(Ordering::Relaxed);
         let semaphore = self.semaphores
             .entry(domain)
-            .or_insert_with(|| Arc::new(Semaphore::new(self.default_limit)))
+            .or_insert_with(|| Arc::new(Semaphore::new(limit)))
             .clone();
 
         // Acquire permit (waits if limit reached)

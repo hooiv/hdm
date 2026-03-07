@@ -286,6 +286,156 @@ impl DownloadManager {
         Some(stolen)
     }
 
+    /// Number of segments currently in `Downloading` state.
+    pub fn active_segment_count(&self) -> usize {
+        self.segments
+            .read()
+            .map(|segs| segs.iter().filter(|s| s.state == SegmentState::Downloading).count())
+            .unwrap_or(0)
+    }
+
+    /// Average speed (bytes/sec) across all active (Downloading) segments.
+    /// Returns 0 if no segments are active.
+    pub fn average_active_speed(&self) -> u64 {
+        if let Ok(segs) = self.segments.read() {
+            let active: Vec<_> = segs
+                .iter()
+                .filter(|s| s.state == SegmentState::Downloading)
+                .collect();
+            if active.is_empty() {
+                return 0;
+            }
+            let total_speed: u64 = active.iter().map(|s| s.speed_bps).sum();
+            total_speed / active.len() as u64
+        } else {
+            0
+        }
+    }
+
+    /// **PROACTIVE DYNAMIC SEGMENT SPLITTING**
+    ///
+    /// Analyzes all active segments and splits those running significantly
+    /// slower than the average. This is the IDM-style feature that dynamically
+    /// adds connections mid-download to maximize throughput.
+    ///
+    /// Only splits when:
+    /// - Current active count < `max_active`
+    /// - The segment's speed is < 50% of average active speed
+    /// - The segment has enough remaining bytes (> `min_split_size * 2`)
+    ///
+    /// Returns a vec of `StolenWork` — one per split performed. The caller
+    /// should spawn a new worker for each.
+    pub fn find_splittable_segments(&self, max_active: u32) -> Vec<StolenWork> {
+        let mut segments = match self.segments.write() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+
+        let active_count = segments
+            .iter()
+            .filter(|s| s.state == SegmentState::Downloading)
+            .count() as u32;
+
+        if active_count >= max_active {
+            return Vec::new();
+        }
+
+        // Calculate average speed across active segments
+        let active_speeds: Vec<(usize, u64, u64)> = segments
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.state == SegmentState::Downloading)
+            .filter(|(_, s)| s.remaining() >= self.config.min_split_size * 2)
+            .map(|(i, s)| (i, s.speed_bps, s.remaining()))
+            .collect();
+
+        if active_speeds.is_empty() {
+            return Vec::new();
+        }
+
+        let avg_speed: u64 = {
+            let total: u64 = active_speeds.iter().map(|(_, spd, _)| spd).sum();
+            total / active_speeds.len() as u64
+        };
+
+        // Don't split if average speed is 0 (download just started, no data yet)
+        if avg_speed == 0 {
+            return Vec::new();
+        }
+
+        // Find segments running below 50% of average speed, sorted by most remaining bytes
+        let slow_threshold = avg_speed / 2;
+        let mut candidates: Vec<usize> = active_speeds
+            .iter()
+            .filter(|(_, spd, _)| *spd < slow_threshold)
+            .map(|(idx, _, _)| *idx)
+            .collect();
+
+        // Sort by most remaining bytes descending (split the largest slow segments first)
+        candidates.sort_by(|a, b| {
+            segments[*b].remaining().cmp(&segments[*a].remaining())
+        });
+
+        let mut splits_available = (max_active - active_count) as usize;
+        let mut results = Vec::new();
+
+        for target_idx in candidates {
+            if splits_available == 0 {
+                break;
+            }
+
+            let remaining = segments[target_idx].remaining();
+            if remaining < self.config.min_split_size * 2 {
+                continue;
+            }
+
+            let steal_bytes = (remaining as f64 * self.config.steal_ratio) as u64;
+            let split_point = segments[target_idx].end_byte - steal_bytes;
+
+            if split_point <= segments[target_idx].downloaded_cursor {
+                continue;
+            }
+
+            // Generate new segment ID
+            let new_id = {
+                let mut id_lock = match self.next_segment_id.write() {
+                    Ok(l) => l,
+                    Err(e) => e.into_inner(),
+                };
+                let id = *id_lock;
+                *id_lock += 1;
+                id
+            };
+
+            let original_end = segments[target_idx].end_byte;
+            let original_id = segments[target_idx].id;
+
+            // Create the new segment for the upper half
+            let mut new_segment = Segment::new(new_id, split_point, original_end);
+            new_segment.state = SegmentState::Downloading;
+
+            // Shrink the original segment
+            segments[target_idx].end_byte = split_point;
+
+            println!(
+                "[DynamicSplit] Split segment {} at byte {} → new segment {} ({}-{}), remaining: {} bytes",
+                original_id, split_point, new_id, split_point, original_end,
+                original_end - split_point
+            );
+
+            let stolen = StolenWork {
+                original_segment_id: original_id,
+                new_segment: new_segment.clone(),
+            };
+
+            segments.push(new_segment);
+            results.push(stolen);
+            splits_available -= 1;
+        }
+
+        results
+    }
+
     /// Get a snapshot of all segments for UI display
     pub fn get_segments_snapshot(&self) -> Vec<Segment> {
         self.segments.read().map(|s| s.clone()).unwrap_or_default()
@@ -385,5 +535,67 @@ mod tests {
 
         let stolen = manager.on_segment_complete(0);
         assert!(stolen.is_none(), "Should not steal when segment is too small");
+    }
+
+    #[test]
+    fn test_find_splittable_segments() {
+        let manager = DownloadManager::new(100_000_000, 4); // 100MB, 4 segments
+
+        // Start all segments
+        for i in 0..4 {
+            manager.start_segment(i);
+        }
+
+        // Simulate one segment being very slow (1 KB/s) while others are fast (1 MB/s)
+        manager.update_progress(0, 25_000_100, 1_000); // slow
+        manager.update_progress(1, 50_000_100, 1_000_000); // fast
+        manager.update_progress(2, 75_000_100, 1_000_000); // fast
+        manager.update_progress(3, 99_000_000, 1_000_000); // fast, almost done
+
+        // Allow up to 8 active connections
+        let splits = manager.find_splittable_segments(8);
+        assert!(!splits.is_empty(), "Should have split the slow segment");
+
+        // The slow segment (0) should have been split
+        let split_from_0 = splits.iter().any(|s| s.original_segment_id == 0);
+        assert!(split_from_0, "Segment 0 (the slow one) should have been split");
+
+        // Verify new segment is valid
+        let new_seg = &splits[0].new_segment;
+        assert!(new_seg.len() > 0, "New segment should have positive length");
+        assert_eq!(new_seg.state, SegmentState::Downloading, "New segment should start as Downloading");
+    }
+
+    #[test]
+    fn test_split_respects_max_active() {
+        let manager = DownloadManager::new(100_000_000, 4);
+
+        for i in 0..4 {
+            manager.start_segment(i);
+        }
+
+        // All segments slow
+        for i in 0..4 {
+            let cursor = (i as u64 + 1) * 25_000_100;
+            manager.update_progress(i, cursor, 1_000);
+        }
+
+        // max_active = 4, already have 4 active → should return nothing
+        let splits = manager.find_splittable_segments(4);
+        assert!(splits.is_empty(), "Should not split when already at max active");
+    }
+
+    #[test]
+    fn test_active_segment_count() {
+        let manager = DownloadManager::new(100_000_000, 4);
+
+        assert_eq!(manager.active_segment_count(), 0, "No active segments initially");
+
+        manager.start_segment(0);
+        manager.start_segment(1);
+        assert_eq!(manager.active_segment_count(), 2, "Two segments downloading");
+
+        manager.complete_segment(0);
+        assert_eq!(manager.active_segment_count(), 1, "One segment after completing one");
     }
 }

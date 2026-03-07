@@ -4,6 +4,23 @@ use tokio::sync::broadcast;
 use crate::core_state::*;
 use crate::*;
 
+/// After a download failure or stall: try queue retry; if not retrying, release queue slot,
+/// deregister bandwidth, and remove session from AppState. Call once per failed download.
+fn handle_download_failure_cleanup(app: &tauri::AppHandle, id: &str) {
+    if !try_auto_retry(app, id) {
+        let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        queue.mark_finished(id);
+        drop(queue);
+        crate::bandwidth_allocator::ALLOCATOR.deregister(id);
+        if let Some(app_state) = app.try_state::<crate::core_state::AppState>() {
+            let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+            downloads.remove(id);
+        }
+    } else {
+        crate::bandwidth_allocator::ALLOCATOR.deregister(id);
+    }
+}
+
 /// Try to auto-retry a failed download via the queue system.
 /// Returns true if the download was re-queued for retry.
 fn try_auto_retry(app: &tauri::AppHandle, id: &str) -> bool {
@@ -150,6 +167,13 @@ pub(crate) async fn start_download_impl(
     
     // Load settings once for the entire download initialization
     let settings = settings::load_settings();
+    let segment_retry_config = crate::downloader::network::retry_config_from(
+        settings.segment_retry_max_immediate,
+        settings.segment_retry_max_delayed,
+        settings.segment_retry_initial_delay_secs as u64,
+        settings.segment_retry_max_delay_secs as u64,
+        settings.segment_retry_jitter,
+    );
     
     // VPN Auto-Connect (Tier 1)
     {
@@ -479,6 +503,18 @@ pub(crate) async fn start_download_impl(
     let stop_tx_monitor = stop_tx.clone();
     let chatops_monitor = state.chatops_manager.clone();
     let disk_io_error_monitor = disk_io_error.clone();
+    // Additional clones for dynamic worker spawning
+    let tx_monitor = tx.clone();
+    let client_monitor = client.clone();
+    let cm_monitor = state.connection_manager.clone();
+    let adaptive_splitting_enabled = settings.adaptive_splitting && supports_range;
+    let max_dynamic_threads = settings.max_threads.max(settings.segments);
+    let dynamic_retry_config = segment_retry_config.clone();
+    let stall_timeout = std::time::Duration::from_secs(settings.stall_timeout_secs.max(1).min(86400) as u64);
+    // Configure PID controller from settings
+    if settings.min_threads > 0 && settings.max_threads > 0 {
+        crate::adaptive_threads::THREAD_CONTROLLER.configure(settings.min_threads, settings.max_threads);
+    }
     
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(33)); // ~30fps
@@ -487,8 +523,8 @@ pub(crate) async fn start_download_impl(
         // Stall & failure detection state
         let mut last_progress_bytes: u64 = 0;
         let mut stall_since: Option<std::time::Instant> = None;
-        let stall_timeout = std::time::Duration::from_secs(120); // 2 minutes of zero progress
         let mut last_pid_update = std::time::Instant::now();
+        let mut last_split_check = std::time::Instant::now();
         // Per-segment speed tracking: segment_id -> (last_cursor, last_time, ema_speed)
         let mut seg_speed_state: std::collections::HashMap<u32, (u64, std::time::Instant, f64)> = std::collections::HashMap::new();
         const SPEED_EMA_ALPHA: f64 = 0.3; // Smoothing factor for per-segment EMA
@@ -535,21 +571,7 @@ pub(crate) async fn start_download_impl(
                                 }),
                             });
                         }
-                        // Auto-retry if retries remain
-                        if !try_auto_retry(&window_monitor, &id_monitor) {
-                            // No retry possible — release queue slot and clean up
-                            {
-                                let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                                queue.mark_finished(&id_monitor);
-                            }
-                            crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
-                            if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
-                                let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                                downloads.remove(&id_monitor);
-                            }
-                        } else {
-                            crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
-                        }
+                        handle_download_failure_cleanup(&window_monitor, &id_monitor);
                         break;
                     }
 
@@ -658,20 +680,7 @@ pub(crate) async fn start_download_impl(
                                     }),
                                 });
                             }
-                            // Auto-retry if retries remain
-                            if !try_auto_retry(&window_monitor, &id_monitor) {
-                                {
-                                    let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                                    queue.mark_finished(&id_monitor);
-                                }
-                                crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
-                                if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
-                                    let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                                    downloads.remove(&id_monitor);
-                                }
-                            } else {
-                                crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
-                            }
+                            handle_download_failure_cleanup(&window_monitor, &id_monitor);
                             break;
                         }
 
@@ -741,20 +750,7 @@ pub(crate) async fn start_download_impl(
                                             }),
                                         });
                                     }
-                                    // Auto-retry if retries remain
-                                    if !try_auto_retry(&window_monitor, &id_monitor) {
-                                        {
-                                            let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                                            queue.mark_finished(&id_monitor);
-                                        }
-                                        crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
-                                        if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
-                                            let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                                            downloads.remove(&id_monitor);
-                                        }
-                                    } else {
-                                        crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
-                                    }
+                                    handle_download_failure_cleanup(&window_monitor, &id_monitor);
                                     break;
                                 }
                             }
@@ -777,6 +773,269 @@ pub(crate) async fn start_download_impl(
                         }
                     }
 
+                    // ── DYNAMIC SEGMENT SPLITTING (IDM-style acceleration) ──
+                    // Every 5 seconds, check if the PID controller recommends
+                    // more connections than we currently have. If so, split the
+                    // slowest segments and spawn new workers.
+                    if adaptive_splitting_enabled
+                        && total_size > 0
+                        && d < total_size
+                        && last_split_check.elapsed() >= std::time::Duration::from_secs(5)
+                    {
+                        last_split_check = std::time::Instant::now();
+                        let recommended = crate::adaptive_threads::recommended_threads().max(1);
+                        let target = recommended.min(max_dynamic_threads);
+
+                        let splits = {
+                            let m = manager_monitor.lock().unwrap_or_else(|e| e.into_inner());
+                            m.find_splittable_segments(target)
+                        };
+
+                        for work in splits {
+                            let seg = work.new_segment;
+                            let seg_id = seg.id;
+                            let start_pos = seg.start_byte;
+                            let end_pos = seg.end_byte;
+
+                            println!(
+                                "[DynamicSplit] Spawning worker for segment {} ({}-{}, {} bytes)",
+                                seg_id, start_pos, end_pos, end_pos - start_pos
+                            );
+
+                            // Clone resources for the new worker
+                            let mgr = manager_monitor.clone();
+                            let url_w = url_monitor.clone();
+                            let tx_w = tx_monitor.clone();
+                            let cl_w = client_monitor.clone();
+                            let dl_w = downloaded_monitor.clone();
+                            let cm_w = cm_monitor.clone();
+                            let mut stop_w = stop_tx_monitor.subscribe();
+                            let stop_tx_w = stop_tx_monitor.clone();
+                            let id_w = id_monitor.clone();
+                            let path_w = path_monitor.clone();
+                            let app_w = window_monitor.clone();
+                            let dio_w = disk_io_error_monitor.clone();
+                            let retry_config = dynamic_retry_config.clone();
+
+                            tokio::spawn(async move {
+                                let mut current_pos = start_pos;
+                                let end = end_pos;
+                                let mut seg_id_dyn = seg_id;
+                                let mut retry_state = crate::downloader::network::RetryState::from_config(&retry_config);
+                                let mut bytes_since_cursor_update: u64 = 0;
+                                const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024;
+                                let mut end_dyn = end;
+
+                                loop {
+                                    if stop_w.try_recv().is_ok() {
+                                        let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                        if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                            s.downloaded_cursor = current_pos;
+                                            s.state = crate::downloader::structures::SegmentState::Paused;
+                                        }
+                                        break;
+                                    }
+
+                                    if dio_w.load(std::sync::atomic::Ordering::Acquire) {
+                                        let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                        if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                            s.downloaded_cursor = current_pos;
+                                            s.state = crate::downloader::structures::SegmentState::Error;
+                                        }
+                                        break;
+                                    }
+
+                                    if current_pos >= end_dyn {
+                                        let stolen = {
+                                            let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                            m.on_segment_complete(seg_id_dyn)
+                                        };
+                                        if let Some(w) = stolen {
+                                            seg_id_dyn = w.new_segment.id;
+                                            current_pos = w.new_segment.start_byte;
+                                            end_dyn = w.new_segment.end_byte;
+                                            retry_state = crate::downloader::network::RetryState::from_config(&retry_config);
+                                            bytes_since_cursor_update = 0;
+                                            continue;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+
+                                    let range_header = format!("bytes={}-{}", current_pos, end_dyn - 1);
+                                    let _permit = cm_w.acquire(&url_w).await.ok();
+
+                                    let res = tokio::select! {
+                                        _ = stop_w.recv() => {
+                                            let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                            let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                            if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                s.downloaded_cursor = current_pos;
+                                                s.state = crate::downloader::structures::SegmentState::Paused;
+                                            }
+                                            break;
+                                        }
+                                        r = cl_w.get(&url_w).header("Range", &range_header).send() => r
+                                    };
+
+                                    let response = match res {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            let strategy = crate::downloader::network::analyze_error(&e);
+                                            retry_state.last_error = Some(format!("{}", e));
+                                            match strategy {
+                                                crate::downloader::network::RetryStrategy::Fatal(_) => {
+                                                    let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                                    if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                        s.downloaded_cursor = current_pos;
+                                                        s.state = crate::downloader::structures::SegmentState::Error;
+                                                    }
+                                                    break;
+                                                }
+                                                crate::downloader::network::RetryStrategy::Immediate => {
+                                                    retry_state.immediate_attempts += 1;
+                                                    if retry_state.immediate_attempts > retry_config.max_immediate_retries {
+                                                        let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                                        if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                            s.downloaded_cursor = current_pos;
+                                                            s.state = crate::downloader::structures::SegmentState::Error;
+                                                        }
+                                                        break;
+                                                    }
+                                                    continue;
+                                                }
+                                                crate::downloader::network::RetryStrategy::Delayed(delay) => {
+                                                    retry_state.delayed_attempts += 1;
+                                                    if retry_state.delayed_attempts > retry_config.max_delayed_retries {
+                                                        let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                                        if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                            s.downloaded_cursor = current_pos;
+                                                            s.state = crate::downloader::structures::SegmentState::Error;
+                                                        }
+                                                        break;
+                                                    }
+                                                    let backoff = crate::downloader::network::calculate_backoff(
+                                                        delay.max(retry_state.current_delay), &retry_config,
+                                                    );
+                                                    retry_state.current_delay = backoff;
+                                                    tokio::time::sleep(delay).await;
+                                                    continue;
+                                                }
+                                                crate::downloader::network::RetryStrategy::RefreshLink => {
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    };
+
+                                    // Handle 403/410 and rate limiting for dynamic workers
+                                    if response.status() == rquest::StatusCode::FORBIDDEN || response.status() == rquest::StatusCode::GONE {
+                                        let _ = stop_tx_w.send(());
+                                        return;
+                                    }
+                                    if response.status() == rquest::StatusCode::TOO_MANY_REQUESTS || response.status() == rquest::StatusCode::SERVICE_UNAVAILABLE {
+                                        retry_state.delayed_attempts += 1;
+                                        if retry_state.delayed_attempts > retry_config.max_delayed_retries {
+                                            let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                            let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                            if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                s.downloaded_cursor = current_pos;
+                                                s.state = crate::downloader::structures::SegmentState::Error;
+                                            }
+                                            break;
+                                        }
+                                        let wait = if let Some(h) = response.headers().get("Retry-After") {
+                                            if let Ok(s) = h.to_str() {
+                                                crate::downloader::network::parse_retry_after(s)
+                                                    .unwrap_or(std::time::Duration::from_secs(30))
+                                            } else {
+                                                std::time::Duration::from_secs(30)
+                                            }
+                                        } else {
+                                            crate::downloader::network::calculate_backoff(retry_state.current_delay, &retry_config)
+                                        };
+                                        retry_state.current_delay = wait;
+                                        tokio::time::sleep(wait).await;
+                                        continue;
+                                    }
+
+                                    retry_state.reset_with_delay(retry_config.initial_delay);
+
+                                    let mut stream = response.bytes_stream();
+                                    loop {
+                                        tokio::select! {
+                                            _ = stop_w.recv() => {
+                                                let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                                let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                                if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                    s.downloaded_cursor = current_pos;
+                                                    s.state = crate::downloader::structures::SegmentState::Paused;
+                                                }
+                                                return;
+                                            }
+                                            item = stream.next() => {
+                                                match item {
+                                                    Some(Ok(chunk)) => {
+                                                        let remaining = end_dyn.saturating_sub(current_pos) as usize;
+                                                        let safe_chunk = if chunk.len() > remaining {
+                                                            &chunk[..remaining]
+                                                        } else {
+                                                            &chunk[..]
+                                                        };
+                                                        let len = safe_chunk.len() as u64;
+                                                        if len == 0 { break; }
+
+                                                        crate::speed_limiter::GLOBAL_LIMITER.acquire(len).await;
+                                                        crate::bandwidth_allocator::ALLOCATOR.acquire(&id_w, len).await;
+
+                                                        if tx_w.send(WriteRequest { offset: current_pos, data: safe_chunk.to_vec(), segment_id: seg_id_dyn }).is_err() {
+                                                            return;
+                                                        }
+                                                        current_pos += len;
+                                                        dl_w.fetch_add(len, Ordering::Relaxed);
+
+                                                        bytes_since_cursor_update += len;
+                                                        if bytes_since_cursor_update >= CURSOR_UPDATE_THRESHOLD {
+                                                            bytes_since_cursor_update = 0;
+                                                            let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                                            let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                                            if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                                s.downloaded_cursor = current_pos;
+                                                            }
+                                                        }
+                                                    }
+                                                    Some(Err(_stream_err)) => {
+                                                        retry_state.delayed_attempts += 1;
+                                                        if retry_state.delayed_attempts > retry_config.max_delayed_retries {
+                                                            let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                                            let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                                            if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                                s.downloaded_cursor = current_pos;
+                                                                s.state = crate::downloader::structures::SegmentState::Error;
+                                                            }
+                                                            return;
+                                                        }
+                                                        let backoff = crate::downloader::network::calculate_backoff(retry_state.current_delay, &retry_config);
+                                                        retry_state.current_delay = backoff;
+                                                        tokio::time::sleep(backoff).await;
+                                                        break;
+                                                    }
+                                                    None => break,
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    // ── END DYNAMIC SEGMENT SPLITTING ──
+
                     // Compress to tuple format
                     let slim_segments: Vec<SlimSegment> = segments.iter().map(|s| (
                         s.id,
@@ -798,6 +1057,7 @@ pub(crate) async fn start_download_impl(
 
                     if total_size > 0 && d >= total_size {
                         crate::media::sounds::play_complete();
+                        crate::scheduler::handle_download_complete(&id_monitor);
                         crate::cas_manager::register_cas(etag_monitor.as_deref(), md5_monitor.as_deref(), &path_monitor);
                         // Log download completed event
                         if let Some(log) = window_monitor.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
@@ -1065,6 +1325,7 @@ pub(crate) async fn start_download_impl(
         let app_handle_clone = app.clone(); // Capture app handle for emitting events
         let total_size_worker = total_size; // u64 is Copy
         let disk_io_error_worker = disk_io_error.clone();
+        let retry_config = segment_retry_config.clone();
 
         let handle = tokio::spawn(async move {
             let (start, mut end, mut seg_id) = {
@@ -1080,7 +1341,6 @@ pub(crate) async fn start_download_impl(
             if end == 0 || start >= end { return; }
 
             let mut current_pos = start;
-            let retry_config = crate::downloader::network::RetryConfig::default();
             let mut retry_state = crate::downloader::network::RetryState::from_config(&retry_config);
             let mut bytes_since_cursor_update: u64 = 0;
             const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024; // Update cursor every 256KB

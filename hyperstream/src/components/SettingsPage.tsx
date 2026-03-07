@@ -98,6 +98,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     quiet_hours_throttle_kbps: 50,
     speed_profiles_enabled: false,
     speed_profiles: [],
+    segment_retry_max_immediate: 3,
+    segment_retry_max_delayed: 5,
+    segment_retry_initial_delay_secs: 1,
+    segment_retry_max_delay_secs: 60,
+    segment_retry_jitter: 0.3,
+    queue_retry_max_retries: 5,
+    queue_retry_base_delay_secs: 5,
+    queue_retry_max_delay_secs: 300,
+    adaptive_splitting: true,
+    stall_timeout_secs: 120,
+    max_connections_per_host: 8,
   });
 
   const [saved, setSaved] = useState(false);

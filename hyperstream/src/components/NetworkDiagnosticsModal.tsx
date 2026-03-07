@@ -4,10 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
   Wifi,
-  WifiOff,
-  Shield,
   Fingerprint,
-  Globe,
   Loader2,
   CheckCircle,
   XCircle,

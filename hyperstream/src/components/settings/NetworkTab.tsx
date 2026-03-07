@@ -30,6 +30,29 @@ export const NetworkTab: React.FC<NetworkTabProps> = ({
     <div className="space-y-8 animate-in fade-in duration-300">
       <SectionHeader icon={Globe} title="Network & Privacy" />
 
+      {/* Per-host connection limit (IDM-style) */}
+      <div className="space-y-2 bg-slate-800/20 rounded-xl p-5 border border-slate-700/30">
+        <label className="text-sm font-medium text-slate-400">
+          Max connections per host
+        </label>
+        <input
+          type="number"
+          min={1}
+          max={64}
+          value={settings.max_connections_per_host ?? 8}
+          onChange={(e) =>
+            setSettings({
+              ...settings,
+              max_connections_per_host: Math.min(64, Math.max(1, parseInt(e.target.value, 10) || 8)),
+            })
+          }
+          className="w-full max-w-xs bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-blue-500/50"
+        />
+        <p className="text-xs text-slate-500">
+          Limits concurrent connections to each server (domain). Reduces load and avoids bans. Site rules can override per-URL.
+        </p>
+      </div>
+
       {/* Proxies and VPN */}
       <div className="space-y-4 bg-slate-800/20 rounded-xl p-5 border border-slate-700/30">
         <Toggle

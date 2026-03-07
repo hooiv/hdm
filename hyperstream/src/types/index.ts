@@ -187,6 +187,19 @@ export interface AppSettings {
     // Speed Profiles
     speed_profiles_enabled: boolean;
     speed_profiles: SpeedProfile[];
+    // Retry & backoff (segment-level)
+    segment_retry_max_immediate: number;
+    segment_retry_max_delayed: number;
+    segment_retry_initial_delay_secs: number;
+    segment_retry_max_delay_secs: number;
+    segment_retry_jitter: number;
+    // Queue-level retry
+    queue_retry_max_retries: number;
+    queue_retry_base_delay_secs: number;
+    queue_retry_max_delay_secs: number;
+    adaptive_splitting: boolean;
+    stall_timeout_secs: number;
+    max_connections_per_host: number;
 }
 
 /** Time-based speed limit profile */
