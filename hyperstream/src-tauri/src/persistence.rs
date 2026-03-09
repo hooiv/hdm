@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -27,6 +28,27 @@ pub struct SavedDownload {
     pub error_message: Option<String>,
 }
 
+/// Persistent health and cooldown state for a mirror host.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MirrorHostHealth {
+    #[serde(default)]
+    pub success_count: u32,
+    #[serde(default)]
+    pub failure_count: u32,
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    #[serde(default)]
+    pub quarantine_count: u32,
+    #[serde(default)]
+    pub cooldown_until: Option<String>,
+    #[serde(default)]
+    pub last_success_at: Option<String>,
+    #[serde(default)]
+    pub last_failure_at: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
 /// Get the path to the downloads.json file
 fn get_storage_path() -> PathBuf {
     if let Some(config_dir) = dirs::config_dir() {
@@ -38,29 +60,41 @@ fn get_storage_path() -> PathBuf {
     PathBuf::from(home).join(".hyperstream").join("downloads.json")
 }
 
-/// Save downloads to disk atomically (write to temp file, then rename)
-pub fn save_downloads(downloads: &[SavedDownload]) -> Result<(), String> {
-    let path = get_storage_path();
-    
-    // Create directory if it doesn't exist
+fn get_mirror_host_health_path() -> PathBuf {
+    if let Some(config_dir) = dirs::config_dir() {
+        return config_dir.join("hyperstream").join("mirror-host-health.json");
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".hyperstream")
+        .join("mirror-host-health.json")
+}
+
+fn write_json_atomically<T: Serialize>(path: &PathBuf, value: &T) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
     }
-    
-    let json = serde_json::to_string_pretty(downloads)
+
+    let json = serde_json::to_string_pretty(value)
         .map_err(|e| format!("Failed to serialize: {}", e))?;
-    
-    // Write to temp file first, then rename for crash-safe atomicity
+
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write temp file: {}", e))?;
-    if let Err(_rename_err) = fs::rename(&tmp_path, &path) {
-        // Rename failed — try direct write as fallback (cross-device rename)
-        fs::write(&path, &json).map_err(|e| format!("Failed to write file: {}", e))?;
-        // Clean up orphaned temp file
+    if let Err(_rename_err) = fs::rename(&tmp_path, path) {
+        fs::write(path, &json).map_err(|e| format!("Failed to write file: {}", e))?;
         let _ = fs::remove_file(&tmp_path);
     }
-    
+
     Ok(())
+}
+
+/// Save downloads to disk atomically (write to temp file, then rename)
+pub fn save_downloads(downloads: &[SavedDownload]) -> Result<(), String> {
+    let path = get_storage_path();
+
+    write_json_atomically(&path, downloads)
 }
 
 /// Load downloads from disk
@@ -76,6 +110,26 @@ pub fn load_downloads() -> Result<Vec<SavedDownload>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("Failed to read file: {}", e)),
     }
+}
+
+pub fn load_mirror_host_health() -> Result<HashMap<String, MirrorHostHealth>, String> {
+    let path = get_mirror_host_health_path();
+
+    match fs::read_to_string(&path) {
+        Ok(json) => {
+            let health: HashMap<String, MirrorHostHealth> = serde_json::from_str(&json)
+                .map_err(|e| format!("Failed to deserialize: {}", e))?;
+            Ok(health)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(e) => Err(format!("Failed to read file: {}", e)),
+    }
+}
+
+pub fn save_mirror_host_health(health: &HashMap<String, MirrorHostHealth>) -> Result<(), String> {
+    let _lock = PERSISTENCE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = get_mirror_host_health_path();
+    write_json_atomically(&path, health)
 }
 
 /// Add or update a download in the saved list

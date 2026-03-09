@@ -7,7 +7,7 @@ import { useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { formatBytes } from '../utils/formatters';
-import type { DownloadTask } from '../types';
+import type { DiscoveredMirror, DownloadTask } from '../types';
 import type {
     WaybackSnapshot,
     UpscaleResult,
@@ -30,8 +30,13 @@ import type {
     ReplayResult,
 } from '../api/commands';
 
-export function useDownloadActions(task: DownloadTask, filePath: string) {
+interface UseDownloadActionsOptions {
+    onDiscoveredMirrors?: (taskId: string, mirrors: DiscoveredMirror[]) => void;
+}
+
+export function useDownloadActions(task: DownloadTask, filePath: string, options: UseDownloadActionsOptions = {}) {
     const toast = useToast();
+    const { onDiscoveredMirrors } = options;
     // Keep a stable ref to toast so callbacks never capture a stale toast instance
     // without needing toast in every dependency array.
     const toastRef = useRef(toast);
@@ -71,10 +76,62 @@ export function useDownloadActions(task: DownloadTask, filePath: string) {
         try {
             toastRef.current.info('🔍 Searching for mirrors...');
             const result = await invoke<MirrorResult>('find_mirrors', { path: filePath });
-            const mirrorList = result.mirrors?.map((m) => `${m.source}: ${m.url}`).join('\n') || 'None found';
-            toastRef.current.success(`🔍 Found ${result.mirrors_found} mirror(s)\nSHA-256: ${result.sha256}\nMD5: ${result.md5}\n\n${mirrorList}`);
+            const topMirrors = result.mirrors.slice(0, 5).map((m, index) => {
+                const badges = [m.direct ? 'direct' : 'discovery', m.confidence];
+                if (m.hostname) badges.push(m.hostname);
+                if (m.content_length) badges.push(formatBytes(m.content_length));
+                if (m.supports_range) badges.push('range');
+                return `${index + 1}. ${m.source} — ${badges.join(' — ')}${m.note ? `\n   ${m.note}` : ''}\n   ${m.url}`;
+            }).join('\n');
+
+            toastRef.current.success(
+                `🔍 Mirror intelligence complete\n` +
+                `File: ${result.filename} (${formatBytes(result.file_size)})\n` +
+                `Candidates: ${result.mirrors_found} • Direct: ${result.direct_mirrors_found} • Probe-ready: ${result.probe_ready_mirrors_found}\n` +
+                `SHA-256: ${result.sha256}\n\n` +
+                `${topMirrors || 'No mirror candidates found.'}`
+            );
+
+            const usableMirrors: DiscoveredMirror[] = result.mirrors
+                .filter((m) => m.direct && m.probe_ready)
+                .slice(0, 5)
+                .map((m) => ({
+                    url: m.url,
+                    source: m.source,
+                    confidence: m.confidence,
+                    hostname: m.hostname || undefined,
+                    supportsRange: m.supports_range ?? undefined,
+                    note: m.note ?? undefined,
+                }));
+
+            onDiscoveredMirrors?.(task.id, usableMirrors);
+
+            if (usableMirrors.length > 0) {
+                toastRef.current.info(`🪞 Saved ${usableMirrors.length} mirror candidate${usableMirrors.length === 1 ? '' : 's'} for accelerated resume.`);
+            } else {
+                toastRef.current.info('🪞 No direct recovery-ready mirrors were found to save for resume.');
+            }
+
+            const probeCandidates = usableMirrors
+                .map((m) => [m.url, m.source] as [string, string]);
+
+            if (task.url && probeCandidates.length > 0 && confirm(`Found ${probeCandidates.length} direct mirror(s). Probe them against the current URL now?`)) {
+                toastRef.current.info('📡 Probing discovered mirrors...');
+                const probeResults = await invoke<{ url: string; source: string; latency_ms: number; supports_range: boolean; avg_speed_bps: number; disabled: boolean }[]>('probe_mirrors', {
+                    primaryUrl: task.url,
+                    mirrorUrls: probeCandidates,
+                });
+                const ranked = probeResults
+                    .filter((m) => !m.disabled || m.avg_speed_bps > 0)
+                    .sort((a, b) => b.avg_speed_bps - a.avg_speed_bps || a.latency_ms - b.latency_ms);
+                const summary = ranked.slice(0, 5).map((m, index) =>
+                    `${index === 0 ? '🏆' : '  '} ${m.source} — ${formatBytes(m.avg_speed_bps)}/s — ${m.latency_ms < 999999 ? `${m.latency_ms}ms` : '—'}${m.supports_range ? ' — range' : ''}`
+                ).join('\n');
+
+                toastRef.current.success(`📡 Mirror probe complete\n${summary || 'No mirrors responded during probe.'}`);
+            }
         } catch (err) { toastRef.current.error('Mirror search failed: ' + err); }
-    }, [filePath]);
+    }, [filePath, onDiscoveredMirrors, task.id, task.url]);
 
     const handleFlashToUsb = useCallback(async () => {
         try {

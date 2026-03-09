@@ -246,6 +246,8 @@ export interface DownloadStatus {
     total: number;
     speed_bps?: number;
     status: string;
+    can_pause?: boolean;
+    can_cancel?: boolean;
 }
 
 export interface ControlRequest {
@@ -317,6 +319,19 @@ export interface MirrorStat {
     supports_range: boolean;
     latency_ms: number;
     disabled: boolean;
+    quarantined: boolean;
+    identity_status: string;
+    quarantine_reason?: string;
+    canonical: boolean;
+}
+
+export interface DiscoveredMirror {
+    url: string;
+    source: string;
+    confidence: string;
+    hostname?: string;
+    supportsRange?: boolean;
+    note?: string;
 }
 
 export interface DownloadTask {
@@ -330,6 +345,7 @@ export interface DownloadTask {
     status: 'Downloading' | 'Paused' | 'Error' | 'Done';
     segments?: Segment[];
     mirrorStats?: MirrorStat[];
+    discoveredMirrors?: DiscoveredMirror[];
     errorMessage?: string;
     integrityStatus?: 'verified' | 'failed' | 'pending';
     virusScanStatus?: 'clean' | 'infected' | 'scanning';

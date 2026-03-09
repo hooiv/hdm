@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use rquest::Client;
 use regex::Regex;
 use tauri::{AppHandle, Emitter, Manager};
-use crate::AppState;
+use crate::{search, AppState};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PluginMetadata {
@@ -280,6 +280,19 @@ impl LuaPluginHost {
             }
         }
         
+        Ok(None)
+    }
+
+    pub async fn search(&self, query: &str, default_engine: &str) -> Result<Option<Vec<search::SearchResult>>> {
+        let lua = self.lua.lock().await;
+        let globals = lua.globals();
+
+        if let Ok(search_fn) = globals.get::<_, Function>("search") {
+            let result: Value = search_fn.call_async(query.to_string()).await?;
+            let normalized = search::normalize_provider_results(result, default_engine)?;
+            return Ok(Some(normalized));
+        }
+
         Ok(None)
     }
 

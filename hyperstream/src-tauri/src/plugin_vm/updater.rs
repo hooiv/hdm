@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::fs;
 use reqwest;
 use sha2::{Sha256, Digest};
@@ -62,7 +61,7 @@ pub async fn install_plugin_from_url(app_handle: &tauri::AppHandle, url: String,
     };
 
     // 3. Save to plugins directory
-    let plugins_dir = get_plugins_dir(app_handle);
+    let plugins_dir = crate::plugin_vm::get_plugins_dir(app_handle);
     if !plugins_dir.exists() {
         fs::create_dir_all(&plugins_dir).map_err(|e| format!("Failed to create plugins dir: {}", e))?;
     }
@@ -92,11 +91,4 @@ pub async fn install_plugin_from_url(app_handle: &tauri::AppHandle, url: String,
     fs::write(&target_path, content).map_err(|e| format!("Failed to write plugin file: {}", e))?;
 
     Ok(final_filename)
-}
-
-fn get_plugins_dir(app_handle: &tauri::AppHandle) -> PathBuf {
-    use tauri::Manager;
-    app_handle.path().app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("plugins")
 }

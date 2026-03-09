@@ -116,6 +116,38 @@ pub fn resolve_download_path(path: &str, download_dir: &str) -> Result<std::path
     Ok(full_path)
 }
 
+pub(crate) fn normalize_download_url(raw_url: &str) -> String {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    match url::Url::parse(trimmed) {
+        Ok(mut parsed) => {
+            parsed.set_fragment(None);
+
+            let is_default_port = matches!(
+                (parsed.scheme(), parsed.port()),
+                ("http", Some(80)) | ("https", Some(443))
+            );
+            if is_default_port {
+                let _ = parsed.set_port(None);
+            }
+
+            parsed.to_string()
+        }
+        Err(_) => trimmed.to_string(),
+    }
+}
+
+fn duplicate_download_id_error() -> String {
+    "A download with this ID is already active or queued".to_string()
+}
+
+fn duplicate_download_url_error() -> String {
+    "A download for this URL is already active or queued".to_string()
+}
+
 // (id, start, end, cursor, state, speed)
 
 // ─── Torrent commands ────────────────────────────────────────────────────────
@@ -897,6 +929,7 @@ async fn remove_torrent(
     if let Err(e) = enforce_torrent_policies(tm.as_ref(), &current_settings).await {
         emit_torrent_action_warning(&app, "remove_policy", Some(id), &e);
     }
+    state.unregister_streaming_source(&id.to_string());
     emit_torrent_refresh(&app);
     Ok(())
 }
@@ -1133,43 +1166,42 @@ async fn start_download(
     force: Option<bool>,
     custom_headers: Option<std::collections::HashMap<String, String>>
 ) -> Result<(), String> {
-    // HLS detection path - when the URL appears to be an HLS manifest we
-    // hand the request off to the specialised downloader.  this also ensures
-    // resume behaviour works correctly for previously paused HLS tasks.
-    if url.to_lowercase().ends_with(".m3u8") {
-        return crate::engine::hls::start_hls_download_impl(
-            &app,
-            &state,
-            id,
-            url,
-            path,
-            force.unwrap_or(false),
-            custom_headers,
-        )
-        .await;
+    let force = force.unwrap_or(false);
+
+    if state.has_active_download_id(&id) {
+        return Err(duplicate_download_id_error());
+    }
+    if !force && state.has_active_download_url(&url) {
+        return Err(duplicate_download_url_error());
     }
 
-    // DASH/MPD detection — hand off to the DASH engine
-    if url.to_lowercase().ends_with(".mpd") {
-        return crate::engine::dash::start_dash_download_impl(
-            &app,
-            &state,
-            id,
-            url,
-            path,
-            force.unwrap_or(false),
-            custom_headers,
-        )
-        .await;
-    }
-
-    // Track this download in the queue as active (for concurrency counting)
     {
         let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-        queue.mark_active(&id);
+        if queue.contains(&id) {
+            return Err(duplicate_download_id_error());
+        }
+        if !force && queue.contains_url(&url) {
+            return Err(duplicate_download_url_error());
+        }
+        queue.mark_active(&id, &url);
     }
 
-    start_download_impl(&app, &state, id, url, path, None, custom_headers, force.unwrap_or(false)).await
+    let result = crate::engine::start_download_routed(
+        &app,
+        &state,
+        id.clone(),
+        url,
+        path,
+        custom_headers,
+        force,
+    ).await;
+
+    if result.is_err() {
+        let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        queue.mark_finished(&id);
+    }
+
+    result
 }
 
 
@@ -1177,15 +1209,50 @@ async fn start_download(
 
 mod pause_download_cmd {
     use super::*;
-    #[tauri::command]
-    pub async fn pause_download(
-        id: String,
-        state: tauri::State<'_, AppState>,
-    ) -> Result<(), String> {
+
+    fn collect_active_download_ids(state: &AppState) -> Vec<String> {
+        let mut ids = Vec::new();
+        ids.extend(
+            state
+                .downloads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned(),
+        );
+        ids.extend(
+            state
+                .hls_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned(),
+        );
+        ids.extend(
+            state
+                .dash_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned(),
+        );
+        ids
+    }
+
+    fn mark_queue_finished(id: &str, notify_queue: bool) {
+        let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        if notify_queue {
+            queue.mark_finished(id);
+        } else {
+            queue.mark_finished_silent(id);
+        }
+    }
+
+    fn pause_download_by_id_inner(state: &AppState, id: &str, notify_queue: bool) -> bool {
         // first try regular downloads
         {
             let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(session) = downloads.remove(&id) {
+            if let Some(session) = downloads.remove(id) {
                 let segments = session.manager.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
                 let total_downloaded: u64 = segments.iter()
                     .map(|s| s.downloaded_cursor.saturating_sub(s.start_byte))
@@ -1196,7 +1263,7 @@ mod pause_download_cmd {
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_else(|| "download".to_string());
                 let saved = persistence::SavedDownload {
-                    id: id.clone(),
+                    id: id.to_string(),
                     url: session.url.clone(),
                     path: session.path.clone(),
                     filename,
@@ -1208,23 +1275,25 @@ mod pause_download_cmd {
                     error_message: None,
                 };
                 let _ = persistence::upsert_download(saved);
-                {
-                    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                    queue.mark_finished(&id);
-                }
-                return Ok(());
+                state.unregister_streaming_source(id);
+                mark_queue_finished(id, notify_queue);
+                return true;
             }
         }
         {
             let mut hls = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(session) = hls.remove(&id) {
+            if let Some(session) = hls.remove(id) {
                 let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
                 let _ = session.stop_tx.send(());
+                let filename = std::path::Path::new(&session.output_path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "download".to_string());
                 let saved = persistence::SavedDownload {
-                    id: id.clone(),
+                    id: id.to_string(),
                     url: session.manifest_url.clone(),
-                    path: std::path::Path::new(&session.manifest_url).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "download".into()),
-                    filename: std::path::Path::new(&session.manifest_url).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "".to_string()),
+                    path: session.output_path.clone(),
+                    filename,
                     total_size: session.segment_sizes.iter().sum(),
                     downloaded_bytes: downloaded,
                     status: "Paused".to_string(),
@@ -1233,21 +1302,25 @@ mod pause_download_cmd {
                     error_message: None,
                 };
                 let _ = persistence::upsert_download(saved);
-                { let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner()); queue.mark_finished(&id); }
-                return Ok(());
+                mark_queue_finished(id, notify_queue);
+                return true;
             }
         }
         {
             let mut dash = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(session) = dash.remove(&id) {
+            if let Some(session) = dash.remove(id) {
                 let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
                 let _ = session.stop_tx.send(());
                 let total = session.video_total + session.audio_total;
+                let filename = std::path::Path::new(&session.output_path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "download".to_string());
                 let saved = persistence::SavedDownload {
-                    id: id.clone(),
+                    id: id.to_string(),
                     url: session.manifest_url.clone(),
-                    path: std::path::Path::new(&session.manifest_url).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "download".into()),
-                    filename: std::path::Path::new(&session.manifest_url).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "".to_string()),
+                    path: session.output_path.clone(),
+                    filename,
                     total_size: total,
                     downloaded_bytes: downloaded,
                     status: "Paused".to_string(),
@@ -1256,9 +1329,37 @@ mod pause_download_cmd {
                     error_message: None,
                 };
                 let _ = persistence::upsert_download(saved);
-                { let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner()); queue.mark_finished(&id); }
-                return Ok(());
+                mark_queue_finished(id, notify_queue);
+                return true;
             }
+        }
+
+        false
+    }
+
+    pub(crate) fn pause_download_by_id(state: &AppState, id: &str) -> bool {
+        pause_download_by_id_inner(state, id, true)
+    }
+
+    pub(crate) fn pause_all_active_downloads(state: &AppState, notify_queue: bool) -> usize {
+        let ids = collect_active_download_ids(state);
+        let mut paused = 0usize;
+        for id in ids {
+            if pause_download_by_id_inner(state, &id, notify_queue) {
+                paused += 1;
+            }
+        }
+        queue_manager::persist_queue();
+        paused
+    }
+
+    #[tauri::command]
+    pub async fn pause_download(
+        id: String,
+        state: tauri::State<'_, AppState>,
+    ) -> Result<(), String> {
+        if pause_download_by_id(&state, &id) {
+            return Ok(());
         }
         if let Ok(downloads) = persistence::load_downloads() {
             if let Some(mut d) = downloads.into_iter().find(|d| d.id == id) {
@@ -1270,30 +1371,36 @@ mod pause_download_cmd {
     }
 }
 pub(crate) use pause_download_cmd::pause_download;
+pub(crate) use pause_download_cmd::pause_all_active_downloads;
 
-#[tauri::command]
-fn get_downloads() -> Result<Vec<SavedDownload>, String> {
-    persistence::load_downloads()
-}
-
-// Return a snapshot of currently active downloads, useful for extension status polling
-#[derive(serde::Serialize)]
-struct ActiveDownloadInfo {
+// Return a shared snapshot of currently active downloads so the desktop app and
+// localhost extension API expose the same protocol-aware status contract.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ActiveDownloadStatus {
     id: String,
     url: String,
     filename: Option<String>,
     downloaded: u64,
     total: u64,
+    speed_bps: u64,
+    status: String,
+    can_pause: bool,
+    can_cancel: bool,
 }
 
-#[tauri::command]
-fn list_active_downloads(state: State<'_, AppState>) -> Vec<ActiveDownloadInfo> {
+pub(crate) fn collect_active_download_statuses(state: &AppState) -> Vec<ActiveDownloadStatus> {
     let mut result = Vec::new();
     {
         let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         for (id, session) in downloads.iter() {
             let mgr = session.manager.lock().unwrap_or_else(|e| e.into_inner());
-            result.push(ActiveDownloadInfo {
+            let status = if mgr.is_complete() {
+                "Complete".to_string()
+            } else {
+                "Downloading".to_string()
+            };
+            let can_control = status == "Downloading";
+            result.push(ActiveDownloadStatus {
                 id: id.clone(),
                 url: session.url.clone(),
                 filename: std::path::Path::new(&session.path)
@@ -1301,51 +1408,134 @@ fn list_active_downloads(state: State<'_, AppState>) -> Vec<ActiveDownloadInfo> 
                     .map(|f| f.to_string_lossy().to_string()),
                 downloaded: mgr.total_downloaded(),
                 total: mgr.file_size,
+                speed_bps: mgr.total_speed(),
+                status,
+                can_pause: can_control,
+                can_cancel: can_control,
             });
         }
     }
-    // append HLS sessions
     {
         let hls = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
         for (id, session) in hls.iter() {
             let total: u64 = session.segment_sizes.iter().sum();
             let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
-            result.push(ActiveDownloadInfo {
+            result.push(ActiveDownloadStatus {
                 id: id.clone(),
                 url: session.manifest_url.clone(),
-                filename: None,
+                filename: std::path::Path::new(&session.output_path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string()),
                 downloaded,
                 total,
+                speed_bps: 0,
+                status: "Downloading".to_string(),
+                can_pause: true,
+                can_cancel: true,
             });
         }
     }
-    // append DASH sessions
     {
         let dash = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner());
         for (id, session) in dash.iter() {
             let total = session.video_total + session.audio_total;
             let downloaded = session.downloaded.load(std::sync::atomic::Ordering::Relaxed);
-            result.push(ActiveDownloadInfo {
+            result.push(ActiveDownloadStatus {
                 id: id.clone(),
                 url: session.manifest_url.clone(),
-                filename: None,
+                filename: std::path::Path::new(&session.output_path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string()),
                 downloaded,
                 total,
+                speed_bps: 0,
+                status: "Downloading".to_string(),
+                can_pause: true,
+                can_cancel: true,
             });
         }
     }
     result
 }
 
+fn finalize_cancel_cleanup(state: &AppState, id: &str) -> Result<(), String> {
+    {
+        let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = queue.remove(id);
+        queue.mark_finished(id);
+    }
+    queue_manager::persist_queue();
+    scheduler::remove_scheduled_download(id);
+    engine::session::clear_retry_metadata(id);
+    bandwidth_allocator::ALLOCATOR.deregister(id);
+    qos_manager::remove_download(id);
+    state.unregister_streaming_source(id);
+    persistence::remove_download(id)
+}
+
+pub(crate) fn cancel_download_by_id(state: &AppState, id: &str) -> Result<bool, String> {
+    {
+        let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(session) = downloads.remove(id) {
+            let _ = session.stop_tx.send(());
+            finalize_cancel_cleanup(state, id)?;
+            return Ok(true);
+        }
+    }
+
+    {
+        let mut hls = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(session) = hls.remove(id) {
+            let _ = session.stop_tx.send(());
+            finalize_cancel_cleanup(state, id)?;
+            return Ok(true);
+        }
+    }
+
+    {
+        let mut dash = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(session) = dash.remove(id) {
+            let _ = session.stop_tx.send(());
+            finalize_cancel_cleanup(state, id)?;
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+pub(crate) fn control_active_download(state: &AppState, id: &str, action: &str) -> Result<bool, String> {
+    match action {
+        "pause" => Ok(pause_download_by_id(state, id)),
+        "cancel" => cancel_download_by_id(state, id),
+        _ => Err("unknown action".to_string()),
+    }
+}
+
 #[tauri::command]
-fn remove_download_entry(id: String) -> Result<(), String> {
-    persistence::remove_download(&id)
+fn get_downloads() -> Result<Vec<SavedDownload>, String> {
+    persistence::load_downloads()
+}
+
+#[tauri::command]
+fn list_active_downloads(state: State<'_, AppState>) -> Vec<ActiveDownloadStatus> {
+    collect_active_download_statuses(&state)
+}
+
+#[tauri::command]
+fn remove_download_entry(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    persistence::remove_download(&id)?;
+    if !state.has_active_download_id(&id) {
+        state.unregister_streaming_source(&id);
+    }
+    Ok(())
 }
 
 // ─── Queue Management Commands ───────────────────────────────────────────
 
 #[tauri::command]
 fn enqueue_download(
+    state: State<'_, AppState>,
     id: String,
     url: String,
     path: String,
@@ -1353,6 +1543,13 @@ fn enqueue_download(
     expected_checksum: Option<String>,
     custom_headers: Option<std::collections::HashMap<String, String>>,
 ) -> Result<(), String> {
+    if state.has_active_download_id(&id) {
+        return Err(duplicate_download_id_error());
+    }
+    if state.has_active_download_url(&url) {
+        return Err(duplicate_download_url_error());
+    }
+
     let prio = priority.map(|p| queue_manager::DownloadPriority::from_str(&p))
         .unwrap_or(queue_manager::DownloadPriority::Normal);
     let settings = settings::load_settings();
@@ -1366,13 +1563,20 @@ fn enqueue_download(
         added_at: chrono::Utc::now().timestamp_millis(),
         custom_headers,
         expected_checksum,
+        fresh_restart: false,
         retry_count: 0,
         max_retries,
         retry_delay_ms: 0,
     };
 
     let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    queue.enqueue(item);
+    if queue.contains(&item.id) {
+        return Err(duplicate_download_id_error());
+    }
+    if queue.contains_url(&item.url) {
+        return Err(duplicate_download_url_error());
+    }
+    let _ = queue.enqueue(item);
     drop(queue);
     queue_manager::persist_queue();
     Ok(())
@@ -2016,9 +2220,34 @@ async fn start_multi_source_download(
     path: String,
     custom_headers: Option<std::collections::HashMap<String, String>>,
 ) -> Result<(), String> {
-    engine::multi_source::start_multi_source_download(
-        &app, &state, id, primary_url, mirrors, path, custom_headers,
-    ).await
+    if state.has_active_download_id(&id) {
+        return Err(duplicate_download_id_error());
+    }
+    if state.has_active_download_url(&primary_url) {
+        return Err(duplicate_download_url_error());
+    }
+
+    {
+        let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        if queue.contains(&id) {
+            return Err(duplicate_download_id_error());
+        }
+        if queue.contains_url(&primary_url) {
+            return Err(duplicate_download_url_error());
+        }
+        queue.mark_active(&id, &primary_url);
+    }
+
+    let result = engine::multi_source::start_multi_source_download(
+        &app, &state, id.clone(), primary_url, mirrors, path, custom_headers,
+    ).await;
+
+    if let Err(_) = result {
+        let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        queue.mark_finished(&id);
+    }
+
+    result
 }
 
 #[tauri::command]
@@ -2833,9 +3062,11 @@ async fn fetch_feed(url: String) -> Result<Vec<feeds::FeedItem>, String> {
 }
 
 #[tauri::command]
-async fn perform_search(query: String) -> Result<Vec<search::SearchResult>, String> {
-    let engine = search::SEARCH_ENGINE.lock().await;
-    engine.search(query)
+async fn perform_search(
+    query: String,
+    pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>,
+) -> Result<Vec<search::SearchResult>, String> {
+    pm.search(&query).await
 }
 
 #[tauri::command]
@@ -3243,9 +3474,15 @@ async fn refresh_download_url(state: State<'_, AppState>, app_handle: tauri::App
 
 
 #[tauri::command]
-async fn install_plugin(app_handle: tauri::AppHandle, url: String, filename: Option<String>) -> Result<String, String> {
-
-    plugin_vm::updater::install_plugin_from_url(&app_handle, url, filename, None).await
+async fn install_plugin(
+    app_handle: tauri::AppHandle,
+    pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>,
+    url: String,
+    filename: Option<String>,
+) -> Result<String, String> {
+    let installed = plugin_vm::updater::install_plugin_from_url(&app_handle, url, filename, None).await?;
+    pm.load_plugins().await?;
+    Ok(installed)
 }
 
 #[tauri::command]
@@ -3304,7 +3541,7 @@ async fn verify_notarization(path: String) -> Result<serde_json::Value, String> 
 }
 
 #[tauri::command]
-async fn find_mirrors(path: String) -> Result<serde_json::Value, String> {
+async fn find_mirrors(path: String) -> Result<crate::mirror_hunter::MirrorDiscoveryResult, String> {
     // Validate that path is within download directory
     let settings = crate::settings::load_settings();
     let download_dir = dunce::canonicalize(&settings.download_dir)
@@ -3955,6 +4192,11 @@ fn classify_network_requests(
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "quit" => {
+                            let state = app.state::<AppState>();
+                            let paused = pause_download_cmd::pause_all_active_downloads(&state, false);
+                            if paused > 0 {
+                                println!("[Shutdown] Snapshotted {} active download(s) before tray quit", paused);
+                            }
                             app.exit(0);
                         }
                         "show" => {
@@ -4085,8 +4327,10 @@ fn classify_network_requests(
                     let state = battery_app_handle.state::<AppState>();
                     
                     let active_count = {
-                        let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                        downloads.len()
+                        let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner()).len();
+                        let hls = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner()).len();
+                        let dash = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner()).len();
+                        downloads + hls + dash
                     };
                     
                     if settings.prevent_sleep_during_download {
@@ -4099,38 +4343,9 @@ fn classify_network_requests(
                         if let Some(pct) = crate::power_manager::get_battery_percentage() {
                             if pct <= 15 && active_count > 0 {
                                 println!("🔋 Battery critical ({}%). Pausing all downloads.", pct);
-                                let to_pause: Vec<String> = {
-                                    let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                                    downloads.keys().cloned().collect()
-                                };
-                                
-                                for id in to_pause {
-                                    let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                                    if let Some(session) = downloads.remove(&id) {
-                                        // Capture segment state BEFORE sending stop signal (same as pause_download)
-                                        let segments = session.manager.lock().unwrap_or_else(|e| e.into_inner()).get_segments_snapshot();
-                                        let total_downloaded: u64 = segments.iter()
-                                            .map(|s| if s.downloaded_cursor > s.start_byte { s.downloaded_cursor - s.start_byte } else { 0 })
-                                            .sum();
-                                        let total_size: u64 = session.manager.lock().unwrap_or_else(|e| e.into_inner()).file_size;
-                                        let _ = session.stop_tx.send(());
-                                        // Use upsert_download per item to avoid race with concurrent persistence changes
-                                        let _ = crate::persistence::upsert_download(crate::persistence::SavedDownload {
-                                            id: id.clone(),
-                                            url: session.url.clone(),
-                                            path: session.path.clone(),
-                                            filename: std::path::Path::new(&session.path)
-                                                .file_name()
-                                                .map(|f| f.to_string_lossy().to_string())
-                                                .unwrap_or_else(|| "download".to_string()),
-                                            total_size,
-                                            downloaded_bytes: total_downloaded,
-                                            status: "Paused".to_string(),
-                                            segments: Some(segments),
-                                            last_active: Some(chrono::Utc::now().to_rfc3339()),
-                                            error_message: None,
-                                        });
-                                    }
+                                let paused = pause_download_cmd::pause_all_active_downloads(&state, false);
+                                if paused > 0 {
+                                    println!("🔋 Paused {} active download(s) due to low battery.", paused);
                                 }
                             }
                         }
@@ -4211,10 +4426,9 @@ fn validate_plugin_filename(filename: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn get_plugin_source(filename: String) -> Result<String, String> {
+async fn get_plugin_source(app_handle: tauri::AppHandle, filename: String) -> Result<String, String> {
     validate_plugin_filename(&filename)?;
-    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
-    let path = cwd.join("plugins").join(format!("{}.lua", filename));
+    let path = crate::plugin_vm::get_plugins_dir(&app_handle).join(format!("{}.lua", filename));
     if !path.exists() {
         return Err("Plugin file not found".to_string());
     }
@@ -4222,25 +4436,35 @@ async fn get_plugin_source(filename: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn save_plugin_source(filename: String, content: String) -> Result<(), String> {
+async fn save_plugin_source(
+    app_handle: tauri::AppHandle,
+    pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>,
+    filename: String,
+    content: String,
+) -> Result<(), String> {
     validate_plugin_filename(&filename)?;
-    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
-    let plugins_dir = cwd.join("plugins");
+    let plugins_dir = crate::plugin_vm::get_plugins_dir(&app_handle);
     if !plugins_dir.exists() {
         std::fs::create_dir_all(&plugins_dir).map_err(|e| e.to_string())?;
     }
     let path = plugins_dir.join(format!("{}.lua", filename));
-    std::fs::write(path, content).map_err(|e| e.to_string())
+    std::fs::write(path, content).map_err(|e| e.to_string())?;
+    pm.load_plugins().await?;
+    Ok(())
 }
 
 #[tauri::command]
-async fn delete_plugin(filename: String) -> Result<(), String> {
+async fn delete_plugin(
+    app_handle: tauri::AppHandle,
+    pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>,
+    filename: String,
+) -> Result<(), String> {
     validate_plugin_filename(&filename)?;
-    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
-    let path = cwd.join("plugins").join(format!("{}.lua", filename));
+    let path = crate::plugin_vm::get_plugins_dir(&app_handle).join(format!("{}.lua", filename));
     if path.exists() {
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
+    pm.load_plugins().await?;
     Ok(())
 }
 
@@ -4601,6 +4825,153 @@ async fn check_wayback_availability(url: String) -> Result<Option<wayback::Wayba
 #[tauri::command]
 fn get_wayback_url(wayback_url: String) -> String {
     wayback::get_wayback_download_url(&wayback_url)
+}
+
+#[cfg(test)]
+mod active_download_status_tests {
+    use super::*;
+    use crate::core_state::{AppState, DownloadSession, HlsSession};
+    use crate::downloader::manager::DownloadManager;
+    use crate::downloader::structures::SegmentState;
+    use std::collections::HashMap;
+
+    fn make_test_state() -> AppState {
+        AppState {
+            downloads: Mutex::new(HashMap::new()),
+            hls_sessions: Mutex::new(HashMap::new()),
+            dash_sessions: Mutex::new(HashMap::new()),
+            p2p_node: Arc::new(network::p2p::P2PNode::new()),
+            p2p_file_map: Arc::new(Mutex::new(HashMap::new())),
+            torrent_manager: None,
+            connection_manager: network::connection_manager::ConnectionManager::default(),
+            chatops_manager: Arc::new(network::chatops::ChatOpsManager::new(Arc::new(Mutex::new(
+                crate::settings::load_settings(),
+            )))),
+        }
+    }
+
+    fn make_temp_writer(name: &str) -> Arc<Mutex<std::fs::File>> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hyperstream-{name}-{unique}.tmp"));
+        Arc::new(Mutex::new(std::fs::File::create(path).expect("temp writer")))
+    }
+
+    #[test]
+    fn collect_active_download_statuses_reports_all_protocols() {
+        let state = make_test_state();
+        let manager = Arc::new(Mutex::new(DownloadManager::new(1_000, 1)));
+        {
+            let manager_guard = manager.lock().unwrap_or_else(|e| e.into_inner());
+            let mut segments = manager_guard.segments.write().unwrap_or_else(|e| e.into_inner());
+            let segment = segments.first_mut().expect("http segment");
+            segment.state = SegmentState::Downloading;
+            segment.downloaded_cursor = 400;
+            segment.speed_bps = 128;
+        }
+
+        let (http_stop_tx, _) = tokio::sync::broadcast::channel(1);
+        state.downloads.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            "http-1".to_string(),
+            DownloadSession {
+                manager,
+                stop_tx: http_stop_tx,
+                url: "https://example.com/file.bin".to_string(),
+                path: "/tmp/file.bin".to_string(),
+                file_writer: make_temp_writer("http"),
+            },
+        );
+
+        let (hls_stop_tx, _) = tokio::sync::broadcast::channel(1);
+        state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            "hls-1".to_string(),
+            HlsSession {
+                manifest_url: "https://example.com/playlist.m3u8".to_string(),
+                output_path: "/tmp/video.mp4".to_string(),
+                segments: Vec::new(),
+                segment_sizes: vec![300, 300],
+                downloaded: Arc::new(std::sync::atomic::AtomicU64::new(150)),
+                stop_tx: hls_stop_tx,
+                file_writer: make_temp_writer("hls"),
+            },
+        );
+
+        let (dash_stop_tx, _) = tokio::sync::broadcast::channel(1);
+        state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            "dash-1".to_string(),
+            crate::engine::dash::DashSession {
+                manifest_url: "https://example.com/manifest.mpd".to_string(),
+                output_path: "/tmp/dash.mp4".to_string(),
+                video_rep: None,
+                audio_rep: None,
+                video_total: 500,
+                audio_total: 200,
+                downloaded: Arc::new(std::sync::atomic::AtomicU64::new(175)),
+                stop_tx: dash_stop_tx,
+            },
+        );
+
+        let statuses = collect_active_download_statuses(&state);
+        assert_eq!(statuses.len(), 3);
+
+        let http = statuses.iter().find(|item| item.id == "http-1").expect("http status");
+        assert_eq!(http.downloaded, 400);
+        assert_eq!(http.total, 1_000);
+        assert_eq!(http.speed_bps, 128);
+        assert_eq!(http.status, "Downloading");
+        assert!(http.can_pause);
+        assert!(http.can_cancel);
+
+        let hls = statuses.iter().find(|item| item.id == "hls-1").expect("hls status");
+        assert_eq!(hls.total, 600);
+        assert_eq!(hls.downloaded, 150);
+        assert_eq!(hls.speed_bps, 0);
+        assert_eq!(hls.status, "Downloading");
+
+        let dash = statuses.iter().find(|item| item.id == "dash-1").expect("dash status");
+        assert_eq!(dash.total, 700);
+        assert_eq!(dash.downloaded, 175);
+        assert_eq!(dash.speed_bps, 0);
+        assert_eq!(dash.status, "Downloading");
+        assert!(dash.can_pause);
+        assert!(dash.can_cancel);
+    }
+
+    #[test]
+    fn collect_active_download_statuses_hides_controls_for_complete_http_sessions() {
+        let state = make_test_state();
+        let manager = Arc::new(Mutex::new(DownloadManager::new(100, 1)));
+        {
+            let manager_guard = manager.lock().unwrap_or_else(|e| e.into_inner());
+            let mut segments = manager_guard.segments.write().unwrap_or_else(|e| e.into_inner());
+            let segment = segments.first_mut().expect("http segment");
+            segment.state = SegmentState::Complete;
+            segment.downloaded_cursor = 100;
+        }
+
+        let (stop_tx, _) = tokio::sync::broadcast::channel(1);
+        state.downloads.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            "http-complete".to_string(),
+            DownloadSession {
+                manager,
+                stop_tx,
+                url: "https://example.com/complete.bin".to_string(),
+                path: "/tmp/complete.bin".to_string(),
+                file_writer: make_temp_writer("complete"),
+            },
+        );
+
+        let status = collect_active_download_statuses(&state)
+            .into_iter()
+            .find(|item| item.id == "http-complete")
+            .expect("complete status");
+
+        assert_eq!(status.status, "Complete");
+        assert!(!status.can_pause);
+        assert!(!status.can_cancel);
+    }
 }
 
 #[cfg(test)]

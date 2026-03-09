@@ -11,6 +11,308 @@ use crate::downloader::network;
 use crate::settings;
 use crate::persistence;
 
+const HLS_STOPPED_ERROR: &str = "Download stopped";
+
+fn remove_hls_session(state: &AppState, id: &str) {
+    let mut map = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
+    map.remove(id);
+}
+
+fn record_hls_failure(
+    app: &tauri::AppHandle,
+    id: &str,
+    url: &str,
+    path: &str,
+    total_size: u64,
+    downloaded_bytes: u64,
+    started_at: &str,
+    elapsed: std::time::Duration,
+    segments_used: u32,
+    error_message: &str,
+) {
+    let _ = app.emit("download_error", serde_json::json!({
+        "id": id,
+        "error": error_message,
+    }));
+    crate::media::sounds::play_error();
+
+    let _ = persistence::upsert_download(persistence::SavedDownload {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: crate::engine::session::extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes,
+        status: "Error".to_string(),
+        segments: None,
+        last_active: Some(chrono::Utc::now().to_rfc3339()),
+        error_message: Some(error_message.to_string()),
+    });
+
+    let avg_speed = if elapsed.as_secs() > 0 {
+        downloaded_bytes / elapsed.as_secs()
+    } else {
+        0
+    };
+
+    let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: crate::engine::session::extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes,
+        status: "Error".to_string(),
+        started_at: started_at.to_string(),
+        finished_at: chrono::Local::now().to_rfc3339(),
+        avg_speed_bps: avg_speed,
+        duration_secs: elapsed.as_secs(),
+        segments_used,
+        error_message: Some(error_message.to_string()),
+        source_type: Some("hls".to_string()),
+    });
+
+    if let Some(log) = app.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+        let _ = log.append(crate::event_sourcing::LedgerEvent {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            aggregate_id: id.to_string(),
+            event_type: "DownloadError".to_string(),
+            payload: serde_json::json!({
+                "error": error_message,
+                "downloaded_bytes": downloaded_bytes,
+                "total_size": total_size,
+                "source": "hls",
+            }),
+        });
+    }
+}
+
+fn handle_hls_failure(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    id: &str,
+    url: &str,
+    path: &str,
+    total_size: u64,
+    downloaded_bytes: u64,
+    started_at: &str,
+    elapsed: std::time::Duration,
+    segments_used: u32,
+    error_message: &str,
+) {
+    record_hls_failure(
+        app,
+        id,
+        url,
+        path,
+        total_size,
+        downloaded_bytes,
+        started_at,
+        elapsed,
+        segments_used,
+        error_message,
+    );
+    remove_hls_session(state, id);
+    crate::engine::session::handle_download_failure_cleanup(app, id);
+}
+
+async fn finalize_hls_success(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    id: &str,
+    url: &str,
+    path: &str,
+    total_size: u64,
+    started_at: &str,
+    elapsed: std::time::Duration,
+) -> Result<(), String> {
+    if let Err(integrity_error) = crate::engine::session::verify_queued_integrity(app, id, path).await {
+        crate::engine::session::mark_retry_for_fresh_restart(id);
+        handle_hls_failure(
+            app,
+            state,
+            id,
+            url,
+            path,
+            total_size,
+            total_size,
+            started_at,
+            elapsed,
+            0,
+            &integrity_error,
+        );
+        return Ok(());
+    }
+
+    crate::engine::session::clear_retry_metadata(id);
+    crate::media::sounds::play_complete();
+    crate::cas_manager::register_cas(Some(url), None, path);
+
+    let _ = persistence::upsert_download(persistence::SavedDownload {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: crate::engine::session::extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes: total_size,
+        status: "Complete".to_string(),
+        segments: None,
+        last_active: Some(chrono::Utc::now().to_rfc3339()),
+        error_message: None,
+    });
+
+    let avg_speed = if elapsed.as_secs() > 0 { total_size / elapsed.as_secs() } else { 0 };
+    let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: crate::engine::session::extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes: total_size,
+        status: "Complete".to_string(),
+        started_at: started_at.to_string(),
+        finished_at: chrono::Local::now().to_rfc3339(),
+        avg_speed_bps: avg_speed,
+        duration_secs: elapsed.as_secs(),
+        segments_used: 0,
+        error_message: None,
+        source_type: Some("hls".to_string()),
+    });
+
+    if let Some(log) = app.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+        let _ = log.append(crate::event_sourcing::LedgerEvent {
+            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+            aggregate_id: id.to_string(),
+            event_type: "DownloadCompleted".to_string(),
+            payload: serde_json::json!({
+                "total_size": total_size,
+                "duration_secs": elapsed.as_secs(),
+                "path": path,
+                "source": "hls",
+            }),
+        });
+    }
+
+    {
+        let id2 = id.to_string();
+        let path2 = path.to_string();
+        let url2 = url.to_string();
+        tokio::spawn(async move {
+            let settings = crate::settings::load_settings();
+            if let Some(webhooks) = settings.webhooks {
+                let manager = crate::webhooks::WebhookManager::new();
+                manager.load_configs(webhooks).await;
+                let payload = crate::webhooks::WebhookPayload {
+                    event: "DownloadComplete".to_string(),
+                    download_id: id2,
+                    filename: crate::engine::session::extract_filename(&path2).to_string(),
+                    url: url2,
+                    size: total_size,
+                    speed: 0,
+                    filepath: Some(path2),
+                    timestamp: chrono::Utc::now().timestamp(),
+                };
+                manager.trigger(crate::webhooks::WebhookEvent::DownloadComplete, payload).await;
+            }
+        });
+    }
+
+    crate::mqtt_client::publish_event(
+        "DownloadComplete",
+        id,
+        crate::engine::session::extract_filename(path),
+        "Complete",
+    );
+
+    {
+        let chatops = state.chatops_manager.clone();
+        let filename = crate::engine::session::extract_filename(path).to_string();
+        tokio::spawn(async move {
+            chatops.notify_completion(&filename).await;
+        });
+    }
+
+    {
+        let path_archive = path.to_string();
+        let id_archive = id.to_string();
+        tokio::spawn(async move {
+            let settings = crate::settings::load_settings();
+            if settings.auto_extract_archives {
+                if let Some(_archive_info) = crate::archive_manager::ArchiveManager::detect_archive(&path_archive) {
+                    let dest = std::path::Path::new(&path_archive)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or(".")
+                        .to_string();
+                    match crate::archive_manager::ArchiveManager::extract_archive(&path_archive, &dest) {
+                        Ok(msg) => {
+                            println!("[{}] HLS auto-extract: {}", id_archive, msg);
+                            if settings.cleanup_archives_after_extract {
+                                if let Err(e) = crate::archive_manager::ArchiveManager::cleanup_archive(&path_archive) {
+                                    eprintln!("[{}] Cleanup failed: {}", id_archive, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[{}] HLS auto-extract failed: {}", id_archive, e);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let settings_snap = crate::settings::load_settings();
+        if settings_snap.auto_sort_downloads {
+            match crate::file_categorizer::categorize_and_move(path, &settings_snap.download_dir) {
+                Ok((cat_result, new_path)) => {
+                    let moved = new_path != path;
+                    let _ = app.emit("file_categorized", serde_json::json!({
+                        "id": id,
+                        "filename": crate::engine::session::extract_filename(path),
+                        "category": cat_result.category_name,
+                        "icon": cat_result.icon,
+                        "color": cat_result.color,
+                        "should_move": cat_result.should_move,
+                        "moved": moved,
+                        "new_path": if moved { Some(&new_path) } else { None },
+                    }));
+                }
+                Err(e) => {
+                    eprintln!("[{}] HLS auto-sort failed: {}", id, e);
+                    let cat_result = crate::file_categorizer::categorize(
+                        crate::engine::session::extract_filename(path),
+                    );
+                    let _ = app.emit("file_categorized", serde_json::json!({
+                        "id": id,
+                        "filename": crate::engine::session::extract_filename(path),
+                        "category": cat_result.category_name,
+                        "icon": cat_result.icon,
+                        "color": cat_result.color,
+                        "should_move": false,
+                    }));
+                }
+            }
+        }
+    }
+
+    {
+        let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        queue.mark_finished(id);
+    }
+    remove_hls_session(state, id);
+
+    if let Some(action) = crate::scheduler::handle_download_complete(id) {
+        crate::scheduler::execute_end_action(app, &action);
+    }
+
+    Ok(())
+}
+
 /// Download an HLS stream into a single file.  This function is analogous to
 /// `start_download_impl` but specialised for segmented media.
 ///
@@ -37,6 +339,10 @@ pub(crate) async fn start_hls_download_impl(
     let hls_start_iso = chrono::Local::now().to_rfc3339();
 
     let settings = settings::load_settings();
+    let fresh_restart = crate::engine::session::queued_retry_requires_fresh_restart(&id);
+    if fresh_restart {
+        crate::engine::session::quarantine_corrupt_file(&path)?;
+    }
 
     // choose a HTTP client (respect proxy/masq, DPI, headers, etc.)
     let proxy_config = crate::proxy::ProxyConfig::from_settings(&settings);
@@ -109,32 +415,51 @@ pub(crate) async fn start_hls_download_impl(
         // dedupe based on manifest URL; quick check to skip entire fetch
         if let Some(existing_path) = crate::cas_manager::check_cas(Some(&manifest_url), None) {
             if std::fs::hard_link(&existing_path, &path).is_ok() {
-                crate::media::sounds::play_complete();
-                return Ok(());
+                return finalize_hls_success(
+                    app,
+                    state,
+                    &id,
+                    &chosen_url,
+                    &path,
+                    total_size,
+                    &hls_start_iso,
+                    hls_start.elapsed(),
+                )
+                .await;
             }
         }
     }
 
     // 4. open output file (resume support uses total downloaded bytes)
     let saved_downloads = persistence::load_downloads().unwrap_or_default();
-    let saved = saved_downloads.iter().find(|d| d.id == id);
-    let resume_from = saved.map(|s| s.downloaded_bytes).unwrap_or(0);
+    let saved = if fresh_restart {
+        None
+    } else {
+        saved_downloads.iter().find(|d| d.id == id)
+    };
+    let resume_from = if fresh_restart {
+        0
+    } else {
+        saved.map(|s| s.downloaded_bytes).unwrap_or(0)
+    };
     // Smart filename collision avoidance for new downloads
-    let path = if resume_from == 0 {
+    let path = if resume_from == 0 && !fresh_restart {
         crate::engine::session::resolve_filename_collision(&path)
     } else {
         path
     };
     let file = initialization::setup_file(&path, resume_from, total_size)?;
     let file_mutex = file;
+    let downloaded_atomic = Arc::new(std::sync::atomic::AtomicU64::new(resume_from));
 
     // 5. register HLS session in state
     let (stop_tx, _) = broadcast::channel(1);
     let session = HlsSession {
         manifest_url: chosen_url.clone(),
+        output_path: path.clone(),
         segments: stream.segments.clone(),
         segment_sizes: sizes.clone(),
-        downloaded: Arc::new(std::sync::atomic::AtomicU64::new(resume_from)),
+        downloaded: downloaded_atomic.clone(),
         stop_tx: stop_tx.clone(),
         file_writer: file_mutex.clone(),
     };
@@ -142,6 +467,35 @@ pub(crate) async fn start_hls_download_impl(
         let mut map = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(id.clone(), session);
     }
+
+    let id_save = id.clone();
+    let url_save = chosen_url.clone();
+    let path_save = path.clone();
+    let filename_save = crate::engine::session::extract_filename(&path).to_string();
+    let downloaded_save = downloaded_atomic.clone();
+    let mut stop_rx_save = stop_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stop_rx_save.recv() => break,
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+                    let saved = persistence::SavedDownload {
+                        id: id_save.clone(),
+                        url: url_save.clone(),
+                        path: path_save.clone(),
+                        filename: filename_save.clone(),
+                        total_size,
+                        downloaded_bytes: downloaded_save.load(std::sync::atomic::Ordering::Relaxed),
+                        status: "Downloading".to_string(),
+                        segments: None,
+                        last_active: Some(chrono::Utc::now().to_rfc3339()),
+                        error_message: None,
+                    };
+                    let _ = persistence::upsert_download(saved);
+                }
+            }
+        }
+    });
 
     // 6. spawn disk writer thread
     let (tx, rx) = std::sync::mpsc::channel::<crate::downloader::disk::WriteRequest>();
@@ -166,7 +520,6 @@ pub(crate) async fn start_hls_download_impl(
     });
 
     // 7. spawn worker tasks (concurrent segments)
-    let downloaded_atomic = Arc::new(std::sync::atomic::AtomicU64::new(resume_from));
     let mut start_index = 0usize;
     let mut offset_in_segment = 0u64;
     {
@@ -195,10 +548,14 @@ pub(crate) async fn start_hls_download_impl(
         let downloaded_clone = downloaded_atomic.clone();
         let app_clone = app.clone();
         let id_clone = id.clone();
-        let path_clone = path.clone();
         let key_map: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let disk_io_error_clone = disk_io_error.clone();
 
         futures.push(tokio::spawn(async move {
+            if disk_io_error_clone.load(std::sync::atomic::Ordering::Acquire) {
+                return Err("Disk I/O error".to_string());
+            }
+
             // fetch decryption key if needed
             let mut key_bytes_opt: Option<Vec<u8>> = None;
             if let Some(key_uri) = &seg.key_uri {
@@ -231,54 +588,59 @@ pub(crate) async fn start_hls_download_impl(
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("HLS seg {} request failed: {}", seg.url, e);
-                    return Err(());
+                    return Err(format!("Segment request failed: {}", e));
                 }
             };
             let mut stream = resp.bytes_stream();
             let mut local_pos = seg_offset;
             while let Some(item) = futures::stream::StreamExt::next(&mut stream).await {
-                if let Ok(chunk) = item {
-                    let mut data = chunk.to_vec();
-                    // decrypt if necessary
-                    if let Some(key_bytes) = &key_bytes_opt {
-                        // compute iv
-                        let iv = if let Some(ivhex) = &seg.key_iv {
-                            crate::media::decrypt::decode_hex(ivhex).unwrap_or_else(|_| {
-                                let mut iv = [0u8;16];
-                                iv[8..].copy_from_slice(&seg.sequence.to_be_bytes());
-                                iv.to_vec()
-                            })
-                        } else {
+                let chunk = match item {
+                    Ok(chunk) => chunk,
+                    Err(e) => return Err(format!("Segment stream failed: {}", e)),
+                };
+                let mut data = chunk.to_vec();
+                // decrypt if necessary
+                if let Some(key_bytes) = &key_bytes_opt {
+                    // compute iv
+                    let iv = if let Some(ivhex) = &seg.key_iv {
+                        crate::media::decrypt::decode_hex(ivhex).unwrap_or_else(|_| {
                             let mut iv = [0u8;16];
                             iv[8..].copy_from_slice(&seg.sequence.to_be_bytes());
                             iv.to_vec()
-                        };
-                        if let Ok(dec) = crate::media::decrypt::decrypt_aes128(&data, &key_bytes, &iv) {
-                            data = dec;
-                        }
-                    }
-
-                    // write data to disk at global offset
-                    let global_off = global_base + local_pos;
-                    if tx_clone.send(crate::downloader::disk::WriteRequest { offset: global_off, data: data.clone(), segment_id: 0 }).is_err() {
-                        return Err(());
-                    }
-                    let len = data.len() as u64;
-                    downloaded_clone.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
-                    local_pos += len;
-                    // send immediate progress update
-                    let payload = crate::core_state::Payload {
-                        id: id_clone.clone(),
-                        downloaded: downloaded_clone.load(std::sync::atomic::Ordering::Relaxed),
-                        total: total_size,
-                        segments: vec![],
+                        })
+                    } else {
+                        let mut iv = [0u8;16];
+                        iv[8..].copy_from_slice(&seg.sequence.to_be_bytes());
+                        iv.to_vec()
                     };
-                    let _ = app_clone.emit("download_progress", payload.clone());
-                    let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
+                    if let Ok(dec) = crate::media::decrypt::decrypt_aes128(&data, &key_bytes, &iv) {
+                        data = dec;
+                    }
                 }
-                // check stop
+
+                // write data to disk at global offset
+                let global_off = global_base + local_pos;
+                if tx_clone.send(crate::downloader::disk::WriteRequest { offset: global_off, data: data.clone(), segment_id: 0 }).is_err() {
+                    return Err("Disk writer channel closed".to_string());
+                }
+                let len = data.len() as u64;
+                downloaded_clone.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+                local_pos += len;
+                // send immediate progress update
+                let payload = crate::core_state::Payload {
+                    id: id_clone.clone(),
+                    downloaded: downloaded_clone.load(std::sync::atomic::Ordering::Relaxed),
+                    total: total_size,
+                    segments: vec![],
+                };
+                let _ = app_clone.emit("download_progress", payload.clone());
+                let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
+
                 if stop_rx.try_recv().is_ok() {
-                    break;
+                    return Err(HLS_STOPPED_ERROR.to_string());
+                }
+                if disk_io_error_clone.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("Disk I/O error".to_string());
                 }
             }
             // emit progress once segment finishes (redundant but keeps behavior similar to HTTP)
@@ -290,186 +652,138 @@ pub(crate) async fn start_hls_download_impl(
             };
             let _ = app_clone.emit("download_progress", payload.clone());
             let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
-            Ok(())
+            Ok::<(), String>(())
         }));
 
         // throttle concurrency
         if futures.len() >= concurrency {
-            let _ = futures::stream::StreamExt::next(&mut futures).await;
+            if let Some(result) = futures::stream::StreamExt::next(&mut futures).await {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        let _ = stop_tx.send(());
+                        while futures.next().await.is_some() {}
+                        if e == HLS_STOPPED_ERROR {
+                            remove_hls_session(state, &id);
+                            return Ok(());
+                        }
+                        let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                        handle_hls_failure(
+                            app,
+                            state,
+                            &id,
+                            &chosen_url,
+                            &path,
+                            total_size,
+                            downloaded,
+                            &hls_start_iso,
+                            hls_start.elapsed(),
+                            stream.segments.len() as u32,
+                            &e,
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let _ = stop_tx.send(());
+                        while futures.next().await.is_some() {}
+                        let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                        handle_hls_failure(
+                            app,
+                            state,
+                            &id,
+                            &chosen_url,
+                            &path,
+                            total_size,
+                            downloaded,
+                            &hls_start_iso,
+                            hls_start.elapsed(),
+                            stream.segments.len() as u32,
+                            &format!("HLS worker join failed: {}", e),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
 
     // wait for remaining futures
-    while futures.next().await.is_some() {}
-
-    // cleaned up; remove session state
-    {
-        let mut map = state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner());
-        map.remove(&id);
-    }
-
-    // mark persistence as complete
-    let _ = persistence::upsert_download(persistence::SavedDownload {
-        id: id.clone(),
-        url: chosen_url.clone(),
-        path: path.clone(),
-        filename: crate::engine::session::extract_filename(&path).to_string(),
-        total_size,
-        downloaded_bytes: total_size,
-        status: "Complete".to_string(),
-        segments: None,
-        last_active: Some(chrono::Utc::now().to_rfc3339()),
-        error_message: None,
-    });
-
-    crate::media::sounds::play_complete();
-
-    // Record in download history
-    let elapsed = hls_start.elapsed();
-    let avg_speed = if elapsed.as_secs() > 0 { total_size / elapsed.as_secs() } else { 0 };
-    let _ = crate::download_history::record(crate::download_history::HistoryEntry {
-        id: id.clone(),
-        url: chosen_url.clone(),
-        path: path.clone(),
-        filename: crate::engine::session::extract_filename(&path).to_string(),
-        total_size,
-        downloaded_bytes: total_size,
-        status: "Complete".to_string(),
-        started_at: hls_start_iso,
-        finished_at: chrono::Local::now().to_rfc3339(),
-        avg_speed_bps: avg_speed,
-        duration_secs: elapsed.as_secs(),
-        segments_used: 0,
-        error_message: None,
-        source_type: Some("hls".to_string()),
-    });
-
-    // --- Post-completion hooks (matching HTTP download flow) ---
-    // Event sourcing
-    if let Some(log) = app.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
-        let _ = log.append(crate::event_sourcing::LedgerEvent {
-            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
-            aggregate_id: id.clone(),
-            event_type: "DownloadCompleted".to_string(),
-            payload: serde_json::json!({
-                "total_size": total_size,
-                "duration_secs": elapsed.as_secs(),
-                "path": path,
-                "source": "hls",
-            }),
-        });
-    }
-
-    // Webhooks
-    {
-        let id2 = id.clone();
-        let path2 = path.clone();
-        let url2 = chosen_url.clone();
-        tokio::spawn(async move {
-            let settings = crate::settings::load_settings();
-            if let Some(webhooks) = settings.webhooks {
-                let manager = crate::webhooks::WebhookManager::new();
-                manager.load_configs(webhooks).await;
-                let payload = crate::webhooks::WebhookPayload {
-                    event: "DownloadComplete".to_string(),
-                    download_id: id2,
-                    filename: crate::engine::session::extract_filename(&path2).to_string(),
-                    url: url2,
-                    size: total_size,
-                    speed: 0,
-                    filepath: Some(path2),
-                    timestamp: chrono::Utc::now().timestamp(),
-                };
-                manager.trigger(crate::webhooks::WebhookEvent::DownloadComplete, payload).await;
+    while let Some(result) = futures.next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if e == HLS_STOPPED_ERROR {
+                    remove_hls_session(state, &id);
+                    return Ok(());
+                }
+                let _ = stop_tx.send(());
+                let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                handle_hls_failure(
+                    app,
+                    state,
+                    &id,
+                    &chosen_url,
+                    &path,
+                    total_size,
+                    downloaded,
+                    &hls_start_iso,
+                    hls_start.elapsed(),
+                    stream.segments.len() as u32,
+                    &e,
+                );
+                return Ok(());
             }
-        });
-    }
-
-    // MQTT notification
-    crate::mqtt_client::publish_event(
-        "DownloadComplete",
-        &id,
-        crate::engine::session::extract_filename(&path),
-        "Complete",
-    );
-
-    // ChatOps (Telegram) notification
-    {
-        let chatops = state.chatops_manager.clone();
-        let filename = crate::engine::session::extract_filename(&path).to_string();
-        tokio::spawn(async move {
-            chatops.notify_completion(&filename).await;
-        });
-    }
-
-    // Auto-extract archives
-    {
-        let path_archive = path.clone();
-        let id_archive = id.clone();
-        tokio::spawn(async move {
-            let settings = crate::settings::load_settings();
-            if settings.auto_extract_archives {
-                if let Some(_archive_info) = crate::archive_manager::ArchiveManager::detect_archive(&path_archive) {
-                    let dest = std::path::Path::new(&path_archive)
-                        .parent()
-                        .and_then(|p| p.to_str())
-                        .unwrap_or(".")
-                        .to_string();
-                    match crate::archive_manager::ArchiveManager::extract_archive(&path_archive, &dest) {
-                        Ok(msg) => {
-                            println!("[{}] HLS auto-extract: {}", id_archive, msg);
-                            if settings.cleanup_archives_after_extract {
-                                if let Err(e) = crate::archive_manager::ArchiveManager::cleanup_archive(&path_archive) {
-                                    eprintln!("[{}] Cleanup failed: {}", id_archive, e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[{}] HLS auto-extract failed: {}", id_archive, e);
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // File categorization
-    {
-        let settings_snap = crate::settings::load_settings();
-        if settings_snap.auto_sort_downloads {
-            match crate::file_categorizer::categorize_and_move(&path, &settings_snap.download_dir) {
-                Ok((cat_result, new_path)) => {
-                    let moved = new_path != path;
-                    let _ = app.emit("file_categorized", serde_json::json!({
-                        "id": id,
-                        "filename": crate::engine::session::extract_filename(&path),
-                        "category": cat_result.category_name,
-                        "icon": cat_result.icon,
-                        "color": cat_result.color,
-                        "should_move": cat_result.should_move,
-                        "moved": moved,
-                        "new_path": if moved { Some(&new_path) } else { None },
-                    }));
-                }
-                Err(e) => {
-                    eprintln!("[{}] HLS auto-sort failed: {}", id, e);
-                    let cat_result = crate::file_categorizer::categorize(
-                        crate::engine::session::extract_filename(&path),
-                    );
-                    let _ = app.emit("file_categorized", serde_json::json!({
-                        "id": id,
-                        "filename": crate::engine::session::extract_filename(&path),
-                        "category": cat_result.category_name,
-                        "icon": cat_result.icon,
-                        "color": cat_result.color,
-                        "should_move": false,
-                    }));
-                }
+            Err(e) => {
+                let _ = stop_tx.send(());
+                let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                handle_hls_failure(
+                    app,
+                    state,
+                    &id,
+                    &chosen_url,
+                    &path,
+                    total_size,
+                    downloaded,
+                    &hls_start_iso,
+                    hls_start.elapsed(),
+                    stream.segments.len() as u32,
+                    &format!("HLS worker join failed: {}", e),
+                );
+                return Ok(());
             }
         }
     }
 
-    Ok(())
+    if disk_io_error.load(std::sync::atomic::Ordering::Acquire) {
+        let _ = stop_tx.send(());
+        let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+        handle_hls_failure(
+            app,
+            state,
+            &id,
+            &chosen_url,
+            &path,
+            total_size,
+            downloaded,
+            &hls_start_iso,
+            hls_start.elapsed(),
+            stream.segments.len() as u32,
+            "Disk I/O error during download",
+        );
+        return Ok(());
+    }
+
+    let _ = stop_tx.send(());
+    finalize_hls_success(
+        app,
+        state,
+        &id,
+        &chosen_url,
+        &path,
+        total_size,
+        &hls_start_iso,
+        hls_start.elapsed(),
+    ).await
 }
 
 

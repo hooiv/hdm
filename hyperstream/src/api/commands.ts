@@ -27,11 +27,29 @@ export interface NotarizeResult {
     timestamp: string;
 }
 
+export interface MirrorCandidate {
+    url: string;
+    source: string;
+    confidence: string;
+    confidence_score: number;
+    kind: string;
+    hostname: string;
+    direct: boolean;
+    probe_ready: boolean;
+    content_length: number | null;
+    supports_range: boolean | null;
+    note: string | null;
+}
+
 export interface MirrorResult {
     mirrors_found: number;
+    direct_mirrors_found: number;
+    probe_ready_mirrors_found: number;
     sha256: string;
     md5: string;
-    mirrors: { url: string; source: string }[];
+    file_size: number;
+    filename: string;
+    mirrors: MirrorCandidate[];
 }
 
 export interface C2PAResult {

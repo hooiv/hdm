@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { DownloadTask, Segment } from "../types";
+import type { DiscoveredMirror, DownloadTask, Segment } from "../types";
 import { useDownloadActions } from "../hooks/useDownloadActions";
 import { useToast } from "../contexts/ToastContext";
 import { ThreadVisualizer } from "./ThreadVisualizer";
@@ -77,6 +77,8 @@ const SpeedChart: React.FC<{ samples: { t: number; v: number }[] }> = ({ samples
 interface DownloadExpandedPanelProps {
   task: DownloadTask;
   filePath: string;
+  onResume: (id: string) => void;
+  onDiscoveredMirrors?: (id: string, mirrors: DiscoveredMirror[]) => void;
   onShowPreview: () => void;
   onShowP2PShare: () => void;
 }
@@ -84,13 +86,16 @@ interface DownloadExpandedPanelProps {
 export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
   task,
   filePath,
+  onResume,
+  onDiscoveredMirrors,
   onShowPreview,
   onShowP2PShare,
 }) => {
-  const actions = useDownloadActions(task, filePath);
+  const actions = useDownloadActions(task, filePath, { onDiscoveredMirrors });
   const toast = useToast();
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const discoveredMirrorCount = task.discoveredMirrors?.length ?? 0;
 
   // Speed history tracking
   const MAX_SAMPLES = 120; // ~2 min at 1 sample/sec
@@ -482,6 +487,22 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
       {/* Actions for Error/Paused downloads */}
       {(task.status === "Error" || task.status === "Paused") && (
         <div className="mt-4 pt-3 border-t border-slate-700/30 flex flex-wrap gap-2">
+          {discoveredMirrorCount > 0 && (
+            <>
+              <button
+                disabled={isBusy}
+                onClick={() => onResume(task.id)}
+                className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50"
+              >
+                <Play size={14} />
+                {`Resume with ${discoveredMirrorCount} Mirror${discoveredMirrorCount === 1 ? '' : 's'}`}
+              </button>
+              <div className="basis-full text-[10px] text-emerald-300/80">
+                {discoveredMirrorCount} recovery-ready mirror candidate{discoveredMirrorCount === 1 ? '' : 's'} saved for this download.
+              </div>
+            </>
+          )}
+
           <button
             disabled={isBusy}
             onClick={withBusy('refresh', () => actions.handleRefreshUrl())}
@@ -534,7 +555,9 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
             <button
               disabled={isBusy}
               onClick={withBusy('arbitrage', async () => {
-                const urls = task.mirrorStats!.filter(m => !m.disabled).map(m => m.url);
+                const urls = task.mirrorStats!
+                  .filter(m => !m.disabled && !m.quarantined)
+                  .map(m => m.url);
                 if (urls.length < 2) { toast.error('Need at least 2 active mirrors to probe'); return; }
                 toast.info('Probing mirror bandwidth...');
                 const results = await invoke<{ url: string; speed_bytes_per_sec: number; latency_ms: number; supports_range: boolean; status: number }[]>('arbitrage_download', { urls });
@@ -548,22 +571,55 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
             >
               {busyAction === 'arbitrage' ? 'Probing...' : 'Probe Speeds'}
             </button>
-            <span className="ml-auto text-[10px] text-slate-500">{task.mirrorStats.filter(m => !m.disabled).length} active</span>
+            <span className="ml-auto text-[10px] text-slate-500">
+              {task.mirrorStats.filter(m => !m.disabled && !m.quarantined).length} active
+              {task.mirrorStats.some(m => m.quarantined) ? ` · ${task.mirrorStats.filter(m => m.quarantined).length} quarantined` : ''}
+            </span>
           </div>
           <div className="space-y-1">
             {task.mirrorStats.map((m, i) => {
               const speedKB = m.avg_speed_bps > 0 ? (m.avg_speed_bps / 1024).toFixed(0) : '0';
-              const maxSpeed = Math.max(...task.mirrorStats!.map(ms => ms.avg_speed_bps), 1);
+              const maxSpeed = Math.max(
+                ...task.mirrorStats!
+                  .filter(ms => !ms.disabled && !ms.quarantined)
+                  .map(ms => ms.avg_speed_bps),
+                1,
+              );
               const barWidth = (m.avg_speed_bps / maxSpeed) * 100;
+              const isUnavailable = m.disabled || m.quarantined;
+              const dotClass = m.disabled
+                ? 'bg-red-500'
+                : m.quarantined
+                  ? 'bg-amber-400'
+                  : m.canonical
+                    ? 'bg-emerald-400'
+                    : 'bg-blue-400';
+              const barClass = m.canonical ? 'bg-emerald-500' : m.quarantined ? 'bg-amber-500' : 'bg-blue-500';
               return (
-                <div key={i} className={`flex items-center gap-2 text-[10px] ${m.disabled ? 'opacity-30' : ''}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${m.disabled ? 'bg-red-500' : i === 0 ? 'bg-emerald-400' : 'bg-blue-400'}`} />
-                  <span className="text-slate-400 truncate w-20" title={m.url}>{m.source}</span>
-                  <div className="flex-1 h-1 bg-slate-800 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${i === 0 ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{ width: `${barWidth}%` }} />
+                <div key={i} className={`rounded border px-2 py-1.5 ${isUnavailable ? 'border-slate-700/50 opacity-60' : 'border-slate-700/20'}`}>
+                  <div className="flex items-center gap-2 text-[10px]">
+                    <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
+                    <span className="text-slate-300 truncate w-20" title={m.url}>{m.source}</span>
+                    {m.canonical && <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] text-emerald-300">canonical</span>}
+                    {m.quarantined && <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] text-amber-300">quarantined</span>}
+                    {!m.quarantined && !m.disabled && m.identity_status === 'verified' && (
+                      <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[9px] text-cyan-300">verified</span>
+                    )}
+                    <div className="flex-1 h-1 bg-slate-800 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full ${barClass}`} style={{ width: `${barWidth}%` }} />
+                    </div>
+                    <span className="text-slate-400 font-mono w-16 text-right">{speedKB} KB/s</span>
+                    <span className="text-slate-500 font-mono w-12 text-right">{m.latency_ms < 999999 ? `${m.latency_ms}ms` : '—'}</span>
                   </div>
-                  <span className="text-slate-400 font-mono w-16 text-right">{speedKB} KB/s</span>
-                  <span className="text-slate-500 font-mono w-8 text-right">{m.latency_ms < 999999 ? `${m.latency_ms}ms` : '—'}</span>
+                  <div className="mt-1 flex items-center justify-between text-[9px] text-slate-500">
+                    <span>{m.supports_range ? 'Range OK' : 'No range support'}</span>
+                    <span>{m.success_count} ok · {m.error_count} err</span>
+                  </div>
+                  {m.quarantine_reason && (
+                    <div className="mt-1 text-[9px] text-amber-300" title={m.quarantine_reason}>
+                      Rejected: {m.quarantine_reason}
+                    </div>
+                  )}
                 </div>
               );
             })}

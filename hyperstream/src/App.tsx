@@ -15,8 +15,9 @@ import { HistoryTab } from "./components/HistoryTab";
 import { ActivityTab } from "./components/ActivityTab";
 import { QueueManager } from "./components/QueueManager";
 import { SearchTab } from "./components/SearchTab";
-import type { AddTorrentResult, DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings, DownloadTask, MirrorStat } from "./types";
+import type { AddTorrentResult, DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings, DiscoveredMirror, DownloadTask, MirrorStat } from "./types";
 import { toTaskStatus } from "./types";
+import { findActiveTaskByUrl, isDuplicateDownloadError, normalizeDownloadUrl } from "./utils/downloadDedup";
 
 // Lazy load modals to improve initial render time
 const AddDownloadModal = React.lazy(() => import("./components/AddDownloadModal").then(m => ({ default: m.AddDownloadModal })));
@@ -115,6 +116,7 @@ function App() {
   const toastRef = useRef<ToastRef>(null);
   // Track completed IDs to avoid duplicate toasts
   const completedIds = useRef<Set<string>>(new Set());
+  const pendingDownloadUrlsRef = useRef<Set<string>>(new Set());
   // Track auto-remove timers so they can be cleaned on unmount
   const autoRemoveTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   // Stable ref for startDownload to avoid stale closures in event listeners
@@ -496,6 +498,20 @@ function App() {
   const startDownload = async (url: string, filename: string, force: boolean = false, customHeaders?: Record<string, string>, mirrors?: [string, string][]) => {
     const safeFilename = sanitizeFilename(filename);
     const downloadId = generateId();
+    const normalizedUrl = normalizeDownloadUrl(url);
+
+    if (!force) {
+      const existingTask = findActiveTaskByUrl(tasksRef.current, url);
+      if (existingTask) {
+        toastRef.current?.addToast(`Already downloading: ${existingTask.filename}`, 'info');
+        return;
+      }
+
+      if (normalizedUrl && pendingDownloadUrlsRef.current.has(normalizedUrl)) {
+        toastRef.current?.addToast(`Download already starting: ${safeFilename}`, 'info');
+        return;
+      }
+    }
 
     const newTask: DownloadTask = {
       id: downloadId,
@@ -509,6 +525,9 @@ function App() {
     };
 
     lastUpdate.current.delete(downloadId);
+    if (normalizedUrl) {
+      pendingDownloadUrlsRef.current.add(normalizedUrl);
+    }
 
     // Add to existing tasks instead of replacing
     setTasks(prev => [...prev, newTask]);
@@ -532,9 +551,24 @@ function App() {
         });
       }
     } catch (error) {
+      if (isDuplicateDownloadError(error)) {
+        debug('Duplicate download coalesced in UI:', url, error);
+        setTasks(prev => prev.filter(t => t.id !== downloadId));
+        const existingTask = findActiveTaskByUrl(tasksRef.current, url, downloadId);
+        toastRef.current?.addToast(
+          existingTask ? `Already downloading: ${existingTask.filename}` : 'This download is already active',
+          'info'
+        );
+        return;
+      }
+
       logError(error);
       toastRef.current?.addToast(`Failed to start download: ${error}`, 'error');
       setTasks(prev => prev.map(t => t.id === downloadId ? { ...t, status: 'Error' } : t));
+    } finally {
+      if (normalizedUrl) {
+        pendingDownloadUrlsRef.current.delete(normalizedUrl);
+      }
     }
   };
 
@@ -548,6 +582,68 @@ function App() {
   // Stable ref for downloadDir to avoid stale closures in memoized callbacks
   const downloadDirRef = useRef(downloadDir);
   useEffect(() => { downloadDirRef.current = downloadDir; }, [downloadDir]);
+
+  const updateTaskDiscoveredMirrorsMemo = React.useCallback((id: string, mirrors: DiscoveredMirror[]) => {
+    setTasks(prev => prev.map(task =>
+      task.id === id
+        ? { ...task, discoveredMirrors: mirrors.length > 0 ? mirrors : undefined }
+        : task
+    ));
+  }, []);
+
+  const getTaskResumeMirrorsMemo = React.useCallback((task: DownloadTask): [string, string][] => {
+    if (!task.url || !task.discoveredMirrors || task.discoveredMirrors.length === 0) {
+      return [];
+    }
+
+    const normalizeUrl = (value: string) => value.trim().replace(/#.*$/, '').replace(/\/+$/, '').toLowerCase();
+    const primaryKey = normalizeUrl(task.url);
+    const seen = new Set<string>([primaryKey]);
+    const mirrors: [string, string][] = [];
+
+    for (const mirror of task.discoveredMirrors) {
+      const url = mirror.url?.trim();
+      if (!url) continue;
+
+      const key = normalizeUrl(url);
+      if (!key || seen.has(key)) continue;
+
+      seen.add(key);
+      mirrors.push([url, mirror.source]);
+
+      if (mirrors.length >= 5) break;
+    }
+
+    return mirrors;
+  }, []);
+
+  const startExistingDownloadMemo = React.useCallback(async (task: DownloadTask) => {
+    if (!task.url) {
+      throw new Error('Download has no URL');
+    }
+
+    const path = `${downloadDirRef.current}/${task.filename}`;
+    const mirrors = getTaskResumeMirrorsMemo(task);
+
+    if (mirrors.length > 0) {
+      await invoke('start_multi_source_download', {
+        id: task.id,
+        primaryUrl: task.url,
+        mirrors,
+        path,
+        customHeaders: null,
+      });
+      return;
+    }
+
+    await invoke('start_download', {
+      id: task.id,
+      url: task.url,
+      path,
+      force: false,
+      customHeaders: null,
+    });
+  }, [getTaskResumeMirrorsMemo]);
 
   const pauseDownloadMemo = React.useCallback(async (id: string) => {
     const task = tasksRef.current.find(t => t.id === id);
@@ -571,20 +667,22 @@ function App() {
         toastRef.current?.addToast('Cannot resume: download has no URL', 'error');
         return;
       }
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Downloading' } : t));
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Downloading', errorMessage: undefined } : t));
       try {
-        await invoke("start_download", {
-          id: task.id,
-          url: task.url,
-          path: `${downloadDirRef.current}/${task.filename}`
-        });
+        await startExistingDownloadMemo(task);
       } catch (error) {
+        if (isDuplicateDownloadError(error)) {
+          debug('Duplicate resume request coalesced in UI:', id, error);
+          toastRef.current?.addToast(`Already downloading: ${task.filename}`, 'info');
+          return;
+        }
+
         logError("Failed to resume:", error);
         toastRef.current?.addToast('Failed to resume download', 'error');
         setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'Error' } : t));
       }
     }
-  }, []); // Stable
+  }, [startExistingDownloadMemo]);
 
   const deleteDownloadMemo = React.useCallback(async (id: string) => {
     try {
@@ -671,14 +769,15 @@ function App() {
     const toResume = tasks.filter(t => (t.status === 'Paused' || t.status === 'Error') && t.url);
     if (toResume.length === 0) return;
     setTasks(prev => prev.map(x =>
-      toResume.some(r => r.id === x.id) ? { ...x, status: 'Downloading' as const } : x
+      toResume.some(r => r.id === x.id) ? { ...x, status: 'Downloading' as const, errorMessage: undefined } : x
     ));
     toResume.forEach(t => {
-      invoke('start_download', {
-        id: t.id,
-        url: t.url,
-        path: `${downloadDirRef.current}/${t.filename}`
-      }).catch((err) => {
+      startExistingDownloadMemo(t).catch((err) => {
+        if (isDuplicateDownloadError(err)) {
+          debug('Duplicate resume-all request coalesced in UI:', t.id, err);
+          return;
+        }
+
         logError('Failed to resume:', t.id, err);
         setTasks(prev => prev.map(x => x.id === t.id ? { ...x, status: 'Error' as const } : x));
       });
@@ -799,6 +898,7 @@ function App() {
                 tasks={tasks}
                 onPause={pauseDownloadMemo}
                 onResume={resumeDownloadMemo}
+                onDiscoveredMirrors={updateTaskDiscoveredMirrorsMemo}
                 onDelete={deleteDownloadMemo}
                 onMoveUp={moveUpMemo}
                 onMoveDown={moveDownMemo}

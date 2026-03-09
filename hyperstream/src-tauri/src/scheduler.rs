@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use chrono::{DateTime, Local, Timelike};
 
 lazy_static::lazy_static! {
@@ -34,8 +34,15 @@ fn get_store_path() -> std::path::PathBuf {
         .join("scheduled.json")
 }
 
+fn is_persisted_status(status: &str) -> bool {
+    matches!(status, "pending" | "started")
+}
+
 fn save_to_disk(scheduled: &HashMap<String, ScheduledDownload>) {
-    let pending: Vec<_> = scheduled.values().filter(|d| d.status == "pending" || d.status == "started").collect();
+    let pending: Vec<_> = scheduled
+        .values()
+        .filter(|d| is_persisted_status(&d.status))
+        .collect();
     if let Ok(data) = serde_json::to_string_pretty(&pending) {
         let path = get_store_path();
         if let Some(parent) = path.parent() {
@@ -51,7 +58,7 @@ fn load_from_disk() {
         if let Ok(items) = serde_json::from_str::<Vec<ScheduledDownload>>(&data) {
             let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
             for mut item in items {
-                if item.status == "pending" || item.status == "started" {
+                if is_persisted_status(&item.status) {
                     // After restart, "started" items are orphaned (no running download).
                     // Treat as pending so they can be re-triggered on next scheduler tick.
                     if item.status == "started" {
@@ -78,13 +85,20 @@ pub fn remove_scheduled_download(id: &str) {
 
 pub fn force_start_download(id: &str) -> Option<ScheduledDownload> {
     let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(download) = scheduled.get_mut(id) {
+    let started = if let Some(download) = scheduled.get_mut(id) {
         if download.status == "pending" {
             download.status = "started".to_string();
-            return Some(download.clone());
+            Some(download.clone())
+        } else {
+            None
         }
+    } else {
+        None
+    };
+    if started.is_some() {
+        save_to_disk(&scheduled);
     }
-    None
+    started
 }
 
 pub fn get_scheduled_downloads() -> Vec<ScheduledDownload> {
@@ -92,43 +106,57 @@ pub fn get_scheduled_downloads() -> Vec<ScheduledDownload> {
     scheduled.values().cloned().collect()
 }
 
-pub fn handle_download_complete(id: &str) {
-    let end_action = {
-        let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(download) = scheduled.get_mut(id) {
-            download.status = "completed".to_string();
-            download.end_action.clone()
-        } else {
-            None
-        }
+pub fn handle_download_complete(id: &str) -> Option<String> {
+    let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
+    let end_action = if let Some(download) = scheduled.get_mut(id) {
+        download.status = "completed".to_string();
+        download.end_action.clone()
+    } else {
+        None
     };
-    
-    if let Some(action) = end_action {
-        match action.to_lowercase().as_str() {
-            "exit" => {
-                println!("[Scheduler] End action triggered: exit");
-                std::process::exit(0);
-            },
-            "sleep" => {
-                println!("[Scheduler] End action triggered: sleep");
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = std::process::Command::new("rundll32.exe")
-                        .args(["powrprof.dll,SetSuspendState", "0,1,0"])
-                        .spawn();
-                }
-            },
-            "shutdown" => {
-                println!("[Scheduler] End action triggered: shutdown");
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = std::process::Command::new("shutdown")
-                        .args(["/s", "/t", "0"])
-                        .spawn();
-                }
-            },
-            _ => {}
+    save_to_disk(&scheduled);
+    end_action
+}
+
+pub fn execute_end_action<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, action: &str) {
+    let action = action.to_lowercase();
+
+    if matches!(action.as_str(), "exit" | "sleep" | "shutdown") {
+        let state = app_handle.state::<crate::core_state::AppState>();
+        let paused = crate::pause_all_active_downloads(&state, false);
+        if paused > 0 {
+            println!(
+                "[Scheduler] Snapshotted {} active download(s) before {}",
+                paused,
+                action
+            );
         }
+    }
+
+    match action.as_str() {
+        "exit" => {
+            println!("[Scheduler] End action triggered: exit");
+            app_handle.exit(0);
+        },
+        "sleep" => {
+            println!("[Scheduler] End action triggered: sleep");
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("rundll32.exe")
+                    .args(["powrprof.dll,SetSuspendState", "0,1,0"])
+                    .spawn();
+            }
+        },
+        "shutdown" => {
+            println!("[Scheduler] End action triggered: shutdown");
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("shutdown")
+                    .args(["/s", "/t", "0"])
+                    .spawn();
+            }
+        },
+        _ => {}
     }
 }
 
@@ -183,7 +211,7 @@ pub fn check_scheduled_downloads<R: tauri::Runtime>(app_handle: &tauri::AppHandl
         }
     }
     
-    // Emit events for downloads that should start, then remove them from the map
+    // Emit events for downloads that should start.
     for download in &to_start {
         let _ = app_handle.emit("scheduled_download_start", serde_json::json!({
             "id": download.id,
@@ -223,10 +251,11 @@ pub fn check_scheduled_downloads<R: tauri::Runtime>(app_handle: &tauri::AppHandl
         crate::speed_limiter::GLOBAL_LIMITER.set_limit(settings.speed_limit_kbps * 1024);
     }
 
-    // Purge non-pending entries to prevent unbounded accumulation of dead entries
+    // Purge terminal entries while keeping started downloads tracked until they
+    // complete, stop, or are explicitly removed.
     {
         let mut scheduled = SCHEDULED_DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
-        scheduled.retain(|_, d| d.status == "pending");
+        scheduled.retain(|_, d| is_persisted_status(&d.status));
         save_to_disk(&scheduled);
     }
 }

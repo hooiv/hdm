@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::path::PathBuf;
 use tauri::AppHandle;
 use crate::plugin_vm::lua_host::{LuaPluginHost, PluginMetadata};
+use crate::search::{self, SearchResult};
 
 pub struct PluginManager {
     app: AppHandle,
-    plugins: Arc<Mutex<HashMap<String, LuaPluginHost>>>,
+    plugins: Arc<Mutex<HashMap<String, Arc<LuaPluginHost>>>>,
     metadata_cache: Arc<Mutex<HashMap<String, PluginMetadata>>>,
 }
 
@@ -19,12 +19,8 @@ impl PluginManager {
         }
     }
 
-    pub fn get_plugins_dir(&self) -> PathBuf {
-        // Use app_data_dir for consistency with updater.rs
-        use tauri::Manager;
-        self.app.path().app_data_dir()
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-            .join("plugins")
+    pub fn get_plugins_dir(&self) -> std::path::PathBuf {
+        crate::plugin_vm::get_plugins_dir(&self.app)
     }
 
     pub async fn load_plugins(&self) -> Result<(), String> {
@@ -76,7 +72,7 @@ impl PluginManager {
                         });
                     }
 
-                    new_plugins.insert(filename, host);
+                    new_plugins.insert(filename, Arc::new(host));
                 }
             }
         }
@@ -95,6 +91,43 @@ impl PluginManager {
 
     pub fn get_plugins_list(&self) -> Vec<PluginMetadata> {
         let cache = self.metadata_cache.lock().unwrap_or_else(|e| e.into_inner());
-        cache.values().cloned().collect()
+        let mut plugins: Vec<_> = cache.values().cloned().collect();
+        plugins.sort_by(|left, right| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()));
+        plugins
+    }
+
+    pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>, String> {
+        let query = search::sanitize_query(query)?;
+
+        let providers: Vec<(String, String, Arc<LuaPluginHost>)> = {
+            let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
+            let metadata_cache = self.metadata_cache.lock().unwrap_or_else(|e| e.into_inner());
+
+            plugins
+                .iter()
+                .map(|(filename, host)| {
+                    let engine_name = metadata_cache
+                        .get(filename)
+                        .map(|meta| meta.name.trim())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(filename.as_str())
+                        .to_string();
+
+                    (filename.clone(), engine_name, Arc::clone(host))
+                })
+                .collect()
+        };
+
+        let mut aggregated = Vec::new();
+
+        for (filename, engine_name, host) in providers {
+            match host.search(&query, &engine_name).await {
+                Ok(Some(mut results)) => aggregated.append(&mut results),
+                Ok(None) => {}
+                Err(err) => eprintln!("Search provider {} failed: {}", filename, err),
+            }
+        }
+
+        Ok(search::finalize_results(aggregated))
     }
 }

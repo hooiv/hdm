@@ -1,4 +1,5 @@
 let HYPERSTREAM_URL = 'http://localhost:14733';
+let eventSource = null;
 
 async function initApiUrl() {
     const { apiUrl } = await chrome.storage.local.get({ apiUrl: HYPERSTREAM_URL });
@@ -9,16 +10,32 @@ async function initApiUrl() {
         input.addEventListener('change', async () => {
             HYPERSTREAM_URL = input.value.trim() || HYPERSTREAM_URL;
             await chrome.storage.local.set({ apiUrl: HYPERSTREAM_URL });
-            updateStatus();
+            await updateStatus();
+            await initEventSource();
+            await refreshStatus();
+            await refreshFeeds();
         });
     }
 }
 
+async function getAuthToken() {
+    const { authToken } = await chrome.storage.local.get({ authToken: '' });
+    return authToken.trim();
+}
+
 async function initEventSource() {
     if (!window.EventSource) return;
+    if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+    }
+
+    const token = await getAuthToken();
+    if (!token) return;
+
     try {
-        const es = new EventSource(`${HYPERSTREAM_URL}/events`);
-        es.onmessage = (e) => {
+        eventSource = new EventSource(`${HYPERSTREAM_URL}/events?token=${encodeURIComponent(token)}`);
+        eventSource.onmessage = (e) => {
             try {
                 const msg = JSON.parse(e.data);
                 if (msg.type === 'download_requested' || msg.type === 'extension_download') {
@@ -49,6 +66,9 @@ async function initEventSource() {
                 }
             } catch {}
         };
+        eventSource.onerror = (e) => {
+            console.warn('EventSource connection error', e);
+        };
     } catch (e) {
         console.warn('EventSource init failed', e);
     }
@@ -65,9 +85,16 @@ async function checkConnection() {
 }
 
 // helpers for feeds API
-async function getAuthHeaders() {
-    const { authToken } = await chrome.storage.local.get({ authToken: '' });
-    return authToken ? { 'X-HyperStream-Token': authToken } : {};
+async function getAuthHeaders(includeJson = false) {
+    const token = await getAuthToken();
+    const headers = {};
+    if (includeJson) {
+        headers['Content-Type'] = 'application/json';
+    }
+    if (token) {
+        headers['X-HyperStream-Token'] = token;
+    }
+    return headers;
 }
 
 async function refreshFeeds() {
@@ -77,7 +104,7 @@ async function refreshFeeds() {
         const container = document.getElementById('feeds-list');
         if (!container) return;
         if (!res.ok) {
-            container.textContent = 'Error fetching feeds';
+            container.textContent = res.status === 401 ? 'Auth token required' : 'Error fetching feeds';
             return;
         }
         const list = await res.json();
@@ -192,6 +219,9 @@ async function initToken() {
         await chrome.storage.local.set({ authToken: token });
         tokenStatus.className = 'token-status valid';
         tokenStatus.textContent = 'Token saved successfully';
+        await initEventSource();
+        await refreshStatus();
+        await refreshFeeds();
 
         // Brief visual feedback
         saveBtn.textContent = 'Saved!';
@@ -201,11 +231,12 @@ async function initToken() {
 
 async function refreshStatus() {
     try {
-        const res = await fetch(`${HYPERSTREAM_URL}/downloads`);
+        const headers = await getAuthHeaders();
+        const res = await fetch(`${HYPERSTREAM_URL}/downloads`, { headers });
         const container = document.getElementById('status-list');
         if (!container) return;
         if (!res.ok) {
-            container.textContent = 'Error fetching status';
+            container.textContent = res.status === 401 ? 'Auth token required' : 'Error fetching status';
             return;
         }
         const list = await res.json();
@@ -218,17 +249,22 @@ async function refreshStatus() {
         list.forEach(item => {
             count++;
             const div = document.createElement('div');
-            div.textContent = `${item.filename||'(unknown)'} ${(item.downloaded/item.total*100).toFixed(1)}% ${item.status}`;
-            const pause = document.createElement('button');
-            pause.textContent = '⏸';
-            pause.style.marginLeft='4px';
-            pause.onclick = () => control(item.id,'pause');
-            const cancel = document.createElement('button');
-            cancel.textContent = '✖';
-            cancel.style.marginLeft='2px';
-            cancel.onclick = () => control(item.id,'cancel');
-            div.appendChild(pause);
-            div.appendChild(cancel);
+            const percent = item.total > 0 ? ((item.downloaded / item.total) * 100).toFixed(1) : '0.0';
+            div.textContent = `${item.filename||'(unknown)'} ${percent}% ${item.status}`;
+            if (item.can_pause !== false) {
+                const pause = document.createElement('button');
+                pause.textContent = '⏸';
+                pause.style.marginLeft='4px';
+                pause.onclick = () => control(item.id,'pause');
+                div.appendChild(pause);
+            }
+            if (item.can_cancel !== false) {
+                const cancel = document.createElement('button');
+                cancel.textContent = '✖';
+                cancel.style.marginLeft='2px';
+                cancel.onclick = () => control(item.id,'cancel');
+                div.appendChild(cancel);
+            }
             container.appendChild(div);
         });
         chrome.action.setBadgeText({ text: count > 0 ? count.toString() : '' });
@@ -239,9 +275,10 @@ async function refreshStatus() {
 
 async function control(id, action) {
     try {
+        const headers = await getAuthHeaders(true);
         await fetch(`${HYPERSTREAM_URL}/control`, {
             method: 'POST',
-            headers: {'Content-Type':'application/json'},
+            headers,
             body: JSON.stringify({ id, action })
         });
         refreshStatus();
@@ -251,22 +288,22 @@ async function control(id, action) {
 }
 
 // Initialize
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     await initApiUrl();
-    await initApiUrl();
-    updateStatus();
-    initToggle();
-    initToken();
+    await updateStatus();
+    await initToggle();
+    await initToken();
 
     const statusBtn = document.getElementById('refresh-status-btn');
     if (statusBtn) statusBtn.addEventListener('click', refreshStatus);
     const feedsBtn = document.getElementById('refresh-feeds-btn');
     if (feedsBtn) feedsBtn.addEventListener('click', refreshFeeds);
 
-    initEventSource();
+    await initEventSource();
+    await refreshStatus();
 
     // initial feed load
-    refreshFeeds();
+    await refreshFeeds();
 
     // Check connection periodically
     setInterval(updateStatus, 3000);

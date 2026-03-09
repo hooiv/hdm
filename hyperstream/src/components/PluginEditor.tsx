@@ -99,6 +99,7 @@ const PluginEditor: React.FC = () => {
         content: codeRef.current,
       });
       setIsDirty(false);
+      await loadPlugins();
       // Better UI than alert
       setOutput((prev) => [
         { id: ++outputIdRef.current, text: `[${new Date().toLocaleTimeString()}] Saved ${selectedPluginRef.current}.lua` },
@@ -119,10 +120,10 @@ const PluginEditor: React.FC = () => {
     try {
       await invoke("save_plugin_source", {
         filename: safeName,
-        content: `-- Plugin: ${safeName}\n-- Version: 1.0\n-- Domains: example.com\n\nplugin = {\n    name = "${safeName}",\n    version = "1.0"\n}\n\nfunction extract_stream(url)\n    -- extraction logic\nend`,
+        content: `-- Plugin: ${safeName}\n-- Version: 1.0\n-- Domains: example.com\n\nplugin = {\n    name = "${safeName}",\n    version = "1.0",\n    domains = { "example.com" }\n}\n\nfunction search(query)\n    -- Use host.http_get(...) + parsing here and return an array of results:\n    -- { title = "...", link = "https://..." or "magnet:...", size = "1.2 GB", seeds = 10, leechers = 2 }\n    return {}\nend\n\nfunction extract_stream(url)\n    -- extraction logic\nend`,
       });
       await loadPlugins();
-      handleSelectPlugin(safeName);
+      await handleSelectPlugin(safeName);
     } catch (e) {
       toast.error("Create failed: " + e);
     }

@@ -1,6 +1,34 @@
 // HyperStream Popup Logic V2
 
 let API_URL = "http://localhost:14733";
+let eventSource = null;
+
+function buildAuthHeaders(token, includeJson = false) {
+    const headers = {};
+    if (includeJson) {
+        headers['Content-Type'] = 'application/json';
+    }
+    if (token) {
+        headers['X-HyperStream-Token'] = token;
+    }
+    return headers;
+}
+
+async function getAuthToken() {
+    const { authToken } = await chrome.storage.local.get({ authToken: '' });
+    return authToken.trim();
+}
+
+async function getAuthHeaders(includeJson = false) {
+    return buildAuthHeaders(await getAuthToken(), includeJson);
+}
+
+function setTokenStatus(message, tone = 'neutral') {
+    const statusEl = document.getElementById('tokenStatus');
+    if (!statusEl) return;
+    statusEl.textContent = message;
+    statusEl.style.color = tone === 'error' ? '#f87171' : tone === 'success' ? '#22c55e' : '#94a3b8';
+}
 
 // Allow overriding the API URL via storage to support custom ports or remote hosts
 async function initApiUrl() {
@@ -12,9 +40,35 @@ async function initApiUrl() {
         input.addEventListener('change', async () => {
             API_URL = input.value.trim() || API_URL;
             await chrome.storage.local.set({ apiUrl: API_URL });
-            updateStatus();
+            await checkHealth();
+            await initEventSource();
+            await refreshStatus();
         });
     }
+}
+
+async function initToken() {
+    const tokenInput = document.getElementById('tokenInput');
+    const saveBtn = document.getElementById('saveToken');
+    if (!tokenInput || !saveBtn) return;
+
+    const existingToken = await getAuthToken();
+    if (existingToken) {
+        tokenInput.value = existingToken;
+        setTokenStatus('Token configured', 'success');
+    } else {
+        setTokenStatus('No token set — protected routes will be unavailable');
+    }
+
+    saveBtn.addEventListener('click', async () => {
+        const token = tokenInput.value.trim();
+        await chrome.storage.local.set({ authToken: token });
+        setTokenStatus(token ? 'Token saved successfully' : 'Token cleared', token ? 'success' : 'neutral');
+        saveBtn.textContent = 'Saved!';
+        setTimeout(() => { saveBtn.textContent = 'Save Token'; }, 1500);
+        await initEventSource();
+        await refreshStatus();
+    });
 }
 
 // State
@@ -25,9 +79,12 @@ let searchQuery = '';
 
 document.addEventListener('DOMContentLoaded', async () => {
     await initApiUrl();
-    checkHealth();
+    await initToken();
+    await checkHealth();
     setupEventListeners();
     scanCurrentTab();
+    await initEventSource();
+    await refreshStatus();
 });
 
 function setupEventListeners() {
@@ -223,9 +280,17 @@ async function downloadSelected() {
 // Active download status helpers
 async function initEventSource() {
     if (!window.EventSource) return;
+    if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+    }
+
+    const token = await getAuthToken();
+    if (!token) return;
+
     try {
-        const es = new EventSource(`${API_URL}/events`);
-        es.onmessage = (e) => {
+        eventSource = new EventSource(`${API_URL}/events?token=${encodeURIComponent(token)}`);
+        eventSource.onmessage = (e) => {
             try {
                 const msg = JSON.parse(e.data);
                 if (msg.type === 'download_requested' || msg.type === 'extension_download') {
@@ -249,6 +314,9 @@ async function initEventSource() {
                 }
             } catch {}
         };
+        eventSource.onerror = (e) => {
+            console.warn('EventSource connection error', e);
+        };
     } catch (e) {
         console.warn('EventSource init failed', e);
     }
@@ -256,13 +324,17 @@ async function initEventSource() {
 
 async function refreshStatus() {
     try {
-        const res = await fetch(`${API_URL}/downloads`);
-        if (res.ok) {
-            const list = await res.json();
-            renderStatusList(list);
+        const headers = await getAuthHeaders();
+        const res = await fetch(`${API_URL}/downloads`, { headers });
+        if (!res.ok) {
+            renderStatusError(res.status === 401 ? 'Auth token required' : 'Unable to fetch active downloads');
+            return;
         }
+        const list = await res.json();
+        renderStatusList(list);
     } catch (e) {
         console.error('Status fetch failed', e);
+        renderStatusError('Unable to fetch active downloads');
     }
 }
 
@@ -291,35 +363,46 @@ function renderStatusList(list) {
         count++;
         const div = document.createElement('div');
         div.className = 'status-item';
-        let label = `${item.filename || '(unknown)'} ${((item.downloaded/item.total)*100).toFixed(1)}% ${item.status}`;
+        const percent = item.total > 0 ? ((item.downloaded / item.total) * 100).toFixed(1) : '0.0';
+        let label = `${item.filename || '(unknown)'} ${percent}% ${item.status}`;
         if (item.speed_bps) label += ` ${formatSpeed(item.speed_bps)}`;
         div.textContent = label;
-        // add pause/cancel buttons
-        const pauseBtn = document.createElement('button');
-        pauseBtn.textContent = '⏸';
-        pauseBtn.title = 'Pause';
-        pauseBtn.onclick = () => controlDownload(item.id, 'pause');
-        const cancelBtn = document.createElement('button');
-        cancelBtn.textContent = '✖';
-        cancelBtn.title = 'Cancel';
-        cancelBtn.onclick = () => controlDownload(item.id, 'cancel');
-        div.appendChild(pauseBtn);
-        div.appendChild(cancelBtn);
+        if (item.can_pause !== false) {
+            const pauseBtn = document.createElement('button');
+            pauseBtn.textContent = '⏸';
+            pauseBtn.title = 'Pause';
+            pauseBtn.onclick = () => controlDownload(item.id, 'pause');
+            div.appendChild(pauseBtn);
+        }
+        if (item.can_cancel !== false) {
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = '✖';
+            cancelBtn.title = 'Cancel';
+            cancelBtn.onclick = () => controlDownload(item.id, 'cancel');
+            div.appendChild(cancelBtn);
+        }
         container.appendChild(div);
     });
     chrome.action.setBadgeText({ text: count > 0 ? count.toString() : '' });
 }
 
+function renderStatusError(message) {
+    const container = document.getElementById('status-list');
+    if (!container) return;
+    container.textContent = message;
+}
+
 // expose for unit tests
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { formatSpeed };
+    module.exports = { formatSpeed, buildAuthHeaders };
 }
 
 async function controlDownload(id, action) {
     try {
+        const headers = await getAuthHeaders(true);
         await fetch(`${API_URL}/control`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify({ id, action })
         });
         refreshStatus();
@@ -335,7 +418,6 @@ const EXT_VERSION = (typeof chrome !== 'undefined' && chrome.runtime && chrome.r
 
 async function checkHealth() {
     const statusEl = document.getElementById('status');
-    const btn = document.getElementById('download-selected-btn');
     try {
         const res = await fetch(`${API_URL}/health`);
         if (res.ok) {
@@ -386,9 +468,10 @@ function scanCurrentTab() {
 
 async function triggerDownload(url, filename, silent = false) {
     try {
+        const headers = await getAuthHeaders(true);
         const response = await fetch(`${API_URL}/download`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers,
             body: JSON.stringify({ url, filename })
         });
 
@@ -399,6 +482,9 @@ async function triggerDownload(url, filename, silent = false) {
                 setTimeout(() => chrome.action.setBadgeText({ text: "" }), 1000);
             }
             return true;
+        }
+        if (response.status === 401) {
+            setTokenStatus('Saved token was rejected by HyperStream', 'error');
         }
     } catch (e) {
         if (!silent) alert("Connection Failed");

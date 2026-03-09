@@ -19,6 +19,7 @@ pub struct RetryMetadata {
     pub priority: DownloadPriority,
     pub custom_headers: Option<HashMap<String, String>>,
     pub expected_checksum: Option<String>,
+    pub fresh_restart: bool,
     pub retry_count: u32,
     pub max_retries: u32,
 }
@@ -71,6 +72,9 @@ pub struct QueuedDownload {
     /// Expected checksum for post-download verification (e.g. "sha256:abc123...")
     #[serde(default)]
     pub expected_checksum: Option<String>,
+    /// Force the next queued attempt to restart from a clean file instead of resuming.
+    #[serde(default)]
+    pub fresh_restart: bool,
     /// Number of times this download has been retried after failure.
     #[serde(default)]
     pub retry_count: u32,
@@ -103,6 +107,8 @@ pub struct DownloadQueue {
     low: VecDeque<QueuedDownload>,
     /// IDs of currently active (downloading) items.
     active: Vec<String>,
+    /// Normalized URL reservations for active items keyed by download ID.
+    active_urls: HashMap<String, String>,
     /// Maximum concurrent downloads allowed.
     max_concurrent: u32,
     /// Channel sender to notify the queue processor that a slot opened.
@@ -123,6 +129,7 @@ impl DownloadQueue {
             normal: VecDeque::new(),
             low: VecDeque::new(),
             active: Vec::new(),
+            active_urls: HashMap::new(),
             max_concurrent: 5, // sensible default; overridden by settings
             notify_tx: None,
         }
@@ -137,16 +144,16 @@ impl DownloadQueue {
     }
 
     /// Enqueue a download, placing it in the correct priority lane.
-    pub fn enqueue(&mut self, item: QueuedDownload) {
-        // Don't enqueue duplicates
-        if self.contains(&item.id) {
-            return;
+    pub fn enqueue(&mut self, item: QueuedDownload) -> bool {
+        if self.contains(&item.id) || self.contains_normalized_url(&crate::normalize_download_url(&item.url)) {
+            return false;
         }
         let lane = self.lane_mut(item.priority);
         lane.push_back(item);
         if let Some(tx) = &self.notify_tx {
             let _ = tx.send(QueueEvent::Enqueued);
         }
+        true
     }
 
     /// Try to dequeue the next download if a slot is available.
@@ -161,7 +168,7 @@ impl DownloadQueue {
             .or_else(|| self.low.pop_front());
 
         if let Some(ref dl) = item {
-            self.active.push(dl.id.clone());
+            self.mark_active(&dl.id, &dl.url);
         }
         item
     }
@@ -169,17 +176,33 @@ impl DownloadQueue {
     /// Mark a download as no longer active (completed, errored, or paused).
     /// This opens a slot for the next queued download.
     pub fn mark_finished(&mut self, id: &str) {
+        self.mark_finished_with_notify(id, true);
+    }
+
+    /// Mark a download as no longer active without notifying the queue processor.
+    /// Useful when bulk-pausing downloads during shutdown/protective flows where
+    /// starting new queued work would be undesirable.
+    pub fn mark_finished_silent(&mut self, id: &str) {
+        self.mark_finished_with_notify(id, false);
+    }
+
+    fn mark_finished_with_notify(&mut self, id: &str, notify: bool) {
         self.active.retain(|a| a != id);
-        if let Some(tx) = &self.notify_tx {
-            let _ = tx.send(QueueEvent::SlotAvailable);
+        self.active_urls.remove(id);
+        if notify {
+            if let Some(tx) = &self.notify_tx {
+                let _ = tx.send(QueueEvent::SlotAvailable);
+            }
         }
     }
 
     /// Mark a download as actively running (called when starting directly, not via queue).
-    pub fn mark_active(&mut self, id: &str) {
+    pub fn mark_active(&mut self, id: &str, url: &str) {
         if !self.active.contains(&id.to_string()) {
             self.active.push(id.to_string());
         }
+        self.active_urls
+            .insert(id.to_string(), crate::normalize_download_url(url));
     }
 
     /// Check if there's room to start a download immediately.
@@ -255,6 +278,11 @@ impl DownloadQueue {
             || self.low.iter().any(|d| d.id == id)
     }
 
+    pub fn contains_url(&self, url: &str) -> bool {
+        let normalized = crate::normalize_download_url(url);
+        !normalized.is_empty() && self.contains_normalized_url(&normalized)
+    }
+
     /// Clear all queued items (does NOT touch active downloads).
     pub fn clear_queue(&mut self) {
         self.high.clear();
@@ -279,8 +307,13 @@ impl DownloadQueue {
         if item.retry_count >= 2 {
             item.priority = DownloadPriority::Low;
         }
+        // Requeues commonly happen while the failed attempt is still marked active.
+        // Remove it first so duplicate suppression doesn't silently drop the retry.
+        self.active.retain(|a| a != &item.id);
+        self.active_urls.remove(&item.id);
+        let queued_before = self.queued_count();
         self.enqueue(item);
-        true
+        self.queued_count() > queued_before
     }
 
     /// Get the queue position of a specific download (1-based, across all lanes).
@@ -316,6 +349,13 @@ impl DownloadQueue {
             }
         }
         None
+    }
+
+    fn contains_normalized_url(&self, normalized_url: &str) -> bool {
+        self.active_urls.values().any(|url| url == normalized_url)
+            || self.high.iter().any(|d| crate::normalize_download_url(&d.url) == normalized_url)
+            || self.normal.iter().any(|d| crate::normalize_download_url(&d.url) == normalized_url)
+            || self.low.iter().any(|d| crate::normalize_download_url(&d.url) == normalized_url)
     }
 }
 
@@ -422,6 +462,7 @@ pub async fn queue_processor(app: tauri::AppHandle, mut rx: mpsc::UnboundedRecei
                                         priority: dl_priority_retry,
                                         custom_headers: dl_headers_retry.clone(),
                                         expected_checksum: checksum_retry.clone(),
+                                        fresh_restart: dl.fresh_restart,
                                         retry_count: dl_retry_count,
                                         max_retries: dl_max_retries,
                                     });
@@ -429,20 +470,18 @@ pub async fn queue_processor(app: tauri::AppHandle, mut rx: mpsc::UnboundedRecei
 
                                 let state: tauri::State<AppState> = app_clone.state();
 
-                                let result = crate::engine::session::start_download_impl(
+                                let result = crate::engine::start_download_routed(
                                     &app_clone,
                                     &state,
                                     dl_id.clone(),
                                     dl_url,
                                     dl_path.clone(),
-                                    None,
                                     dl_headers,
                                     false,
                                 ).await;
 
-                                // If start_download_impl itself returns Err, the download never
-                                // started (DNS failure, file creation error, etc). Handle retry
-                                // and slot release here since no monitor was spawned.
+                                // If the routed start itself returns Err, the engine never took
+                                // ownership of cleanup. Handle retry and slot release here.
                                 if let Err(e) = result {
                                     eprintln!("[Queue] Download {} failed to start: {}", dl_id, e);
                                     {
@@ -460,6 +499,7 @@ pub async fn queue_processor(app: tauri::AppHandle, mut rx: mpsc::UnboundedRecei
                                             added_at: chrono::Utc::now().timestamp_millis(),
                                             custom_headers: dl_headers_retry,
                                             expected_checksum: checksum_retry,
+                                            fresh_restart: dl.fresh_restart,
                                             retry_count: dl_retry_count,
                                             max_retries: dl_max_retries,
                                             retry_delay_ms: 0,
@@ -521,4 +561,98 @@ pub fn init_queue(app: &tauri::AppHandle) {
 
     // Trigger processing of any restored queue items
     let _ = tx.send(QueueEvent::Enqueued);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queued_download(id: &str) -> QueuedDownload {
+        queued_download_with_url(id, "https://example.com/file.bin")
+    }
+
+    fn queued_download_with_url(id: &str, url: &str) -> QueuedDownload {
+        QueuedDownload {
+            id: id.to_string(),
+            url: url.to_string(),
+            path: "/tmp/file.bin".to_string(),
+            priority: DownloadPriority::Normal,
+            added_at: 0,
+            custom_headers: None,
+            expected_checksum: None,
+            fresh_restart: false,
+            retry_count: 0,
+            max_retries: 3,
+            retry_delay_ms: 0,
+        }
+    }
+
+    #[test]
+    fn requeue_failed_reenqueues_even_if_id_is_still_active() {
+        let mut queue = DownloadQueue::new();
+        queue.mark_active("download-1", "https://example.com/file.bin");
+
+        let requeued = queue.requeue_failed(queued_download("download-1"));
+
+        assert!(requeued);
+        assert_eq!(queue.active_count(), 0);
+        assert_eq!(queue.queued_count(), 1);
+        assert_eq!(queue.position("download-1"), Some(1));
+    }
+
+    #[test]
+    fn queued_download_deserializes_missing_fresh_restart_as_false() {
+        let item: QueuedDownload = serde_json::from_str(r#"{
+            "id": "download-1",
+            "url": "https://example.com/file.bin",
+            "path": "/tmp/file.bin",
+            "priority": "Normal",
+            "added_at": 0,
+            "retry_count": 0,
+            "max_retries": 3,
+            "retry_delay_ms": 0
+        }"#).unwrap();
+
+        assert!(!item.fresh_restart);
+    }
+
+    #[test]
+    fn mark_finished_silent_removes_active_without_notifying_processor() {
+        let mut queue = DownloadQueue::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        queue.set_notify_channel(tx);
+        queue.mark_active("download-1", "https://example.com/file.bin");
+
+        queue.mark_finished_silent("download-1");
+
+        assert_eq!(queue.active_count(), 0);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn enqueue_rejects_duplicate_normalized_urls() {
+        let mut queue = DownloadQueue::new();
+
+        assert!(queue.enqueue(queued_download_with_url(
+            "download-1",
+            "HTTPS://Example.com:443/file.bin#frag",
+        )));
+        assert!(!queue.enqueue(queued_download_with_url(
+            "download-2",
+            "https://example.com/file.bin",
+        )));
+        assert_eq!(queue.queued_count(), 1);
+    }
+
+    #[test]
+    fn mark_finished_removes_active_url_reservation() {
+        let mut queue = DownloadQueue::new();
+        queue.mark_active("download-1", "https://example.com/file.bin#frag");
+
+        assert!(queue.contains_url("https://example.com/file.bin"));
+
+        queue.mark_finished_silent("download-1");
+
+        assert!(!queue.contains_url("https://example.com/file.bin"));
+    }
 }

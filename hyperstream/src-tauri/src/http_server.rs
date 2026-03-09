@@ -132,6 +132,23 @@ pub async fn start_server(
             .untuple_one()
     };
 
+    let event_auth_filter = {
+        let token = auth_token.clone();
+        warp::header::optional::<String>("x-hyperstream-token")
+            .and(warp::query::<HashMap<String, String>>())
+            .and_then(move |header_token: Option<String>, query_params: HashMap<String, String>| {
+                let expected = token.clone();
+                async move {
+                    let query_token = query_params.get("token").map(|value| value.as_str());
+                    match header_token.as_deref().or(query_token) {
+                        Some(t) if t == expected.as_str() => Ok(()),
+                        _ => Err(warp::reject::custom(Unauthorized)),
+                    }
+                }
+            })
+            .untuple_one()
+    };
+
     let download_route = warp::path("download")
         .and(warp::post())
         .and(auth_token_filter.clone())
@@ -164,6 +181,7 @@ pub async fn start_server(
     let state_filter = warp::any().map(move || ah_clone.clone());
     let status_route = warp::path("downloads")
         .and(warp::get())
+        .and(auth_token_filter.clone())
         .and(state_filter.clone())
         .and_then(handle_status);
 
@@ -187,6 +205,7 @@ pub async fn start_server(
     // Server-sent events endpoint
     let events_route = warp::path("events")
         .and(warp::get())
+        .and(event_auth_filter)
         .map(|| {
             let rx = EVENT_SENDER.subscribe();
             let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
@@ -196,11 +215,6 @@ pub async fn start_server(
                 });
             warp::sse::reply(warp::sse::keep_alive().stream(stream))
         });
-
-    // Version info (useful for extension compatibility checks)
-    let version_route = warp::path("version")
-        .and(warp::get())
-        .map(|| warp::reply::json(&serde_json::json!({"version": env!("CARGO_PKG_VERSION")})));
 
     // Auth token endpoint removed for security — token should be exchanged
     // via native messaging or secure file-based handshake, not an unauthenticated HTTP endpoint.
@@ -301,6 +315,7 @@ pub async fn start_server(
         .or(update_feed)
         .or(remove_feed)
         .or(refresh_feed)
+        .recover(handle_rejection)
         .with(cors);
 
     warp::serve(routes).run(([127, 0, 0, 1], 14733)).await; 
@@ -320,6 +335,19 @@ fn error_response(code: warp::http::StatusCode) -> warp::http::Response<warp::hy
             // Fallback: if even the builder fails, return a minimal 500
             warp::http::Response::new(warp::hyper::Body::empty())
         })
+}
+
+async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std::convert::Infallible> {
+    if err.find::<Unauthorized>().is_some() {
+        return Ok(error_response(warp::http::StatusCode::UNAUTHORIZED));
+    }
+
+    if err.is_not_found() {
+        return Ok(error_response(warp::http::StatusCode::NOT_FOUND));
+    }
+
+    eprintln!("[http_server] Unhandled rejection: {:?}", err);
+    Ok(error_response(warp::http::StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 async fn handle_p2p_request(
@@ -491,19 +519,6 @@ async fn handle_download(
     }
 }
 
-
-// Additional structures for new endpoints
-#[derive(Debug, serde::Serialize)]
-struct DownloadStatus {
-    id: String,
-    url: String,
-    filename: Option<String>,
-    downloaded: u64,
-    total: u64,
-    speed_bps: u64,
-    status: String,
-}
-
 #[derive(Debug, serde::Deserialize)]
 struct ControlRequest {
     id: String,
@@ -515,31 +530,7 @@ async fn handle_status(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     use tauri::Manager;
     let state = app_handle.state::<crate::core_state::AppState>();
-    let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-    let mut list = Vec::with_capacity(downloads.len());
-    for (id, session) in downloads.iter() {
-        // get basic info from session manager
-        let mgr = session.manager.lock().unwrap_or_else(|e| e.into_inner());
-        let downloaded = mgr.total_downloaded();
-        let total = mgr.file_size;
-        let status = if mgr.is_complete() {
-            "Complete".to_string()
-        } else {
-            "Downloading".to_string()
-        };
-        let speed = mgr.total_speed();
-        list.push(DownloadStatus {
-            id: id.clone(),
-            url: session.url.clone(),
-            filename: std::path::Path::new(&session.path)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string()),
-            downloaded,
-            total,
-            speed_bps: speed,
-            status,
-        });
-    }
+    let list = crate::collect_active_download_statuses(&state);
     Ok(warp::reply::json(&list))
 }
 
@@ -549,24 +540,12 @@ async fn handle_control(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     use tauri::Manager;
     let state = app_handle.state::<crate::core_state::AppState>();
-    let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(session) = downloads.get(&req.id) {
-        match req.action.as_str() {
-            "pause" => {
-                let _ = session.stop_tx.send(());
-                return Ok(warp::reply::json(&serde_json::json!({"success":true})));    
-            }
-            "cancel" => {
-                let _ = session.stop_tx.send(());
-                downloads.remove(&req.id);
-                return Ok(warp::reply::json(&serde_json::json!({"success":true})));    
-            }
-            _ => {
-                return Ok(warp::reply::json(&serde_json::json!({"success":false, "message":"unknown action"})));    
-            }
-        }
-    }
-    Ok(warp::reply::json(&serde_json::json!({"success":false, "message":"id not found"})))
+    let reply = match crate::control_active_download(&state, &req.id, &req.action) {
+        Ok(true) => serde_json::json!({"success": true}),
+        Ok(false) => serde_json::json!({"success": false, "message": "id not found"}),
+        Err(message) => serde_json::json!({"success": false, "message": message}),
+    };
+    Ok(warp::reply::json(&reply))
 }
 
 async fn handle_batch(

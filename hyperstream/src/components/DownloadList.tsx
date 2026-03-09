@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { DownloadItem } from './DownloadItem';
-import type { DownloadTask } from '../types';
+import type { DiscoveredMirror, DownloadTask } from '../types';
 import { Virtuoso } from 'react-virtuoso';
 import { Inbox, Search, ArrowUpDown, ArrowUp, ArrowDown, X } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -15,13 +15,14 @@ interface DownloadListProps {
     tasks: DownloadTask[];
     onPause: (id: string) => void;
     onResume: (id: string) => void;
+    onDiscoveredMirrors?: (id: string, mirrors: DiscoveredMirror[]) => void;
     onDelete?: (id: string) => void;
     onMoveUp?: (id: string) => void;
     onMoveDown?: (id: string) => void;
     downloadDir: string;
 }
 
-export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onResume, onDelete, onMoveUp, onMoveDown, downloadDir }) => {
+export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir }) => {
     const [search, setSearch] = useState('');
     const [sortField, setSortField] = useState<SortField | null>(null);
     const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -75,6 +76,7 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
                     task={task}
                     onPause={onPause}
                     onResume={onResume}
+                    onDiscoveredMirrors={onDiscoveredMirrors}
                     onDelete={onDelete}
                     onMoveUp={onMoveUp}
                     onMoveDown={onMoveDown}
@@ -82,7 +84,7 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
                 />
             </div>
         );
-    }, [onPause, onResume, onDelete, onMoveUp, onMoveDown, downloadDir]);
+    }, [onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir]);
 
     if (tasks.length === 0) {
         return (

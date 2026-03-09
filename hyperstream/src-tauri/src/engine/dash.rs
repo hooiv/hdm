@@ -7,6 +7,315 @@ use crate::media::dash_parser::{DashManifest, DashRepresentation, DashSegment};
 use crate::settings;
 use crate::persistence;
 
+const DASH_STOPPED_ERROR: &str = "Download stopped";
+
+fn remove_dash_session(state: &AppState, id: &str) {
+    let mut map = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner());
+    map.remove(id);
+}
+
+fn record_dash_failure(
+    app: &tauri::AppHandle,
+    id: &str,
+    url: &str,
+    path: &str,
+    total_size: u64,
+    downloaded_bytes: u64,
+    started_at: &str,
+    elapsed: std::time::Duration,
+    segments_used: u32,
+    error_message: &str,
+) {
+    let _ = app.emit("download_error", serde_json::json!({
+        "id": id,
+        "error": error_message,
+    }));
+    crate::media::sounds::play_error();
+
+    let _ = persistence::upsert_download(persistence::SavedDownload {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: crate::engine::session::extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes,
+        status: "Error".to_string(),
+        segments: None,
+        last_active: Some(chrono::Utc::now().to_rfc3339()),
+        error_message: Some(error_message.to_string()),
+    });
+
+    let avg_speed = if elapsed.as_secs() > 0 {
+        downloaded_bytes / elapsed.as_secs()
+    } else {
+        0
+    };
+    let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: crate::engine::session::extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes,
+        status: "Error".to_string(),
+        started_at: started_at.to_string(),
+        finished_at: chrono::Local::now().to_rfc3339(),
+        avg_speed_bps: avg_speed,
+        duration_secs: elapsed.as_secs(),
+        segments_used,
+        error_message: Some(error_message.to_string()),
+        source_type: Some("dash".to_string()),
+    });
+
+    if let Some(log) = app.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+        let _ = log.append(crate::event_sourcing::LedgerEvent {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            aggregate_id: id.to_string(),
+            event_type: "DownloadError".to_string(),
+            payload: serde_json::json!({
+                "error": error_message,
+                "downloaded_bytes": downloaded_bytes,
+                "total_size": total_size,
+                "source": "dash",
+            }),
+        });
+    }
+}
+
+fn handle_dash_failure(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    id: &str,
+    url: &str,
+    path: &str,
+    total_size: u64,
+    downloaded_bytes: u64,
+    started_at: &str,
+    elapsed: std::time::Duration,
+    segments_used: u32,
+    error_message: &str,
+) {
+    record_dash_failure(
+        app,
+        id,
+        url,
+        path,
+        total_size,
+        downloaded_bytes,
+        started_at,
+        elapsed,
+        segments_used,
+        error_message,
+    );
+    remove_dash_session(state, id);
+    crate::engine::session::handle_download_failure_cleanup(app, id);
+}
+
+async fn finalize_dash_success(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    id: &str,
+    url: &str,
+    path: &str,
+    total_size: u64,
+    started_at: &str,
+    elapsed: std::time::Duration,
+    segments_used: u32,
+) -> Result<(), String> {
+    if let Err(integrity_error) = crate::engine::session::verify_queued_integrity(app, id, path).await {
+        crate::engine::session::mark_retry_for_fresh_restart(id);
+        handle_dash_failure(
+            app,
+            state,
+            id,
+            url,
+            path,
+            total_size,
+            total_size,
+            started_at,
+            elapsed,
+            segments_used,
+            &integrity_error,
+        );
+        return Ok(());
+    }
+
+    crate::engine::session::clear_retry_metadata(id);
+    crate::media::sounds::play_complete();
+    crate::cas_manager::register_cas(Some(url), None, path);
+
+    let _ = persistence::upsert_download(persistence::SavedDownload {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: crate::engine::session::extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes: total_size,
+        status: "Complete".to_string(),
+        segments: None,
+        last_active: Some(chrono::Utc::now().to_rfc3339()),
+        error_message: None,
+    });
+
+    let avg_speed = if elapsed.as_secs() > 0 {
+        total_size / elapsed.as_secs()
+    } else {
+        0
+    };
+    let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: crate::engine::session::extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes: total_size,
+        status: "Complete".to_string(),
+        started_at: started_at.to_string(),
+        finished_at: chrono::Local::now().to_rfc3339(),
+        avg_speed_bps: avg_speed,
+        duration_secs: elapsed.as_secs(),
+        segments_used,
+        error_message: None,
+        source_type: Some("dash".to_string()),
+    });
+
+    if let Some(log) = app.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+        let _ = log.append(crate::event_sourcing::LedgerEvent {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            aggregate_id: id.to_string(),
+            event_type: "DownloadCompleted".to_string(),
+            payload: serde_json::json!({
+                "total_size": total_size,
+                "duration_secs": elapsed.as_secs(),
+                "path": path,
+                "source": "dash",
+            }),
+        });
+    }
+
+    {
+        let id2 = id.to_string();
+        let path2 = path.to_string();
+        let url2 = url.to_string();
+        tokio::spawn(async move {
+            let settings = crate::settings::load_settings();
+            if let Some(webhooks) = settings.webhooks {
+                let manager = crate::webhooks::WebhookManager::new();
+                manager.load_configs(webhooks).await;
+                let payload = crate::webhooks::WebhookPayload {
+                    event: "DownloadComplete".to_string(),
+                    download_id: id2,
+                    filename: crate::engine::session::extract_filename(&path2).to_string(),
+                    url: url2,
+                    size: total_size,
+                    speed: 0,
+                    filepath: Some(path2),
+                    timestamp: chrono::Utc::now().timestamp(),
+                };
+                manager.trigger(crate::webhooks::WebhookEvent::DownloadComplete, payload).await;
+            }
+        });
+    }
+
+    crate::mqtt_client::publish_event(
+        "DownloadComplete",
+        id,
+        crate::engine::session::extract_filename(path),
+        "Complete",
+    );
+
+    {
+        let chatops = state.chatops_manager.clone();
+        let filename = crate::engine::session::extract_filename(path).to_string();
+        tokio::spawn(async move {
+            chatops.notify_completion(&filename).await;
+        });
+    }
+
+    {
+        let path_archive = path.to_string();
+        let id_archive = id.to_string();
+        tokio::spawn(async move {
+            let settings = crate::settings::load_settings();
+            if settings.auto_extract_archives {
+                if let Some(_archive_info) = crate::archive_manager::ArchiveManager::detect_archive(&path_archive) {
+                    let dest = std::path::Path::new(&path_archive)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or(".")
+                        .to_string();
+                    match crate::archive_manager::ArchiveManager::extract_archive(&path_archive, &dest) {
+                        Ok(msg) => {
+                            println!("[{}] DASH auto-extract: {}", id_archive, msg);
+                            if settings.cleanup_archives_after_extract {
+                                if let Err(e) = crate::archive_manager::ArchiveManager::cleanup_archive(&path_archive) {
+                                    eprintln!("[{}] Cleanup failed: {}", id_archive, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[{}] DASH auto-extract failed: {}", id_archive, e);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let settings_snap = crate::settings::load_settings();
+        if settings_snap.auto_sort_downloads {
+            match crate::file_categorizer::categorize_and_move(path, &settings_snap.download_dir) {
+                Ok((cat_result, new_path)) => {
+                    let moved = new_path != path;
+                    let _ = app.emit("file_categorized", serde_json::json!({
+                        "id": id,
+                        "filename": crate::engine::session::extract_filename(path),
+                        "category": cat_result.category_name,
+                        "icon": cat_result.icon,
+                        "color": cat_result.color,
+                        "should_move": cat_result.should_move,
+                        "moved": moved,
+                        "new_path": if moved { Some(&new_path) } else { None },
+                    }));
+                }
+                Err(e) => {
+                    eprintln!("[{}] DASH auto-sort failed: {}", id, e);
+                    let cat_result = crate::file_categorizer::categorize(
+                        crate::engine::session::extract_filename(path),
+                    );
+                    let _ = app.emit("file_categorized", serde_json::json!({
+                        "id": id,
+                        "filename": crate::engine::session::extract_filename(path),
+                        "category": cat_result.category_name,
+                        "icon": cat_result.icon,
+                        "color": cat_result.color,
+                        "should_move": false,
+                    }));
+                }
+            }
+        }
+    }
+
+    {
+        let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        queue.mark_finished(id);
+    }
+    remove_dash_session(state, id);
+
+    if let Some(action) = crate::scheduler::handle_download_complete(id) {
+        crate::scheduler::execute_end_action(app, &action);
+    }
+
+    Ok(())
+}
+
 /// Session information for an ongoing DASH download.
 ///
 /// DASH manifests typically provide separate video and audio tracks
@@ -15,6 +324,7 @@ use crate::persistence;
 /// the overall progress.
 pub struct DashSession {
     pub manifest_url: String,
+    pub output_path: String,
     pub video_rep: Option<DashRepresentation>,
     pub audio_rep: Option<DashRepresentation>,
     pub video_total: u64,
@@ -52,6 +362,10 @@ pub(crate) async fn start_dash_download_impl(
     let dash_start_iso = chrono::Local::now().to_rfc3339();
 
     let settings = settings::load_settings();
+    let fresh_restart = crate::engine::session::queued_retry_requires_fresh_restart(&id);
+    if fresh_restart {
+        crate::engine::session::quarantine_corrupt_file(&path)?;
+    }
 
     // ── 1. Build HTTP client (same proxy/masq logic as HLS) ──────────
     let proxy_config = crate::proxy::ProxyConfig::from_settings(&settings);
@@ -86,17 +400,7 @@ pub(crate) async fn start_dash_download_impl(
     let video_rep = manifest.video_representations.first().cloned();
     let audio_rep = manifest.audio_representations.first().cloned();
 
-    // ── 4. CAS dedupe ────────────────────────────────────────────────
-    if !force {
-        if let Some(existing_path) = crate::cas_manager::check_cas(Some(&manifest_url), None) {
-            if std::fs::hard_link(&existing_path, &path).is_ok() {
-                crate::media::sounds::play_complete();
-                return Ok(());
-            }
-        }
-    }
-
-    // ── 5. Compute sizes and build segment lists ─────────────────────
+    // ── 4. Compute sizes and build segment lists ─────────────────────
     let video_segments = video_rep.as_ref().map(|r| &r.segments[..]).unwrap_or(&[]);
     let audio_segments = audio_rep.as_ref().map(|r| &r.segments[..]).unwrap_or(&[]);
 
@@ -106,14 +410,43 @@ pub(crate) async fn start_dash_download_impl(
     let video_total: u64 = video_sizes.iter().sum();
     let audio_total: u64 = audio_sizes.iter().sum();
     let total_size = video_total + audio_total;
+    let segments_used = (video_segments.len() + audio_segments.len()) as u32;
+
+    // ── 5. CAS dedupe ────────────────────────────────────────────────
+    if !force {
+        if let Some(existing_path) = crate::cas_manager::check_cas(Some(&manifest_url), None) {
+            if std::fs::hard_link(&existing_path, &path).is_ok() {
+                return finalize_dash_success(
+                    app,
+                    state,
+                    &id,
+                    &manifest_url,
+                    &path,
+                    total_size,
+                    &dash_start_iso,
+                    dash_start.elapsed(),
+                    segments_used,
+                )
+                .await;
+            }
+        }
+    }
 
     // ── 6. Resume support ────────────────────────────────────────────
     let saved_downloads = persistence::load_downloads().unwrap_or_default();
-    let saved = saved_downloads.iter().find(|d| d.id == id);
-    let resume_from = saved.map(|s| s.downloaded_bytes).unwrap_or(0);
+    let saved = if fresh_restart {
+        None
+    } else {
+        saved_downloads.iter().find(|d| d.id == id)
+    };
+    let resume_from = if fresh_restart {
+        0
+    } else {
+        saved.map(|s| s.downloaded_bytes).unwrap_or(0)
+    };
 
     // Smart filename collision avoidance for new downloads
-    let path = if resume_from == 0 {
+    let path = if resume_from == 0 && !fresh_restart {
         crate::engine::session::resolve_filename_collision(&path)
     } else {
         path
@@ -125,6 +458,7 @@ pub(crate) async fn start_dash_download_impl(
 
     let session = DashSession {
         manifest_url: manifest_url.clone(),
+        output_path: path.clone(),
         video_rep: video_rep.clone(),
         audio_rep: audio_rep.clone(),
         video_total,
@@ -137,12 +471,44 @@ pub(crate) async fn start_dash_download_impl(
         map.insert(id.clone(), session);
     }
 
+    let id_save = id.clone();
+    let url_save = manifest_url.clone();
+    let path_save = path.clone();
+    let filename_save = crate::engine::session::extract_filename(&path).to_string();
+    let downloaded_save = downloaded_atomic.clone();
+    let mut stop_rx_save = stop_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stop_rx_save.recv() => break,
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+                    let saved = persistence::SavedDownload {
+                        id: id_save.clone(),
+                        url: url_save.clone(),
+                        path: path_save.clone(),
+                        filename: filename_save.clone(),
+                        total_size,
+                        downloaded_bytes: downloaded_save.load(std::sync::atomic::Ordering::Relaxed),
+                        status: "Downloading".to_string(),
+                        segments: None,
+                        last_active: Some(chrono::Utc::now().to_rfc3339()),
+                        error_message: None,
+                    };
+                    let _ = persistence::upsert_download(saved);
+                }
+            }
+        }
+    });
+
     // ── 8. Create temp paths for video + audio ───────────────────────
     let video_tmp = format!("{}.dash_video.tmp", &path);
     let audio_tmp = format!("{}.dash_audio.tmp", &path);
+    if fresh_restart {
+        cleanup_tmp(&video_tmp, &audio_tmp);
+    }
 
     // ── 9. Download video track ──────────────────────────────────────
-    let video_ok = if !video_segments.is_empty() {
+    let video_result = if !video_segments.is_empty() {
         download_track(
             &client,
             video_segments,
@@ -161,15 +527,31 @@ pub(crate) async fn start_dash_download_impl(
         Ok(())
     };
 
-    // Check if stopped
-    if stop_tx.receiver_count() == 0 && video_ok.is_err() {
-        // Session was removed (paused/cancelled)
-        cleanup_tmp(&video_tmp, &audio_tmp);
-        return video_ok;
+    if let Err(e) = video_result {
+        if e == DASH_STOPPED_ERROR {
+            remove_dash_session(state, &id);
+            return Ok(());
+        }
+        let _ = stop_tx.send(());
+        let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+        handle_dash_failure(
+            app,
+            state,
+            &id,
+            &manifest_url,
+            &path,
+            total_size,
+            downloaded,
+            &dash_start_iso,
+            dash_start.elapsed(),
+            segments_used,
+            &e,
+        );
+        return Ok(());
     }
 
     // ── 10. Download audio track ─────────────────────────────────────
-    let audio_ok = if !audio_segments.is_empty() {
+    let audio_result = if !audio_segments.is_empty() {
         let audio_resume = resume_from.saturating_sub(video_total);
         download_track(
             &client,
@@ -189,9 +571,27 @@ pub(crate) async fn start_dash_download_impl(
         Ok(())
     };
 
-    if audio_ok.is_err() {
-        cleanup_tmp(&video_tmp, &audio_tmp);
-        return audio_ok;
+    if let Err(e) = audio_result {
+        if e == DASH_STOPPED_ERROR {
+            remove_dash_session(state, &id);
+            return Ok(());
+        }
+        let _ = stop_tx.send(());
+        let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+        handle_dash_failure(
+            app,
+            state,
+            &id,
+            &manifest_url,
+            &path,
+            total_size,
+            downloaded,
+            &dash_start_iso,
+            dash_start.elapsed(),
+            segments_used,
+            &e,
+        );
+        return Ok(());
     }
 
     // ── 11. Mux video + audio → final file ───────────────────────────
@@ -199,203 +599,122 @@ pub(crate) async fn start_dash_download_impl(
     let has_audio = !audio_segments.is_empty() && std::path::Path::new(&audio_tmp).exists();
 
     if has_video && has_audio {
-        // Mux with FFmpeg
         if crate::media::muxer::is_ffmpeg_available() {
-            crate::media::muxer::merge_streams(
+            if let Err(e) = crate::media::muxer::merge_streams(
                 std::path::Path::new(&video_tmp),
                 std::path::Path::new(&audio_tmp),
                 std::path::Path::new(&path),
-            )?;
+            ) {
+                let _ = stop_tx.send(());
+                let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                handle_dash_failure(
+                    app,
+                    state,
+                    &id,
+                    &manifest_url,
+                    &path,
+                    total_size,
+                    downloaded,
+                    &dash_start_iso,
+                    dash_start.elapsed(),
+                    segments_used,
+                    &e,
+                );
+                return Ok(());
+            }
         } else {
-            // FFmpeg not available — keep the video file as the output
-            std::fs::rename(&video_tmp, &path)
-                .map_err(|e| format!("Failed to move video file: {}", e))?;
+            if let Err(e) = std::fs::rename(&video_tmp, &path) {
+                let _ = stop_tx.send(());
+                let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                handle_dash_failure(
+                    app,
+                    state,
+                    &id,
+                    &manifest_url,
+                    &path,
+                    total_size,
+                    downloaded,
+                    &dash_start_iso,
+                    dash_start.elapsed(),
+                    segments_used,
+                    &format!("Failed to move video file: {}", e),
+                );
+                return Ok(());
+            }
             eprintln!("Warning: FFmpeg not found, audio track not merged. Audio saved at {}", audio_tmp);
         }
     } else if has_video {
-        std::fs::rename(&video_tmp, &path)
-            .map_err(|e| format!("Failed to move video file: {}", e))?;
+        if let Err(e) = std::fs::rename(&video_tmp, &path) {
+            let _ = stop_tx.send(());
+            let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+            handle_dash_failure(
+                app,
+                state,
+                &id,
+                &manifest_url,
+                &path,
+                total_size,
+                downloaded,
+                &dash_start_iso,
+                dash_start.elapsed(),
+                segments_used,
+                &format!("Failed to move video file: {}", e),
+            );
+            return Ok(());
+        }
     } else if has_audio {
-        std::fs::rename(&audio_tmp, &path)
-            .map_err(|e| format!("Failed to move audio file: {}", e))?;
+        if let Err(e) = std::fs::rename(&audio_tmp, &path) {
+            let _ = stop_tx.send(());
+            let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+            handle_dash_failure(
+                app,
+                state,
+                &id,
+                &manifest_url,
+                &path,
+                total_size,
+                downloaded,
+                &dash_start_iso,
+                dash_start.elapsed(),
+                segments_used,
+                &format!("Failed to move audio file: {}", e),
+            );
+            return Ok(());
+        }
     } else {
-        return Err("No tracks were downloaded".into());
+        let _ = stop_tx.send(());
+        let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+        handle_dash_failure(
+            app,
+            state,
+            &id,
+            &manifest_url,
+            &path,
+            total_size,
+            downloaded,
+            &dash_start_iso,
+            dash_start.elapsed(),
+            segments_used,
+            "No tracks were downloaded",
+        );
+        return Ok(());
     }
 
     // ── 12. Cleanup ──────────────────────────────────────────────────
     cleanup_tmp(&video_tmp, &audio_tmp);
 
-    // Remove session from state
-    {
-        let mut map = state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner());
-        map.remove(&id);
-    }
-
-    // Register in CAS
-    crate::cas_manager::register_cas(Some(&manifest_url), None, &path);
-
-    // Persist completion
-    let _ = persistence::upsert_download(persistence::SavedDownload {
-        id: id.clone(),
-        url: manifest_url.clone(),
-        path: path.clone(),
-        filename: crate::engine::session::extract_filename(&path).to_string(),
-        total_size,
-        downloaded_bytes: total_size,
-        status: "Complete".to_string(),
-        segments: None,
-        last_active: Some(chrono::Utc::now().to_rfc3339()),
-        error_message: None,
-    });
-
-    crate::media::sounds::play_complete();
-
-    // Record in download history
-    let elapsed = dash_start.elapsed();
-    let avg_speed = if elapsed.as_secs() > 0 { total_size / elapsed.as_secs() } else { 0 };
-    let _ = crate::download_history::record(crate::download_history::HistoryEntry {
-        id: id.clone(),
-        url: manifest_url.clone(),
-        path: path.clone(),
-        filename: crate::engine::session::extract_filename(&path).to_string(),
-        total_size,
-        downloaded_bytes: total_size,
-        status: "Complete".to_string(),
-        started_at: dash_start_iso,
-        finished_at: chrono::Local::now().to_rfc3339(),
-        avg_speed_bps: avg_speed,
-        duration_secs: elapsed.as_secs(),
-        segments_used: 0,
-        error_message: None,
-        source_type: Some("dash".to_string()),
-    });
-
-    // --- Post-completion hooks (matching HTTP download flow) ---
-    // Event sourcing
-    if let Some(log) = app.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
-        let _ = log.append(crate::event_sourcing::LedgerEvent {
-            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
-            aggregate_id: id.clone(),
-            event_type: "DownloadCompleted".to_string(),
-            payload: serde_json::json!({
-                "total_size": total_size,
-                "duration_secs": elapsed.as_secs(),
-                "path": path,
-                "source": "dash",
-            }),
-        });
-    }
-
-    // Webhooks
-    {
-        let id2 = id.clone();
-        let path2 = path.clone();
-        let url2 = manifest_url.clone();
-        tokio::spawn(async move {
-            let settings = crate::settings::load_settings();
-            if let Some(webhooks) = settings.webhooks {
-                let manager = crate::webhooks::WebhookManager::new();
-                manager.load_configs(webhooks).await;
-                let payload = crate::webhooks::WebhookPayload {
-                    event: "DownloadComplete".to_string(),
-                    download_id: id2,
-                    filename: crate::engine::session::extract_filename(&path2).to_string(),
-                    url: url2,
-                    size: total_size,
-                    speed: 0,
-                    filepath: Some(path2),
-                    timestamp: chrono::Utc::now().timestamp(),
-                };
-                manager.trigger(crate::webhooks::WebhookEvent::DownloadComplete, payload).await;
-            }
-        });
-    }
-
-    // MQTT notification
-    crate::mqtt_client::publish_event(
-        "DownloadComplete",
+    let _ = stop_tx.send(());
+    finalize_dash_success(
+        app,
+        state,
         &id,
-        crate::engine::session::extract_filename(&path),
-        "Complete",
-    );
-
-    // ChatOps (Telegram) notification
-    {
-        let chatops = state.chatops_manager.clone();
-        let filename = crate::engine::session::extract_filename(&path).to_string();
-        tokio::spawn(async move {
-            chatops.notify_completion(&filename).await;
-        });
-    }
-
-    // Auto-extract archives
-    {
-        let path_archive = path.clone();
-        let id_archive = id.clone();
-        tokio::spawn(async move {
-            let settings = crate::settings::load_settings();
-            if settings.auto_extract_archives {
-                if let Some(_archive_info) = crate::archive_manager::ArchiveManager::detect_archive(&path_archive) {
-                    let dest = std::path::Path::new(&path_archive)
-                        .parent()
-                        .and_then(|p| p.to_str())
-                        .unwrap_or(".")
-                        .to_string();
-                    match crate::archive_manager::ArchiveManager::extract_archive(&path_archive, &dest) {
-                        Ok(msg) => {
-                            println!("[{}] DASH auto-extract: {}", id_archive, msg);
-                            if settings.cleanup_archives_after_extract {
-                                if let Err(e) = crate::archive_manager::ArchiveManager::cleanup_archive(&path_archive) {
-                                    eprintln!("[{}] Cleanup failed: {}", id_archive, e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[{}] DASH auto-extract failed: {}", id_archive, e);
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // File categorization
-    {
-        let settings_snap = crate::settings::load_settings();
-        if settings_snap.auto_sort_downloads {
-            match crate::file_categorizer::categorize_and_move(&path, &settings_snap.download_dir) {
-                Ok((cat_result, new_path)) => {
-                    let moved = new_path != path;
-                    let _ = app.emit("file_categorized", serde_json::json!({
-                        "id": id,
-                        "filename": crate::engine::session::extract_filename(&path),
-                        "category": cat_result.category_name,
-                        "icon": cat_result.icon,
-                        "color": cat_result.color,
-                        "should_move": cat_result.should_move,
-                        "moved": moved,
-                        "new_path": if moved { Some(&new_path) } else { None },
-                    }));
-                }
-                Err(e) => {
-                    eprintln!("[{}] DASH auto-sort failed: {}", id, e);
-                    let cat_result = crate::file_categorizer::categorize(
-                        crate::engine::session::extract_filename(&path),
-                    );
-                    let _ = app.emit("file_categorized", serde_json::json!({
-                        "id": id,
-                        "filename": crate::engine::session::extract_filename(&path),
-                        "category": cat_result.category_name,
-                        "icon": cat_result.icon,
-                        "color": cat_result.color,
-                        "should_move": false,
-                    }));
-                }
-            }
-        }
-    }
-
-    Ok(())
+        &manifest_url,
+        &path,
+        total_size,
+        &dash_start_iso,
+        dash_start.elapsed(),
+        segments_used,
+    ).await
 }
 
 // ── Helper: download a single track (video or audio) ─────────────────
@@ -500,39 +819,41 @@ async fn download_track(
             let mut local_pos = seg_offset;
 
             while let Some(item) = futures::stream::StreamExt::next(&mut stream).await {
-                if let Ok(chunk) = item {
-                    let data = chunk.to_vec();
-                    let global_off = global_base + local_pos;
-                    if tx_clone
-                        .send(crate::downloader::disk::WriteRequest {
-                            offset: global_off,
-                            data: data.clone(),
-                            segment_id: 0,
-                        })
-                        .is_err()
-                    {
-                        return Err("Disk writer channel closed".to_string());
-                    }
-                    let len = data.len() as u64;
-                    downloaded_clone.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
-                    local_pos += len;
-
-                    // Emit progress
-                    let payload = crate::core_state::Payload {
-                        id: id_clone.clone(),
-                        downloaded: downloaded_clone.load(std::sync::atomic::Ordering::Relaxed),
-                        total: global_total,
-                        segments: vec![],
-                    };
-                    let _ = app_clone.emit("download_progress", payload.clone());
-                    let _ = crate::http_server::get_event_sender().send(
-                        serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)),
-                    );
+                let chunk = match item {
+                    Ok(chunk) => chunk,
+                    Err(e) => return Err(format!("Segment stream failed: {}", e)),
+                };
+                let data = chunk.to_vec();
+                let global_off = global_base + local_pos;
+                if tx_clone
+                    .send(crate::downloader::disk::WriteRequest {
+                        offset: global_off,
+                        data: data.clone(),
+                        segment_id: 0,
+                    })
+                    .is_err()
+                {
+                    return Err("Disk writer channel closed".to_string());
                 }
+                let len = data.len() as u64;
+                downloaded_clone.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+                local_pos += len;
+
+                // Emit progress
+                let payload = crate::core_state::Payload {
+                    id: id_clone.clone(),
+                    downloaded: downloaded_clone.load(std::sync::atomic::Ordering::Relaxed),
+                    total: global_total,
+                    segments: vec![],
+                };
+                let _ = app_clone.emit("download_progress", payload.clone());
+                let _ = crate::http_server::get_event_sender().send(
+                    serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)),
+                );
 
                 // Check stop signal
                 if stop_rx.try_recv().is_ok() {
-                    return Err("Stopped".to_string());
+                    return Err(DASH_STOPPED_ERROR.to_string());
                 }
 
                 // Check disk error
@@ -547,9 +868,17 @@ async fn download_track(
         // Throttle concurrency
         if futures.len() >= concurrency {
             if let Some(result) = futures::stream::StreamExt::next(&mut futures).await {
-                if let Ok(Err(e)) = result {
-                    if e == "Stopped" {
-                        return Err("Download stopped".into());
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        let _ = stop_tx.send(());
+                        while futures::stream::StreamExt::next(&mut futures).await.is_some() {}
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        let _ = stop_tx.send(());
+                        while futures::stream::StreamExt::next(&mut futures).await.is_some() {}
+                        return Err(format!("DASH worker join failed: {}", e));
                     }
                 }
             }
@@ -558,10 +887,10 @@ async fn download_track(
 
     // Wait for remaining futures
     while let Some(result) = futures::stream::StreamExt::next(&mut futures).await {
-        if let Ok(Err(e)) = result {
-            if e == "Stopped" {
-                return Err("Download stopped".into());
-            }
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(format!("DASH worker join failed: {}", e)),
         }
     }
 

@@ -6,7 +6,11 @@ use crate::*;
 
 /// After a download failure or stall: try queue retry; if not retrying, release queue slot,
 /// deregister bandwidth, and remove session from AppState. Call once per failed download.
-fn handle_download_failure_cleanup(app: &tauri::AppHandle, id: &str) {
+pub(crate) fn handle_download_failure_cleanup(app: &tauri::AppHandle, id: &str) {
+    if let Some(app_state) = app.try_state::<crate::core_state::AppState>() {
+        app_state.unregister_streaming_source(id);
+    }
+
     if !try_auto_retry(app, id) {
         let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
         queue.mark_finished(id);
@@ -41,6 +45,7 @@ fn try_auto_retry(app: &tauri::AppHandle, id: &str) -> bool {
                 added_at: chrono::Utc::now().timestamp_millis(),
                 custom_headers: meta.custom_headers,
                 expected_checksum: meta.expected_checksum,
+                fresh_restart: meta.fresh_restart,
                 retry_count: meta.retry_count,
                 max_retries: meta.max_retries,
                 retry_delay_ms: 0,
@@ -63,39 +68,390 @@ fn try_auto_retry(app: &tauri::AppHandle, id: &str) -> bool {
     false
 }
 
-/// Run post-download integrity check if retry metadata contains an expected checksum.
+pub(crate) fn mark_retry_for_fresh_restart(id: &str) {
+    let mut store = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(meta) = store.get_mut(id) {
+        meta.fresh_restart = true;
+    }
+}
+
+pub(crate) fn queued_retry_requires_fresh_restart(id: &str) -> bool {
+    let store = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+    store.get(id).map(|m| m.fresh_restart).unwrap_or(false)
+}
+
+pub(crate) fn clear_retry_metadata(id: &str) {
+    let mut store = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+    store.remove(id);
+}
+
+/// Verify queue-supplied checksum before finalizing success.
 /// Emits `integrity_check_passed` or `integrity_check_failed` events.
-fn run_queued_integrity_check(app: &tauri::AppHandle, id: &str, path: &str) {
+pub(crate) async fn verify_queued_integrity(app: &tauri::AppHandle, id: &str, path: &str) -> Result<(), String> {
     let expected = {
         let store = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
         store.get(id).and_then(|m| m.expected_checksum.clone())
     };
 
     if let Some(expected_checksum) = expected {
-        let app_clone = app.clone();
-        let id_owned = id.to_string();
-        let path_owned = path.to_string();
+        match crate::integrity::verify_file_checksum(path, &expected_checksum).await {
+            Ok(_) => {
+                let _ = app.emit("integrity_check_passed", serde_json::json!({
+                    "id": id,
+                }));
+            }
+            Err(e) => {
+                eprintln!("[Queue] Integrity check failed for {}: {}", id, e);
+                let _ = app.emit("integrity_check_failed", serde_json::json!({
+                    "id": id,
+                    "error": e.clone(),
+                }));
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn corrupt_retry_path(path: &str) -> String {
+    let source = std::path::Path::new(path);
+    let parent = source.parent().unwrap_or(std::path::Path::new("."));
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    parent
+        .join(format!("{}.corrupt-{}", file_name, ts))
+        .to_string_lossy()
+        .to_string()
+}
+
+pub(crate) fn quarantine_corrupt_file(path: &str) -> Result<(), String> {
+    let source = std::path::Path::new(path);
+    if !source.exists() {
+        return Ok(());
+    }
+
+    let quarantined = corrupt_retry_path(path);
+    match std::fs::rename(source, &quarantined) {
+        Ok(_) => {
+            eprintln!("[Integrity] Quarantined corrupt file: {} -> {}", path, quarantined);
+            Ok(())
+        }
+        Err(rename_err) => {
+            eprintln!(
+                "[Integrity] Failed to quarantine {} ({}), removing it for clean retry",
+                path,
+                rename_err
+            );
+            std::fs::remove_file(source).map_err(|remove_err| {
+                format!(
+                    "Failed to reset corrupt file at {}: rename failed ({}), remove failed ({})",
+                    path,
+                    rename_err,
+                    remove_err
+                )
+            })
+        }
+    }
+}
+
+fn record_integrity_failure(
+    app: &tauri::AppHandle,
+    id: &str,
+    url: &str,
+    path: &str,
+    total_size: u64,
+    started_at: &str,
+    elapsed: std::time::Duration,
+    segments_used: u32,
+    error_message: &str,
+) {
+    let _ = app.emit("download_error", serde_json::json!({
+        "id": id,
+        "error": error_message,
+    }));
+    crate::media::sounds::play_error();
+
+    let _ = persistence::upsert_download(persistence::SavedDownload {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes: 0,
+        status: "Error".to_string(),
+        segments: None,
+        last_active: Some(chrono::Utc::now().to_rfc3339()),
+        error_message: Some(error_message.to_string()),
+    });
+
+    let avg_speed = if elapsed.as_secs() > 0 {
+        total_size / elapsed.as_secs()
+    } else {
+        0
+    };
+
+    let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+        id: id.to_string(),
+        url: url.to_string(),
+        path: path.to_string(),
+        filename: extract_filename(path).to_string(),
+        total_size,
+        downloaded_bytes: total_size,
+        status: "Error".to_string(),
+        started_at: started_at.to_string(),
+        finished_at: chrono::Local::now().to_rfc3339(),
+        avg_speed_bps: avg_speed,
+        duration_secs: elapsed.as_secs(),
+        segments_used,
+        error_message: Some(error_message.to_string()),
+        source_type: Some("http".to_string()),
+    });
+
+    if let Some(log) = app.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+        let _ = log.append(crate::event_sourcing::LedgerEvent {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            aggregate_id: id.to_string(),
+            event_type: "DownloadError".to_string(),
+            payload: serde_json::json!({
+                "error": error_message,
+                "downloaded_bytes": total_size,
+                "total_size": total_size,
+                "integrity_failure": true,
+            }),
+        });
+    }
+}
+
+fn finalize_http_success_side_effects(
+    app: &tauri::AppHandle,
+    id: String,
+    url: String,
+    path: String,
+    total_size: u64,
+    started_at: String,
+    elapsed: std::time::Duration,
+    segments_used: u32,
+    md5: Option<String>,
+    etag: Option<String>,
+    chatops: std::sync::Arc<crate::network::chatops::ChatOpsManager>,
+) {
+    clear_retry_metadata(&id);
+    crate::media::sounds::play_complete();
+    crate::cas_manager::register_cas(etag.as_deref(), md5.as_deref(), &path);
+
+    if let Some(log) = app.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
+        let _ = log.append(crate::event_sourcing::LedgerEvent {
+            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+            aggregate_id: id.clone(),
+            event_type: "DownloadCompleted".to_string(),
+            payload: serde_json::json!({
+                "total_size": total_size,
+                "duration_secs": elapsed.as_secs(),
+                "path": path,
+            }),
+        });
+    }
+
+    let id_webhook = id.clone();
+    let url_webhook = url.clone();
+    let path_webhook = path.clone();
+    tokio::spawn(async move {
+        let settings = settings::load_settings();
+        if let Some(webhooks) = settings.webhooks {
+            let manager = webhooks::WebhookManager::new();
+            manager.load_configs(webhooks).await;
+            let payload = webhooks::WebhookPayload {
+                event: "DownloadComplete".to_string(),
+                download_id: id_webhook,
+                filename: extract_filename(&path_webhook).to_string(),
+                url: url_webhook,
+                size: total_size,
+                speed: 0,
+                filepath: Some(path_webhook),
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+            manager.trigger(webhooks::WebhookEvent::DownloadComplete, payload).await;
+        }
+    });
+
+    crate::mqtt_client::publish_event(
+        "DownloadComplete",
+        &id,
+        extract_filename(&path),
+        "Complete",
+    );
+
+    let filename_chatops = extract_filename(&path).to_string();
+    tokio::spawn(async move {
+        chatops.notify_completion(&filename_chatops).await;
+    });
+
+    let path_archive = path.clone();
+    tokio::spawn(async move {
+        let settings = settings::load_settings();
+        if settings.auto_extract_archives {
+            if let Some(archive_info) = archive_manager::ArchiveManager::detect_archive(&path_archive) {
+                println!("📦 Detected archive: {:?}", archive_info.archive_type);
+
+                let dest = std::path::Path::new(&path_archive)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or(".")
+                    .to_string();
+
+                match archive_manager::ArchiveManager::extract_archive(&path_archive, &dest) {
+                    Ok(msg) => {
+                        println!("✅ {}", msg);
+
+                        if settings.cleanup_archives_after_extract {
+                            if let Err(e) = archive_manager::ArchiveManager::cleanup_archive(&path_archive) {
+                                eprintln!("⚠️  Cleanup failed: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Extraction failed: {}", e);
+                    }
+                }
+            }
+        }
+    });
+
+    let _ = persistence::upsert_download(persistence::SavedDownload {
+        id: id.clone(),
+        url: url.clone(),
+        path: path.clone(),
+        filename: extract_filename(&path).to_string(),
+        total_size,
+        downloaded_bytes: total_size,
+        status: "Complete".to_string(),
+        segments: None,
+        last_active: Some(chrono::Utc::now().to_rfc3339()),
+        error_message: None,
+    });
+
+    let avg_speed = if elapsed.as_secs() > 0 {
+        total_size / elapsed.as_secs()
+    } else {
+        0
+    };
+    let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+        id: id.clone(),
+        url,
+        path: path.clone(),
+        filename: extract_filename(&path).to_string(),
+        total_size,
+        downloaded_bytes: total_size,
+        status: "Complete".to_string(),
+        started_at,
+        finished_at: chrono::Local::now().to_rfc3339(),
+        avg_speed_bps: avg_speed,
+        duration_secs: elapsed.as_secs(),
+        segments_used,
+        error_message: None,
+        source_type: Some("http".to_string()),
+    });
+
+    {
+        let verify_id = id.clone();
+        let verify_path = path.clone();
+        let verify_md5 = md5.clone();
+        let verify_app = app.clone();
         tokio::spawn(async move {
-            match crate::integrity::verify_file_checksum(&path_owned, &expected_checksum).await {
-                Ok(_) => {
-                    let _ = app_clone.emit("integrity_check_passed", serde_json::json!({
-                        "id": id_owned,
-                    }));
-                }
-                Err(e) => {
-                    eprintln!("[Queue] Integrity check failed for {}: {}", id_owned, e);
-                    let _ = app_clone.emit("integrity_check_failed", serde_json::json!({
-                        "id": id_owned,
-                        "error": e,
-                    }));
-                }
+            if let Some(result) = crate::integrity::auto_verify(
+                &verify_id,
+                &verify_path,
+                verify_md5.as_deref(),
+            ).await {
+                let _ = verify_app.emit("integrity_check", serde_json::json!({
+                    "id": verify_id,
+                    "verified": result.verified,
+                    "method": result.method,
+                    "algorithm": result.algorithm,
+                    "message": result.message,
+                }));
             }
         });
     }
 
-    // Clean up retry metadata after successful download
-    let mut store = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
-    store.remove(id);
+    {
+        let settings_snap = crate::settings::load_settings();
+        if settings_snap.auto_sort_downloads {
+            match crate::file_categorizer::categorize_and_move(&path, &settings_snap.download_dir) {
+                Ok((cat_result, new_path)) => {
+                    let moved = new_path != path;
+                    let _ = app.emit("file_categorized", serde_json::json!({
+                        "id": id,
+                        "filename": extract_filename(&path),
+                        "category": cat_result.category_name,
+                        "icon": cat_result.icon,
+                        "color": cat_result.color,
+                        "should_move": cat_result.should_move,
+                        "target_dir": cat_result.target_dir,
+                        "moved": moved,
+                        "new_path": if moved { Some(&new_path) } else { None },
+                    }));
+                }
+                Err(e) => {
+                    eprintln!("[{}] Auto-sort failed: {}", id, e);
+                    let cat_result = crate::file_categorizer::categorize(extract_filename(&path));
+                    let _ = app.emit("file_categorized", serde_json::json!({
+                        "id": id,
+                        "filename": extract_filename(&path),
+                        "category": cat_result.category_name,
+                        "icon": cat_result.icon,
+                        "color": cat_result.color,
+                        "should_move": false,
+                        "target_dir": cat_result.target_dir,
+                    }));
+                }
+            }
+        } else {
+            let cat_result = crate::file_categorizer::categorize(extract_filename(&path));
+            let _ = app.emit("file_categorized", serde_json::json!({
+                "id": id,
+                "filename": extract_filename(&path),
+                "category": cat_result.category_name,
+                "icon": cat_result.icon,
+                "color": cat_result.color,
+                "should_move": false,
+                "target_dir": cat_result.target_dir,
+            }));
+        }
+    }
+
+    if crate::settings::load_settings().scan_after_download {
+        let scan_path = path.clone();
+        let scan_id = id.clone();
+        let scan_app = app.clone();
+        tokio::spawn(async move {
+            let scanner = crate::virus_scanner::VirusScanner::new();
+            if scanner.is_available() {
+                let result = scanner.scan_file(std::path::Path::new(&scan_path)).await;
+                let (status, threat) = match &result {
+                    crate::virus_scanner::ScanResult::Clean => ("clean", None),
+                    crate::virus_scanner::ScanResult::Infected { threat_name } => ("infected", Some(threat_name.as_str())),
+                    crate::virus_scanner::ScanResult::Error { message } => ("error", Some(message.as_str())),
+                    crate::virus_scanner::ScanResult::NotScanned => ("not_scanned", None),
+                };
+                let _ = scan_app.emit("virus_scan_result", serde_json::json!({
+                    "id": scan_id,
+                    "status": status,
+                    "threat": threat,
+                }));
+            }
+        });
+    }
 }
 
 /// Extract filename from a path string, handling both Unix and Windows separators.
@@ -258,10 +614,23 @@ pub(crate) async fn start_download_impl(
     // Broadcast to LAN devices
     crate::lan_api::broadcast_download(url.clone());
 
+    let fresh_restart = queued_retry_requires_fresh_restart(&id);
+    if fresh_restart {
+        quarantine_corrupt_file(&path)?;
+    }
+
     // 1. Check for saved download (Resume logic)
     let saved_downloads = persistence::load_downloads().unwrap_or_default();
-    let saved = saved_downloads.iter().find(|d| d.id == id);
-    let resume_from: u64 = saved.map(|s| s.downloaded_bytes).unwrap_or(0);
+    let saved = if fresh_restart {
+        None
+    } else {
+        saved_downloads.iter().find(|d| d.id == id)
+    };
+    let resume_from: u64 = if fresh_restart {
+        0
+    } else {
+        saved.map(|s| s.downloaded_bytes).unwrap_or(0)
+    };
     
     if resume_from > 0 {
         println!("DEBUG: Resuming from byte {}", resume_from);
@@ -273,7 +642,7 @@ pub(crate) async fn start_download_impl(
     // So ONLY apply category rules if strict resume_from == 0 OR we check if file exists at old path.
     // Simplest: only apply on start (resume_from == 0).
     
-    let final_path = if resume_from == 0 && settings.use_category_folders {
+    let final_path = if resume_from == 0 && settings.use_category_folders && !fresh_restart {
         // Parse filename
         let path_obj = std::path::Path::new(&path);
         let filename = path_obj.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -317,7 +686,7 @@ pub(crate) async fn start_download_impl(
     };
     
     // Use final_path for the rest — apply collision avoidance for new downloads
-    let path = if resume_from == 0 {
+    let path = if resume_from == 0 && !fresh_restart {
         resolve_filename_collision(&final_path)
     } else {
         final_path
@@ -373,7 +742,25 @@ pub(crate) async fn start_download_impl(
         // Attempt to hardlink
         if std::fs::hard_link(&existing_path, &path).is_ok() {
             println!("Hardlink successful for {}", path);
-            
+
+            if let Err(integrity_error) = verify_queued_integrity(app, &id, &path).await {
+                let started_at = chrono::Local::now().to_rfc3339();
+                mark_retry_for_fresh_restart(&id);
+                record_integrity_failure(
+                    app,
+                    &id,
+                    &url,
+                    &path,
+                    total_size,
+                    &started_at,
+                    std::time::Duration::ZERO,
+                    0,
+                    &integrity_error,
+                );
+                handle_download_failure_cleanup(app, &id);
+                return Ok(());
+            }
+
             // Register success... emit completion... and return
             let payload = Payload {
                 id: id.clone(),
@@ -383,22 +770,30 @@ pub(crate) async fn start_download_impl(
             };
             let _ = app.emit("download_progress", payload.clone());
             let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
-            
-            // Persistence — use upsert_download which acquires the lock
-            let _ = persistence::upsert_download(persistence::SavedDownload {
-                id: id.clone(),
-                url: url.clone(),
-                path: path.clone(),
-                filename: crate::engine::session::extract_filename(&path).to_string(),
+
+            finalize_http_success_side_effects(
+                app,
+                id.clone(),
+                actual_url.clone(),
+                path.clone(),
                 total_size,
-                downloaded_bytes: total_size,
-                status: "Complete".to_string(),
-                segments: None,
-                last_active: Some(chrono::Utc::now().to_rfc3339()),
-                error_message: None,
-            });
-            
-            crate::media::sounds::play_complete();
+                chrono::Local::now().to_rfc3339(),
+                std::time::Duration::ZERO,
+                0,
+                md5.clone(),
+                etag.clone(),
+                state.chatops_manager.clone(),
+            );
+
+            {
+                let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                queue.mark_finished(&id);
+            }
+
+            if let Some(action) = crate::scheduler::handle_download_complete(&id) {
+                crate::scheduler::execute_end_action(app, &action);
+            }
+
             return Ok(());
         } else {
             println!("Failed to create hardlink, falling back to download");
@@ -1056,225 +1451,40 @@ pub(crate) async fn start_download_impl(
                     let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
 
                     if total_size > 0 && d >= total_size {
-                        crate::media::sounds::play_complete();
-                        crate::scheduler::handle_download_complete(&id_monitor);
-                        crate::cas_manager::register_cas(etag_monitor.as_deref(), md5_monitor.as_deref(), &path_monitor);
-                        // Log download completed event
-                        if let Some(log) = window_monitor.try_state::<std::sync::Arc<crate::event_sourcing::SharedLog>>() {
-                            let _ = log.append(crate::event_sourcing::LedgerEvent {
-                                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
-                                aggregate_id: id_monitor.clone(),
-                                event_type: "DownloadCompleted".to_string(),
-                                payload: serde_json::json!({
-                                    "total_size": total_size,
-                                    "duration_secs": monitor_start.elapsed().as_secs(),
-                                    "path": path_monitor,
-                                }),
-                            });
-                        }
-                        
-                        // Trigger webhooks for download complete
-                        let id_webhook = id_monitor.clone();
-                        let url_webhook = url_monitor.clone();
-                        let path_webhook = path_monitor.clone();
-                        let size_webhook = total_size;
-                        tokio::spawn(async move {
-                            let settings = settings::load_settings();
-                            if let Some(webhooks) = settings.webhooks {
-                                let manager = webhooks::WebhookManager::new();
-                                manager.load_configs(webhooks).await;
-                                let payload = webhooks::WebhookPayload {
-                                    event: "DownloadComplete".to_string(),
-                                    download_id: id_webhook.clone(),
-                                    filename: extract_filename(&path_webhook).to_string(),
-                                    url: url_webhook.clone(),
-                                    size: size_webhook,
-                                    speed: 0,
-                                    filepath: Some(path_webhook.clone()),
-                                    timestamp: chrono::Utc::now().timestamp(),
-                                };
-                                manager.trigger(webhooks::WebhookEvent::DownloadComplete, payload).await;
-                            }
-                        });
-                        
-                        // Trigger MQTT for download complete
-                        crate::mqtt_client::publish_event(
-                            "DownloadComplete",
-                            &id_monitor,
-                            extract_filename(&path_monitor),
-                            "Complete"
-                        );
-
-                        // Notify ChatOps (Telegram) on completion
-                        let chatops = chatops_monitor.clone();
-                        let filename_chatops = extract_filename(&path_monitor).to_string();
-                        tokio::spawn(async move {
-                            chatops.notify_completion(&filename_chatops).await;
-                        });
-                        
-                        // Auto-extract archives if enabled
-                        let path_archive = path_monitor.clone();
-                        tokio::spawn(async move {
-                            let settings = settings::load_settings();
-                            if settings.auto_extract_archives {
-                                if let Some(archive_info) = archive_manager::ArchiveManager::detect_archive(&path_archive) {
-                                    println!("📦 Detected archive: {:?}", archive_info.archive_type);
-                                    
-                                    // Extract to same directory as archive
-                                    let dest = std::path::Path::new(&path_archive)
-                                        .parent()
-                                        .and_then(|p| p.to_str())
-                                        .unwrap_or(".")
-                                        .to_string();
-                                    
-                                    match archive_manager::ArchiveManager::extract_archive(&path_archive, &dest) {
-                                        Ok(msg) => {
-                                            println!("✅ {}", msg);
-                                            
-                                            // Cleanup archives if enabled
-                                            if settings.cleanup_archives_after_extract {
-                                                if let Err(e) = archive_manager::ArchiveManager::cleanup_archive(&path_archive) {
-                                                    eprintln!("⚠️  Cleanup failed: {}", e);
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            eprintln!("❌ Extraction failed: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                        
-                        // Persist final "Complete" status
-                        let saved = persistence::SavedDownload {
-                            id: id_monitor.clone(),
-                            url: url_monitor.clone(),
-                            path: path_monitor.clone(),
-                            filename: extract_filename(&path_monitor).to_string(),
-                            total_size,
-                            downloaded_bytes: total_size,
-                            status: "Complete".to_string(),
-                            segments: None,
-                            last_active: Some(chrono::Utc::now().to_rfc3339()),
-                            error_message: None,
-                        };
-                        let _ = persistence::upsert_download(saved);
-                        // Record in download history
-                        let elapsed = monitor_start.elapsed();
-                        let avg_speed = if elapsed.as_secs() > 0 { total_size / elapsed.as_secs() } else { 0 };
                         let seg_count = manager_monitor.lock().unwrap_or_else(|e| e.into_inner())
                             .segments.read().unwrap_or_else(|e| e.into_inner()).len() as u32;
-                        let _ = crate::download_history::record(crate::download_history::HistoryEntry {
-                            id: id_monitor.clone(),
-                            url: url_monitor.clone(),
-                            path: path_monitor.clone(),
-                            filename: extract_filename(&path_monitor).to_string(),
+
+                        if let Err(integrity_error) = verify_queued_integrity(&window_monitor, &id_monitor, &path_monitor).await {
+                            mark_retry_for_fresh_restart(&id_monitor);
+                            let _ = stop_tx_monitor.send(());
+                            record_integrity_failure(
+                                &window_monitor,
+                                &id_monitor,
+                                &url_monitor,
+                                &path_monitor,
+                                total_size,
+                                &monitor_start_iso,
+                                monitor_start.elapsed(),
+                                seg_count,
+                                &integrity_error,
+                            );
+                            handle_download_failure_cleanup(&window_monitor, &id_monitor);
+                            break;
+                        }
+
+                        finalize_http_success_side_effects(
+                            &window_monitor,
+                            id_monitor.clone(),
+                            url_monitor.clone(),
+                            path_monitor.clone(),
                             total_size,
-                            downloaded_bytes: total_size,
-                            status: "Complete".to_string(),
-                            started_at: monitor_start_iso.clone(),
-                            finished_at: chrono::Local::now().to_rfc3339(),
-                            avg_speed_bps: avg_speed,
-                            duration_secs: elapsed.as_secs(),
-                            segments_used: seg_count,
-                            error_message: None,
-                            source_type: Some("http".to_string()),
-                        });
-                        // Auto-verify integrity if Content-MD5 header was present
-                        {
-                            let verify_id = id_monitor.clone();
-                            let verify_path = path_monitor.clone();
-                            let verify_md5 = md5_monitor.clone();
-                            let verify_app = window_monitor.clone();
-                            tokio::spawn(async move {
-                                if let Some(result) = crate::integrity::auto_verify(
-                                    &verify_id,
-                                    &verify_path,
-                                    verify_md5.as_deref(),
-                                ).await {
-                                    let _ = verify_app.emit("integrity_check", serde_json::json!({
-                                        "id": verify_id,
-                                        "verified": result.verified,
-                                        "method": result.method,
-                                        "algorithm": result.algorithm,
-                                        "message": result.message,
-                                    }));
-                                }
-                            });
-                        }
-                        // Also check queue-supplied expected checksum (e.g. from browser extension)
-                        run_queued_integrity_check(&window_monitor, &id_monitor, &path_monitor);
-                        // Auto-categorize and optionally move completed file
-                        {
-                            let settings_snap = crate::settings::load_settings();
-                            if settings_snap.auto_sort_downloads {
-                                match crate::file_categorizer::categorize_and_move(&path_monitor, &settings_snap.download_dir) {
-                                    Ok((cat_result, new_path)) => {
-                                        let moved = new_path != path_monitor;
-                                        let _ = window_monitor.emit("file_categorized", serde_json::json!({
-                                            "id": id_monitor,
-                                            "filename": extract_filename(&path_monitor),
-                                            "category": cat_result.category_name,
-                                            "icon": cat_result.icon,
-                                            "color": cat_result.color,
-                                            "should_move": cat_result.should_move,
-                                            "target_dir": cat_result.target_dir,
-                                            "moved": moved,
-                                            "new_path": if moved { Some(&new_path) } else { None },
-                                        }));
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[{}] Auto-sort failed: {}", id_monitor, e);
-                                        let cat_result = crate::file_categorizer::categorize(extract_filename(&path_monitor));
-                                        let _ = window_monitor.emit("file_categorized", serde_json::json!({
-                                            "id": id_monitor,
-                                            "filename": extract_filename(&path_monitor),
-                                            "category": cat_result.category_name,
-                                            "icon": cat_result.icon,
-                                            "color": cat_result.color,
-                                            "should_move": false,
-                                            "target_dir": cat_result.target_dir,
-                                        }));
-                                    }
-                                }
-                            } else {
-                                // Just categorize without moving
-                                let cat_result = crate::file_categorizer::categorize(extract_filename(&path_monitor));
-                                let _ = window_monitor.emit("file_categorized", serde_json::json!({
-                                    "id": id_monitor,
-                                    "filename": extract_filename(&path_monitor),
-                                    "category": cat_result.category_name,
-                                    "icon": cat_result.icon,
-                                    "color": cat_result.color,
-                                    "should_move": false,
-                                    "target_dir": cat_result.target_dir,
-                                }));
-                            }
-                        }
-                        // Virus scan after download (async, non-blocking)
-                        if crate::settings::load_settings().scan_after_download {
-                            let scan_path = path_monitor.clone();
-                            let scan_id = id_monitor.clone();
-                            let scan_app = window_monitor.clone();
-                            tokio::spawn(async move {
-                                let scanner = crate::virus_scanner::VirusScanner::new();
-                                if scanner.is_available() {
-                                    let result = scanner.scan_file(std::path::Path::new(&scan_path)).await;
-                                    let (status, threat) = match &result {
-                                        crate::virus_scanner::ScanResult::Clean => ("clean", None),
-                                        crate::virus_scanner::ScanResult::Infected { threat_name } => ("infected", Some(threat_name.as_str())),
-                                        crate::virus_scanner::ScanResult::Error { message } => ("error", Some(message.as_str())),
-                                        crate::virus_scanner::ScanResult::NotScanned => ("not_scanned", None),
-                                    };
-                                    let _ = scan_app.emit("virus_scan_result", serde_json::json!({
-                                        "id": scan_id,
-                                        "status": status,
-                                        "threat": threat,
-                                    }));
-                                }
-                            });
-                        }
+                            monitor_start_iso.clone(),
+                            monitor_start.elapsed(),
+                            seg_count,
+                            md5_monitor.clone(),
+                            etag_monitor.clone(),
+                            chatops_monitor.clone(),
+                        );
                         // Signal save loop and workers to stop
                         let _ = stop_tx_monitor.send(());
                         // Notify queue manager that a slot opened up
@@ -1287,6 +1497,11 @@ pub(crate) async fn start_download_impl(
                         if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
                             let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                             downloads.remove(&id_monitor);
+                            app_state.unregister_streaming_source(&id_monitor);
+                        }
+
+                        if let Some(action) = crate::scheduler::handle_download_complete(&id_monitor) {
+                            crate::scheduler::execute_end_action(&window_monitor, &action);
                         }
                         
                         break;
@@ -1724,4 +1939,19 @@ pub(crate) async fn start_download_impl(
     });
     
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_retry_path_keeps_parent_and_marks_file() {
+        let original = std::path::Path::new("/tmp/archive.zip");
+        let quarantined = corrupt_retry_path(original.to_str().unwrap());
+        let quarantined_path = std::path::Path::new(&quarantined);
+
+        assert_eq!(quarantined_path.parent(), original.parent());
+        assert!(quarantined_path.file_name().unwrap().to_string_lossy().starts_with("archive.zip.corrupt-"));
+    }
 }

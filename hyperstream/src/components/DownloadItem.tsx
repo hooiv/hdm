@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { error as logError } from '../utils/logger';
 import { formatBytes, formatSpeed, formatETA } from '../utils/formatters';
 import { ZipPreviewModal } from './ZipPreviewModal';
-import type { DownloadTask } from '../types';
+import type { DiscoveredMirror, DownloadTask } from '../types';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Folder, Play, Pause, Trash2, ChevronDown, FileText, ArrowUp, ArrowDown, Share2, Package } from 'lucide-react';
 import P2PShareModal from './P2PShareModal';
@@ -13,6 +13,7 @@ interface DownloadItemProps {
     task: DownloadTask;
     onPause: (id: string) => void;
     onResume: (id: string) => void;
+    onDiscoveredMirrors?: (id: string, mirrors: DiscoveredMirror[]) => void;
     onDelete?: (id: string) => void;
     onMoveUp?: (id: string) => void;
     onMoveDown?: (id: string) => void;
@@ -66,7 +67,7 @@ const getFileCategory = (filename: string): { icon: string; label: string; color
 };
 
 // Memoize Item to prevent re-renders of non-updating downloads
-export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onResume, onDelete, onMoveUp, onMoveDown, downloadDir }) => {
+export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir }) => {
     const [showPreview, setShowPreview] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const [showP2PShare, setShowP2PShare] = useState(false);
@@ -107,6 +108,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
 
     // Memoize category calculation
     const category = React.useMemo(() => getFileCategory(safeFilename), [safeFilename]);
+    const discoveredMirrorCount = task.discoveredMirrors?.length ?? 0;
 
     // Helper to check if mountable
     // --- derived state for expanded panel passed via props or contained inside it ---
@@ -155,6 +157,11 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                         {task.mirrorStats && task.mirrorStats.length > 1 && (
                             <span className="text-[10px] text-emerald-300 bg-emerald-800/30 px-1.5 rounded uppercase ml-1" title={`${task.mirrorStats.filter(m => !m.disabled).length}/${task.mirrorStats.length} mirrors active`}>
                                 ⚡ {task.mirrorStats.filter(m => !m.disabled).length} mirrors
+                            </span>
+                        )}
+                        {discoveredMirrorCount > 0 && task.status !== 'Done' && (
+                            <span className="text-[10px] text-teal-300 bg-teal-800/30 px-1.5 rounded uppercase ml-1" title={`${discoveredMirrorCount} discovered mirror candidate${discoveredMirrorCount === 1 ? '' : 's'} ready for recovery`}>
+                                🪞 {discoveredMirrorCount} ready
                             </span>
                         )}
                         <span className={`text-[9px] uppercase font-bold px-2 py-0.5 rounded-full border border-white/5 ${category.bgColor} ${category.color}`}>
@@ -317,6 +324,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                         <DownloadExpandedPanel
                             task={task}
                             filePath={filePath}
+                            onResume={onResume}
+                            onDiscoveredMirrors={onDiscoveredMirrors}
                             onShowPreview={() => setShowPreview(true)}
                             onShowP2PShare={() => setShowP2PShare(true)}
                         />

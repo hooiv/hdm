@@ -36,6 +36,123 @@ use serde::{Serialize, Deserialize};
 use tauri::{Emitter, Manager};
 use tokio::sync::broadcast;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MirrorIdentity {
+    total_size: u64,
+    etag: Option<String>,
+    md5: Option<String>,
+}
+
+impl MirrorIdentity {
+    fn from_probe(probe: &crate::downloader::initialization::ProbeResult) -> Self {
+        Self {
+            total_size: probe.total_size,
+            etag: probe.etag.clone(),
+            md5: probe.md5.clone(),
+        }
+    }
+
+    fn mismatch_reason(&self, other: &Self) -> Option<String> {
+        if self.total_size != other.total_size {
+            return Some(format!(
+                "content length mismatch (expected {} bytes, got {} bytes)",
+                self.total_size, other.total_size
+            ));
+        }
+
+        if let (Some(expected), Some(actual)) = (self.etag.as_deref(), other.etag.as_deref()) {
+            if normalize_etag(expected) != normalize_etag(actual) {
+                return Some("ETag mismatch".to_string());
+            }
+        }
+
+        if let (Some(expected), Some(actual)) = (self.md5.as_deref(), other.md5.as_deref()) {
+            if expected.trim() != actual.trim() {
+                return Some("Content-MD5 mismatch".to_string());
+            }
+        }
+
+        None
+    }
+}
+
+fn normalize_etag(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_weak_prefix = trimmed
+        .strip_prefix("W/")
+        .or_else(|| trimmed.strip_prefix("w/"))
+        .unwrap_or(trimmed);
+    without_weak_prefix.trim_matches('"').to_string()
+}
+
+fn parse_content_range_total(header: &str) -> Option<u64> {
+    let total = header.split('/').nth(1)?.trim();
+    if total == "*" {
+        None
+    } else {
+        total.parse::<u64>().ok().filter(|&size| size > 0)
+    }
+}
+
+fn response_identity_mismatch(
+    expected: &MirrorIdentity,
+    response: &rquest::Response,
+    requires_range_request: bool,
+) -> Option<String> {
+    let response_total_size = if response.status() == rquest::StatusCode::PARTIAL_CONTENT {
+        response
+            .headers()
+            .get("content-range")
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range_total)
+    } else if !requires_range_request {
+        response.content_length().or_else(|| {
+            response
+                .headers()
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+    } else {
+        None
+    };
+
+    if let Some(actual_total_size) = response_total_size {
+        if actual_total_size != expected.total_size {
+            return Some(format!(
+                "runtime content length mismatch (expected {} bytes, got {} bytes)",
+                expected.total_size, actual_total_size
+            ));
+        }
+    }
+
+    if let (Some(expected_etag), Some(actual_etag)) = (
+        expected.etag.as_deref(),
+        response
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        if normalize_etag(expected_etag) != normalize_etag(actual_etag) {
+            return Some("runtime ETag mismatch".to_string());
+        }
+    }
+
+    if let (Some(expected_md5), Some(actual_md5)) = (
+        expected.md5.as_deref(),
+        response
+            .headers()
+            .get("content-md5")
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        if expected_md5.trim() != actual_md5.trim() {
+            return Some("runtime Content-MD5 mismatch".to_string());
+        }
+    }
+
+    None
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Mirror statistics & pool
 // ────────────────────────────────────────────────────────────────────────────
@@ -62,6 +179,14 @@ pub struct MirrorStats {
     pub latency_ms: u64,
     /// If true, the mirror is temporarily disabled (too many errors).
     pub disabled: bool,
+    /// If true, the mirror was quarantined because it does not match the canonical file identity.
+    pub quarantined: bool,
+    /// Human-readable identity validation state.
+    pub identity_status: String,
+    /// When quarantined, explains why this mirror was excluded.
+    pub quarantine_reason: Option<String>,
+    /// Marks the mirror that established the canonical file identity for this session.
+    pub canonical: bool,
 }
 
 impl MirrorStats {
@@ -77,12 +202,16 @@ impl MirrorStats {
             probed: false,
             latency_ms: u64::MAX,
             disabled: false,
+            quarantined: false,
+            identity_status: "pending".to_string(),
+            quarantine_reason: None,
+            canonical: false,
         }
     }
 
     /// Composite score: higher is better. Factors in speed, latency, reliability.
     pub fn score(&self) -> f64 {
-        if self.disabled {
+        if self.disabled || self.quarantined {
             return 0.0;
         }
         if !self.probed {
@@ -95,7 +224,8 @@ impl MirrorStats {
         } else {
             0.5
         };
-        speed_factor * latency_penalty * reliability
+        let range_factor = if self.supports_range { 1.0 } else { 0.25 };
+        speed_factor * latency_penalty * reliability * range_factor
     }
 
     /// Record a successful chunk transfer.
@@ -136,6 +266,22 @@ pub struct MirrorPool {
 }
 
 impl MirrorPool {
+    fn ranked_candidates<'a>(
+        mirrors: &'a [MirrorStats],
+        require_range: bool,
+        exclude_url: Option<&str>,
+    ) -> Vec<&'a MirrorStats> {
+        let mut ranked: Vec<&MirrorStats> = mirrors
+            .iter()
+            .filter(|ms| !ms.disabled)
+            .filter(|ms| !ms.quarantined)
+            .filter(|ms| !require_range || ms.supports_range)
+            .filter(|ms| exclude_url.map(|exclude| ms.url != exclude).unwrap_or(true))
+            .collect();
+        ranked.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap_or(std::cmp::Ordering::Equal));
+        ranked
+    }
+
     /// Create a pool from a primary URL and optional mirror URLs.
     pub fn new(primary_url: &str, mirror_urls: &[(String, String)]) -> Self {
         let mut mirrors = vec![MirrorStats::new(primary_url.to_string(), "Primary".to_string())];
@@ -205,23 +351,31 @@ impl MirrorPool {
     /// Get the best mirror URL for a worker. Falls back to primary if all else fails.
     /// Each call may return a different mirror for load distribution.
     pub fn pick_best(&self) -> String {
-        let m = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
-        let mut ranked: Vec<&MirrorStats> = m.iter().filter(|ms| !ms.disabled).collect();
-        ranked.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap_or(std::cmp::Ordering::Equal));
-        ranked.first().map(|ms| ms.url.clone()).unwrap_or_else(|| {
-            // Absolute fallback: return first mirror regardless of disabled state
+        self.pick_best_matching(false).unwrap_or_else(|| {
+            let m = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
             m.first().map(|ms| ms.url.clone()).unwrap_or_default()
         })
     }
 
+    /// Pick the best mirror, optionally requiring byte-range support.
+    pub fn pick_best_matching(&self, require_range: bool) -> Option<String> {
+        let m = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
+        Self::ranked_candidates(&m, require_range, None)
+            .first()
+            .map(|ms| ms.url.clone())
+    }
+
     /// Pick the best mirror that isn't `exclude_url`. Used for failover.
     pub fn pick_fallback(&self, exclude_url: &str) -> Option<String> {
+        self.pick_fallback_matching(exclude_url, false)
+    }
+
+    /// Pick the best fallback mirror, optionally requiring byte-range support.
+    pub fn pick_fallback_matching(&self, exclude_url: &str, require_range: bool) -> Option<String> {
         let m = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
-        let mut ranked: Vec<&MirrorStats> = m.iter()
-            .filter(|ms| !ms.disabled && ms.url != exclude_url)
-            .collect();
-        ranked.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap_or(std::cmp::Ordering::Equal));
-        ranked.first().map(|ms| ms.url.clone())
+        Self::ranked_candidates(&m, require_range, Some(exclude_url))
+            .first()
+            .map(|ms| ms.url.clone())
     }
 
     /// Record success for a mirror.
@@ -245,9 +399,82 @@ impl MirrorPool {
         self.mirrors.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// URLs of mirrors that are still operationally usable and worth validating.
+    pub fn usable_urls(&self) -> Vec<String> {
+        self.mirrors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|ms| !ms.disabled)
+            .map(|ms| ms.url.clone())
+            .collect()
+    }
+
     /// Number of usable (non-disabled) mirrors.
     pub fn usable_count(&self) -> usize {
-        self.mirrors.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|ms| !ms.disabled).count()
+        self.usable_count_matching(false)
+    }
+
+    /// Number of usable mirrors, optionally requiring byte-range support.
+    pub fn usable_count_matching(&self, require_range: bool) -> usize {
+        self.mirrors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|ms| !ms.disabled)
+            .filter(|ms| !ms.quarantined)
+            .filter(|ms| !require_range || ms.supports_range)
+            .count()
+    }
+
+    /// Update a mirror's known range support after a deeper probe.
+    pub fn set_range_support(&self, url: &str, supports_range: bool) {
+        let mut m = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ms) = m.iter_mut().find(|ms| ms.url == url) {
+            ms.probed = true;
+            ms.supports_range = supports_range;
+        }
+    }
+
+    /// Mark a mirror as unsafe for ranged requests and penalize it for future picks.
+    pub fn mark_range_unsupported(&self, url: &str) {
+        let mut m = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ms) = m.iter_mut().find(|ms| ms.url == url) {
+            ms.probed = true;
+            ms.supports_range = false;
+            ms.record_error();
+        }
+    }
+
+    /// Mark a mirror as identity-verified against the canonical file.
+    pub fn mark_identity_verified(&self, url: &str, canonical: bool) {
+        let mut mirrors = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
+        if canonical {
+            for mirror in mirrors.iter_mut() {
+                mirror.canonical = mirror.url == url;
+            }
+        }
+
+        if let Some(ms) = mirrors.iter_mut().find(|ms| ms.url == url) {
+            ms.quarantined = false;
+            ms.identity_status = "verified".to_string();
+            ms.quarantine_reason = None;
+            if !canonical {
+                ms.canonical = false;
+            }
+        }
+    }
+
+    /// Quarantine a mirror so it cannot be selected for segment mixing.
+    pub fn quarantine_mirror(&self, url: &str, reason: impl Into<String>) {
+        let reason = reason.into();
+        let mut mirrors = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ms) = mirrors.iter_mut().find(|ms| ms.url == url) {
+            ms.quarantined = true;
+            ms.canonical = false;
+            ms.identity_status = "quarantined".to_string();
+            ms.quarantine_reason = Some(reason);
+        }
     }
 
     /// Add a new mirror dynamically (e.g. discovered during download).
@@ -256,6 +483,34 @@ impl MirrorPool {
         if !m.iter().any(|ms| ms.url == url) {
             m.push(MirrorStats::new(url, source));
         }
+    }
+}
+
+fn configured_multi_source_segments(raw_segment_count: u32) -> u32 {
+    if raw_segment_count == 0 {
+        let adaptive = crate::adaptive_threads::recommended_threads();
+        if adaptive >= 2 { adaptive } else { 8 }
+    } else {
+        raw_segment_count
+    }
+}
+
+fn resolve_effective_segments(
+    requested_segments: u32,
+    resume_from: u64,
+    supports_range: bool,
+) -> Result<u32, String> {
+    if resume_from > 0 && !supports_range {
+        return Err(
+            "Cannot safely resume a multi-source download because no selected mirror supports byte ranges"
+                .to_string(),
+        );
+    }
+
+    if !supports_range {
+        Ok(1)
+    } else {
+        Ok(requested_segments.max(1))
     }
 }
 
@@ -313,17 +568,105 @@ pub async fn start_multi_source_download(
         mirrors.len() + 1
     );
 
-    // 2. Determine file size from best mirror
-    let best_url = pool.pick_best();
-    let probe =
-        crate::downloader::initialization::determine_total_size(&client, &best_url).await?;
-    let total_size = probe.total_size;
-    let etag = probe.etag;
-    let md5 = probe.md5;
+    // 2. Determine file size from the best compatible mirror
+    let saved = {
+        let downloads = persistence::load_downloads().unwrap_or_default();
+        downloads.into_iter().find(|d| d.id == id)
+    };
+    let resume_from = saved.as_ref().map(|s| s.downloaded_bytes).unwrap_or(0);
+    let requested_segments = configured_multi_source_segments(settings.segments);
+    let mut prefer_range_probe = requested_segments > 1 || resume_from > 0;
+
+    let (best_url, probe) = loop {
+        let candidate = if prefer_range_probe {
+            if let Some(url) = pool.pick_best_matching(true) {
+                url
+            } else if resume_from > 0 {
+                return Err(
+                    "Cannot safely resume a multi-source download because no selected mirror supports byte ranges"
+                        .to_string(),
+                );
+            } else {
+                prefer_range_probe = false;
+                continue;
+            }
+        } else {
+            let url = pool.pick_best();
+            if url.is_empty() {
+                return Err("No usable mirrors available for multi-source download".to_string());
+            }
+            url
+        };
+
+        let probe = crate::downloader::initialization::determine_total_size(&client, &candidate).await?;
+        pool.set_range_support(&candidate, probe.supports_range);
+
+        if prefer_range_probe && !probe.supports_range {
+            pool.mark_range_unsupported(&candidate);
+            if pool.usable_count_matching(true) > 0 {
+                continue;
+            }
+            if resume_from > 0 {
+                return Err(
+                    "Cannot safely resume a multi-source download because no selected mirror supports byte ranges"
+                        .to_string(),
+                );
+            }
+            prefer_range_probe = false;
+            continue;
+        }
+
+        break (candidate, probe);
+    };
+    let canonical_identity = MirrorIdentity::from_probe(&probe);
+    pool.mark_identity_verified(&best_url, true);
+
+    for mirror_url in pool.usable_urls() {
+        if mirror_url == best_url {
+            continue;
+        }
+
+        match crate::downloader::initialization::determine_total_size(&client, &mirror_url).await {
+            Ok(mirror_probe) => {
+                pool.set_range_support(&mirror_url, mirror_probe.supports_range);
+                let mirror_identity = MirrorIdentity::from_probe(&mirror_probe);
+                if let Some(reason) = canonical_identity.mismatch_reason(&mirror_identity) {
+                    println!(
+                        "[multi-source] Quarantining mirror {} due to {}",
+                        mirror_url, reason
+                    );
+                    pool.quarantine_mirror(&mirror_url, reason);
+                } else {
+                    pool.mark_identity_verified(&mirror_url, false);
+                }
+            }
+            Err(error) => {
+                println!(
+                    "[multi-source] Quarantining mirror {} because identity probe failed: {}",
+                    mirror_url, error
+                );
+                pool.quarantine_mirror(&mirror_url, format!("identity probe failed: {}", error));
+            }
+        }
+    }
+
+    let total_size = canonical_identity.total_size;
+    let etag = canonical_identity.etag.clone();
+    let md5 = canonical_identity.md5.clone();
+    let effective_segments = resolve_effective_segments(
+        requested_segments,
+        resume_from,
+        probe.supports_range,
+    )?;
 
     if total_size == 0 {
         return Err("Cannot determine file size for multi-source download".to_string());
     }
+
+    let _ = app.emit("mirror_stats", serde_json::json!({
+        "id": id.clone(),
+        "mirrors": pool.get_stats(),
+    }));
 
     // 3. File path with collision avoidance + category logic
     let final_path = if settings.use_category_folders {
@@ -361,24 +704,27 @@ pub async fn start_multi_source_download(
     } else {
         path.clone()
     };
-    let path = resolve_filename_collision(&final_path);
+    let path = if resume_from > 0 {
+        saved
+            .as_ref()
+            .map(|download| download.path.clone())
+            .filter(|saved_path| !saved_path.is_empty())
+            .unwrap_or(final_path)
+    } else {
+        resolve_filename_collision(&final_path)
+    };
 
     // 4. Setup file
-    let file = crate::downloader::initialization::setup_file(&path, 0, total_size)?;
+    let file = crate::downloader::initialization::setup_file(&path, resume_from, total_size)?;
     let file_mutex = file;
 
     // 5. Initialize segment manager
-    let saved = {
-        let downloads = persistence::load_downloads().unwrap_or_default();
-        downloads.into_iter().find(|d| d.id == id)
-    };
     let manager = crate::downloader::initialization::setup_manager(
         total_size,
         saved.as_ref(),
-        saved.as_ref().map(|s| s.downloaded_bytes).unwrap_or(0),
-        settings.segments,
+        resume_from,
+        effective_segments,
     );
-    let resume_from = saved.as_ref().map(|s| s.downloaded_bytes).unwrap_or(0);
     let downloaded_total = Arc::new(AtomicU64::new(resume_from));
 
     // 6. Stop signal
@@ -610,6 +956,7 @@ pub async fn start_multi_source_download(
         let total_size_worker = total_size;
         let disk_io_error_worker = disk_io_error.clone();
         let pool_worker = pool.clone();
+        let canonical_identity_worker = canonical_identity.clone();
 
         tokio::spawn(async move {
             let (start, end, seg_id) = {
@@ -631,7 +978,24 @@ pub async fn start_multi_source_download(
             const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024;
 
             // Pick initial mirror for this worker
-            let mut current_mirror = pool_worker.pick_best();
+            let initial_request_requires_range = current_pos > 0 || end < total_size_worker;
+            let mut current_mirror = match if initial_request_requires_range {
+                pool_worker.pick_best_matching(true)
+            } else {
+                Some(pool_worker.pick_best())
+            } {
+                Some(url) if !url.is_empty() => url,
+                _ => {
+                    let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                        seg.downloaded_cursor = current_pos;
+                        seg.state = crate::downloader::structures::SegmentState::Error;
+                    }
+                    crate::media::sounds::play_error();
+                    return;
+                }
+            };
             let mut chunk_start_time = std::time::Instant::now();
             let mut chunk_bytes: u64 = 0;
 
@@ -673,6 +1037,7 @@ pub async fn start_multi_source_download(
                     break;
                 }
 
+                let requires_range_request = current_pos > 0 || end < total_size_worker;
                 let range_header = format!("bytes={}-{}", current_pos, end - 1);
                 let _permit = cm_clone.acquire(&current_mirror).await.ok();
 
@@ -685,10 +1050,11 @@ pub async fn start_multi_source_download(
                     }
                 }
 
-                let res_future = client_clone
-                    .get(&current_mirror)
-                    .header("Range", &range_header)
-                    .send();
+                let mut request = client_clone.get(&current_mirror);
+                if requires_range_request {
+                    request = request.header("Range", &range_header);
+                }
+                let res_future = request.send();
 
                 let res = tokio::select! {
                     _ = stop_rx.recv() => {
@@ -713,7 +1079,9 @@ pub async fn start_multi_source_download(
                         pool_worker.record_error(&current_mirror);
 
                         // Try to failover to another mirror
-                        if let Some(fallback) = pool_worker.pick_fallback(&current_mirror) {
+                        if let Some(fallback) = pool_worker
+                            .pick_fallback_matching(&current_mirror, requires_range_request)
+                        {
                             println!(
                                 "[multi-source] Seg {} failing over from {} → {}",
                                 seg_id, current_mirror, fallback
@@ -747,7 +1115,9 @@ pub async fn start_multi_source_download(
                     || response.status() == rquest::StatusCode::GONE
                 {
                     pool_worker.record_error(&current_mirror);
-                    if let Some(fallback) = pool_worker.pick_fallback(&current_mirror) {
+                    if let Some(fallback) = pool_worker
+                        .pick_fallback_matching(&current_mirror, requires_range_request)
+                    {
                         println!(
                             "[multi-source] Seg {} HTTP {} on {}, failing over → {}",
                             seg_id,
@@ -797,7 +1167,9 @@ pub async fn start_multi_source_download(
                 {
                     // Try another mirror first before waiting
                     pool_worker.record_error(&current_mirror);
-                    if let Some(fallback) = pool_worker.pick_fallback(&current_mirror) {
+                    if let Some(fallback) = pool_worker
+                        .pick_fallback_matching(&current_mirror, requires_range_request)
+                    {
                         println!(
                             "[multi-source] Seg {} rate-limited on {}, switching → {}",
                             seg_id, current_mirror, fallback
@@ -820,6 +1192,100 @@ pub async fn start_multi_source_download(
                     };
                     tokio::time::sleep(wait_time).await;
                     continue;
+                }
+
+                if requires_range_request && response.status() != rquest::StatusCode::PARTIAL_CONTENT {
+                    println!(
+                        "[multi-source] Seg {} mirror {} ignored Range (status {}), rejecting mirror",
+                        seg_id,
+                        current_mirror,
+                        response.status().as_u16()
+                    );
+                    pool_worker.mark_range_unsupported(&current_mirror);
+                    if let Some(fallback) = pool_worker.pick_fallback_matching(&current_mirror, true) {
+                        current_mirror = fallback;
+                        chunk_start_time = std::time::Instant::now();
+                        chunk_bytes = 0;
+                        retry_count = 0;
+                        continue;
+                    }
+
+                    let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                        seg.downloaded_cursor = current_pos;
+                        seg.state = crate::downloader::structures::SegmentState::Error;
+                    }
+                    crate::media::sounds::play_error();
+                    break;
+                }
+
+                if !response.status().is_success() {
+                    pool_worker.record_error(&current_mirror);
+                    if let Some(fallback) = pool_worker
+                        .pick_fallback_matching(&current_mirror, requires_range_request)
+                    {
+                        println!(
+                            "[multi-source] Seg {} unexpected HTTP {} on {}, switching → {}",
+                            seg_id,
+                            response.status().as_u16(),
+                            current_mirror,
+                            fallback
+                        );
+                        current_mirror = fallback;
+                        chunk_start_time = std::time::Instant::now();
+                        chunk_bytes = 0;
+                        retry_count = 0;
+                        continue;
+                    }
+
+                    retry_count += 1;
+                    if retry_count > MAX_RETRIES {
+                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                        if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                            seg.downloaded_cursor = current_pos;
+                            seg.state = crate::downloader::structures::SegmentState::Error;
+                        }
+                        crate::media::sounds::play_error();
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+
+                if let Some(reason) = response_identity_mismatch(
+                    &canonical_identity_worker,
+                    &response,
+                    requires_range_request,
+                ) {
+                    println!(
+                        "[multi-source] Seg {} mirror {} failed identity check: {}",
+                        seg_id, current_mirror, reason
+                    );
+                    pool_worker.quarantine_mirror(&current_mirror, reason);
+                    let _ = app_handle_clone.emit("mirror_stats", serde_json::json!({
+                        "id": id_worker.clone(),
+                        "mirrors": pool_worker.get_stats(),
+                    }));
+                    if let Some(fallback) = pool_worker
+                        .pick_fallback_matching(&current_mirror, requires_range_request)
+                    {
+                        current_mirror = fallback;
+                        chunk_start_time = std::time::Instant::now();
+                        chunk_bytes = 0;
+                        retry_count = 0;
+                        continue;
+                    }
+
+                    let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                        seg.downloaded_cursor = current_pos;
+                        seg.state = crate::downloader::structures::SegmentState::Error;
+                    }
+                    crate::media::sounds::play_error();
+                    break;
                 }
 
                 // Stream response body
@@ -942,4 +1408,139 @@ pub async fn start_multi_source_download(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configure_mirror(pool: &MirrorPool, url: &str, avg_speed_bps: u64, supports_range: bool) {
+        let mut mirrors = pool.mirrors.lock().unwrap();
+        let mirror = mirrors.iter_mut().find(|mirror| mirror.url == url).unwrap();
+        mirror.probed = true;
+        mirror.avg_speed_bps = avg_speed_bps;
+        mirror.latency_ms = 25;
+        mirror.supports_range = supports_range;
+    }
+
+    #[test]
+    fn resolve_effective_segments_falls_back_to_single_segment_without_range() {
+        assert_eq!(resolve_effective_segments(8, 0, false).unwrap(), 1);
+        assert_eq!(resolve_effective_segments(8, 0, true).unwrap(), 8);
+    }
+
+    #[test]
+    fn resolve_effective_segments_rejects_resume_without_range() {
+        let error = resolve_effective_segments(4, 1024, false).unwrap_err();
+        assert!(error.contains("Cannot safely resume"));
+    }
+
+    #[test]
+    fn pick_best_matching_requires_range_capability() {
+        let primary = "https://primary.test/file";
+        let mirror = "https://mirror.test/file";
+        let pool = MirrorPool::new(primary, &[(mirror.to_string(), "Mirror".to_string())]);
+
+        configure_mirror(&pool, primary, 1_000_000, false);
+        configure_mirror(&pool, mirror, 350_000, true);
+
+        assert_eq!(pool.pick_best_matching(true).as_deref(), Some(mirror));
+        assert_eq!(pool.usable_count_matching(true), 1);
+    }
+
+    #[test]
+    fn mark_range_unsupported_excludes_mirror_from_range_fallbacks() {
+        let primary = "https://primary.test/file";
+        let mirror_a = "https://mirror-a.test/file";
+        let mirror_b = "https://mirror-b.test/file";
+        let pool = MirrorPool::new(
+            primary,
+            &[
+                (mirror_a.to_string(), "Mirror A".to_string()),
+                (mirror_b.to_string(), "Mirror B".to_string()),
+            ],
+        );
+
+        configure_mirror(&pool, primary, 100_000, false);
+        configure_mirror(&pool, mirror_a, 900_000, true);
+        configure_mirror(&pool, mirror_b, 500_000, true);
+
+        assert_eq!(pool.pick_best_matching(true).as_deref(), Some(mirror_a));
+
+        pool.mark_range_unsupported(mirror_a);
+
+        assert_eq!(pool.pick_best_matching(true).as_deref(), Some(mirror_b));
+
+        let stats = pool.get_stats();
+        let mirror_a_stats = stats.iter().find(|mirror| mirror.url == mirror_a).unwrap();
+        assert!(!mirror_a_stats.supports_range);
+        assert_eq!(mirror_a_stats.error_count, 1);
+    }
+
+    #[test]
+    fn mirror_identity_treats_weak_etags_as_equivalent() {
+        let canonical = MirrorIdentity {
+            total_size: 1024,
+            etag: Some("\"abc123\"".to_string()),
+            md5: None,
+        };
+        let equivalent = MirrorIdentity {
+            total_size: 1024,
+            etag: Some("W/\"abc123\"".to_string()),
+            md5: None,
+        };
+
+        assert_eq!(canonical.mismatch_reason(&equivalent), None);
+    }
+
+    #[test]
+    fn mirror_identity_rejects_md5_mismatch() {
+        let canonical = MirrorIdentity {
+            total_size: 1024,
+            etag: None,
+            md5: Some("abc".to_string()),
+        };
+        let mismatch = MirrorIdentity {
+            total_size: 1024,
+            etag: None,
+            md5: Some("xyz".to_string()),
+        };
+
+        assert_eq!(
+            canonical.mismatch_reason(&mismatch).as_deref(),
+            Some("Content-MD5 mismatch")
+        );
+    }
+
+    #[test]
+    fn quarantine_mirror_excludes_it_from_future_selection() {
+        let primary = "https://primary.test/file";
+        let mirror_a = "https://mirror-a.test/file";
+        let mirror_b = "https://mirror-b.test/file";
+        let pool = MirrorPool::new(
+            primary,
+            &[
+                (mirror_a.to_string(), "Mirror A".to_string()),
+                (mirror_b.to_string(), "Mirror B".to_string()),
+            ],
+        );
+
+        configure_mirror(&pool, mirror_a, 900_000, true);
+        configure_mirror(&pool, mirror_b, 500_000, true);
+        pool.mark_identity_verified(mirror_a, true);
+        pool.mark_identity_verified(mirror_b, false);
+
+        assert_eq!(pool.pick_best_matching(true).as_deref(), Some(mirror_a));
+
+        pool.quarantine_mirror(mirror_a, "ETag mismatch");
+
+        assert_eq!(pool.pick_best_matching(true).as_deref(), Some(mirror_b));
+
+        let stats = pool.get_stats();
+        let mirror_a_stats = stats.iter().find(|mirror| mirror.url == mirror_a).unwrap();
+        assert!(mirror_a_stats.quarantined);
+        assert_eq!(mirror_a_stats.identity_status, "quarantined");
+        assert_eq!(mirror_a_stats.quarantine_reason.as_deref(), Some("ETag mismatch"));
+        assert!(!mirror_a_stats.canonical);
+    }
 }
