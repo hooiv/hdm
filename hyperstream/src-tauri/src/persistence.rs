@@ -26,6 +26,9 @@ pub struct SavedDownload {
     /// Human-readable error message (when status is "Error")
     #[serde(default)]
     pub error_message: Option<String>,
+    /// Optional checksum expectation preserved across pause/resume and completion.
+    #[serde(default)]
+    pub expected_checksum: Option<String>,
 }
 
 /// Persistent health and cooldown state for a mirror host.

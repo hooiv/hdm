@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { AnimatePresence } from "framer-motion";
 import { safeInvoke as invoke, safeListen as listen, safeGetWindowByLabel } from "./utils/tauri";
 import { debug, error as logError } from "./utils/logger";
@@ -8,30 +8,51 @@ import { Layout } from "./components/Layout";
 import { DownloadList } from "./components/DownloadList";
 import { ClipboardToast } from "./components/ClipboardToast";
 import { DropTarget } from "./components/DropTarget";
+import { RecoverableLazy } from "./components/RecoverableLazy";
 import { ToastManager, ToastRef } from "./components/ToastManager";
-import { TorrentList } from "./components/TorrentList";
-import { FeedsTab } from "./components/FeedsTab";
-import { HistoryTab } from "./components/HistoryTab";
-import { ActivityTab } from "./components/ActivityTab";
-import { QueueManager } from "./components/QueueManager";
-import { SearchTab } from "./components/SearchTab";
 import type { AddTorrentResult, DownloadProgressPayload, ClipboardUrlPayload, ExtensionDownloadPayload, BatchLink, ScheduledDownloadPayload, SavedDownload, AppSettings, DiscoveredMirror, DownloadTask, MirrorStat } from "./types";
 import { toTaskStatus } from "./types";
 import { findActiveTaskByUrl, isDuplicateDownloadError, normalizeDownloadUrl } from "./utils/downloadDedup";
+import { buildExtensionDownloadHeaders } from "./utils/extensionDownload";
 
-// Lazy load modals to improve initial render time
-const AddDownloadModal = React.lazy(() => import("./components/AddDownloadModal").then(m => ({ default: m.AddDownloadModal })));
-const SettingsPage = React.lazy(() => import("./components/SettingsPage").then(m => ({ default: m.SettingsPage })));
-const BatchDownloadModal = React.lazy(() => import("./components/BatchDownloadModal").then(m => ({ default: m.BatchDownloadModal })));
-const ScheduleModal = React.lazy(() => import("./components/ScheduleModal").then(m => ({ default: m.ScheduleModal })));
-const SpiderModal = React.lazy(() => import("./components/SpiderModal").then(m => ({ default: m.SpiderModal })));
-const CrashRecoveryModal = React.lazy(() => import("./components/CrashRecoveryModal").then(m => ({ default: m.CrashRecoveryModal })));
-const StreamDetectorModal = React.lazy(() => import("./components/StreamDetectorModal").then(m => ({ default: m.StreamDetectorModal })));
-const NetworkDiagnosticsModal = React.lazy(() => import("./components/NetworkDiagnosticsModal").then(m => ({ default: m.NetworkDiagnosticsModal })));
-const MediaProcessingModal = React.lazy(() => import("./components/MediaProcessingModal").then(m => ({ default: m.MediaProcessingModal })));
-const IpfsDownloadModal = React.lazy(() => import("./components/IpfsDownloadModal").then(m => ({ default: m.IpfsDownloadModal })));
-const AddTorrentModal = React.lazy(() => import("./components/AddTorrentModal").then(m => ({ default: m.AddTorrentModal })));
-const PluginEditor = React.lazy(() => import("./components/PluginEditor"));
+// Lazy-loaded surfaces to improve initial render time
+const loadAddDownloadModal = () => import("./components/AddDownloadModal");
+const loadSettingsPage = () => import("./components/SettingsPage");
+const loadBatchDownloadModal = () => import("./components/BatchDownloadModal");
+const loadScheduleModal = () => import("./components/ScheduleModal");
+const loadSpiderModal = () => import("./components/SpiderModal");
+const loadCrashRecoveryModal = () => import("./components/CrashRecoveryModal");
+const loadStreamDetectorModal = () => import("./components/StreamDetectorModal");
+const loadNetworkDiagnosticsModal = () => import("./components/NetworkDiagnosticsModal");
+const loadMediaProcessingModal = () => import("./components/MediaProcessingModal");
+const loadIpfsDownloadModal = () => import("./components/IpfsDownloadModal");
+const loadAddTorrentModal = () => import("./components/AddTorrentModal");
+const loadTorrentList = () => import("./components/TorrentList");
+const loadFeedsTab = () => import("./components/FeedsTab");
+const loadHistoryTab = () => import("./components/HistoryTab");
+const loadActivityTab = () => import("./components/ActivityTab");
+const loadQueueManager = () => import("./components/QueueManager");
+const loadSearchTab = () => import("./components/SearchTab");
+const loadPluginEditor = () => import("./components/PluginEditor");
+
+const resolveAddDownloadModal = (module: Awaited<ReturnType<typeof loadAddDownloadModal>>) => module.AddDownloadModal;
+const resolveSettingsPage = (module: Awaited<ReturnType<typeof loadSettingsPage>>) => module.SettingsPage;
+const resolveBatchDownloadModal = (module: Awaited<ReturnType<typeof loadBatchDownloadModal>>) => module.BatchDownloadModal;
+const resolveScheduleModal = (module: Awaited<ReturnType<typeof loadScheduleModal>>) => module.ScheduleModal;
+const resolveSpiderModal = (module: Awaited<ReturnType<typeof loadSpiderModal>>) => module.SpiderModal;
+const resolveCrashRecoveryModal = (module: Awaited<ReturnType<typeof loadCrashRecoveryModal>>) => module.CrashRecoveryModal;
+const resolveStreamDetectorModal = (module: Awaited<ReturnType<typeof loadStreamDetectorModal>>) => module.StreamDetectorModal;
+const resolveNetworkDiagnosticsModal = (module: Awaited<ReturnType<typeof loadNetworkDiagnosticsModal>>) => module.NetworkDiagnosticsModal;
+const resolveMediaProcessingModal = (module: Awaited<ReturnType<typeof loadMediaProcessingModal>>) => module.MediaProcessingModal;
+const resolveIpfsDownloadModal = (module: Awaited<ReturnType<typeof loadIpfsDownloadModal>>) => module.IpfsDownloadModal;
+const resolveAddTorrentModal = (module: Awaited<ReturnType<typeof loadAddTorrentModal>>) => module.AddTorrentModal;
+const resolveTorrentList = (module: Awaited<ReturnType<typeof loadTorrentList>>) => module.TorrentList;
+const resolveFeedsTab = (module: Awaited<ReturnType<typeof loadFeedsTab>>) => module.FeedsTab;
+const resolveHistoryTab = (module: Awaited<ReturnType<typeof loadHistoryTab>>) => module.HistoryTab;
+const resolveActivityTab = (module: Awaited<ReturnType<typeof loadActivityTab>>) => module.ActivityTab;
+const resolveQueueManager = (module: Awaited<ReturnType<typeof loadQueueManager>>) => module.QueueManager;
+const resolveSearchTab = (module: Awaited<ReturnType<typeof loadSearchTab>>) => module.SearchTab;
+const resolvePluginEditor = (module: Awaited<ReturnType<typeof loadPluginEditor>>) => module.default;
 
 import { GlobalTelemetry } from './components/GlobalTelemetry';
 
@@ -45,6 +66,68 @@ interface ClipboardData {
   url: string;
   filename: string;
 }
+
+interface DownloadSpotlightRequest {
+  taskId: string;
+  token: number;
+}
+
+const tabChunkLoaders = {
+  torrents: loadTorrentList,
+  feeds: loadFeedsTab,
+  search: loadSearchTab,
+  plugins: loadPluginEditor,
+  history: loadHistoryTab,
+  activity: loadActivityTab,
+  queue: loadQueueManager,
+} as const;
+
+type ActiveTab = 'downloads' | keyof typeof tabChunkLoaders;
+
+const tabLoadingFallback = (
+  <div className="flex-1 flex items-center justify-center text-slate-500">Loading view...</div>
+);
+
+const renderModalLoadFailure = ({
+  title,
+  message,
+  onClose,
+  closeLabel = "Close",
+  retryLabel = "Retry loading modal",
+}: {
+  title: string;
+  message: string;
+  onClose: () => void;
+  closeLabel?: string;
+  retryLabel?: string;
+}) => (error: Error, retry: () => void) => (
+  <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
+    <div className="w-full max-w-lg rounded-2xl border border-amber-500/20 bg-slate-900/95 p-6 shadow-2xl">
+      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-500/20 bg-amber-500/10 text-2xl text-amber-300">
+        ⚠️
+      </div>
+      <h3 className="text-center text-lg font-semibold text-slate-100">{title}</h3>
+      <p className="mt-2 text-center text-sm leading-6 text-slate-400">{message}</p>
+      <div className="mt-4 rounded-xl border border-amber-500/10 bg-black/20 px-3 py-2">
+        <code className="text-xs text-amber-300 break-all">{error.message}</code>
+      </div>
+      <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+        <button
+          onClick={onClose}
+          className="inline-flex items-center justify-center rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-slate-700"
+        >
+          {closeLabel}
+        </button>
+        <button
+          onClick={retry}
+          className="inline-flex items-center justify-center rounded-xl bg-cyan-500/20 px-4 py-2 text-sm font-medium text-cyan-300 transition-colors hover:bg-cyan-500/30"
+        >
+          {retryLabel}
+        </button>
+      </div>
+    </div>
+  </div>
+);
 
 function App() {
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
@@ -61,11 +144,22 @@ function App() {
   const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
   const [batchLinks, setBatchLinks] = useState<BatchLink[]>([]);
   const [droppedUrl, setDroppedUrl] = useState<string | undefined>(undefined);
-  const [activeTab, setActiveTab] = useState<'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue'>('downloads');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('downloads');
+  const [downloadSpotlight, setDownloadSpotlight] = useState<DownloadSpotlightRequest | null>(null);
   const [downloadDir, setDownloadDir] = useState<string>('');
 
   const [, setIsOverlayVisible] = useState(false);
   const isOverlayVisibleRef = useRef(false);
+  const prefetchedTabsRef = useRef(new Set<keyof typeof tabChunkLoaders>());
+
+  const prefetchTab = useCallback((tab: ActiveTab) => {
+    if (tab === 'downloads' || prefetchedTabsRef.current.has(tab)) {
+      return;
+    }
+
+    prefetchedTabsRef.current.add(tab);
+    void tabChunkLoaders[tab]();
+  }, []);
 
   const toggleOverlay = useCallback(async () => {
     // toggling overlay visibility using the statically imported Window API
@@ -116,11 +210,12 @@ function App() {
   const toastRef = useRef<ToastRef>(null);
   // Track completed IDs to avoid duplicate toasts
   const completedIds = useRef<Set<string>>(new Set());
-  const pendingDownloadUrlsRef = useRef<Set<string>>(new Set());
+  const pendingDownloadUrlsRef = useRef<Map<string, string>>(new Map());
+  const downloadSpotlightCounterRef = useRef(0);
   // Track auto-remove timers so they can be cleaned on unmount
   const autoRemoveTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   // Stable ref for startDownload to avoid stale closures in event listeners
-  const startDownloadRef = useRef<(url: string, filename: string, force?: boolean, customHeaders?: Record<string,string>, mirrors?: [string, string][]) => Promise<void>>(null!);
+  const startDownloadRef = useRef<(url: string, filename: string, force?: boolean, customHeaders?: Record<string,string>, mirrors?: [string, string][], expectedChecksum?: string) => Promise<void>>(null!);
 
   useEffect(() => {
     const unlistenPromise = listen<DownloadProgressPayload>('download_progress', (event) => {
@@ -155,7 +250,13 @@ function App() {
             if (match) {
               setTasks(curr => curr.map(t =>
                 t.id === id && !t.url
-                  ? { ...t, filename: match.filename, url: match.url }
+                  ? {
+                      ...t,
+                      filename: match.filename,
+                      url: match.url,
+                      expectedChecksum: match.expected_checksum || undefined,
+                      integrityStatus: match.expected_checksum ? 'pending' : t.integrityStatus,
+                    }
                   : t
               ));
             }
@@ -277,11 +378,13 @@ function App() {
             id: d.id,
             filename: d.filename,
             url: d.url,
+            expectedChecksum: d.expected_checksum || undefined,
             progress: d.total_size > 0 ? (d.downloaded_bytes / d.total_size) * 100 : 0,
             downloaded: d.downloaded_bytes,
             total: d.total_size,
             speed: 0,
-            status: toTaskStatus(d.status)
+            status: toTaskStatus(d.status),
+            integrityStatus: d.expected_checksum ? 'pending' : undefined,
           }));
           setTasks(loadedTasks);
         }
@@ -296,10 +399,15 @@ function App() {
   // Listen for downloads from browser extension
   useEffect(() => {
     const unlistenPromise = listen<ExtensionDownloadPayload>('extension_download', (event) => {
-      const { url, filename } = event.payload;
-      debug('Extension download received:', url, filename);
+      const { url, filename, customHeaders, pageUrl, source } = event.payload;
+      debug('Extension download received:', url, filename, source);
       const extractedFilename = filename || url.split('/').pop()?.split('?')[0] || 'download';
-      startDownloadRef.current(url, extractedFilename);
+      startDownloadRef.current(
+        url,
+        extractedFilename,
+        false,
+        buildExtensionDownloadHeaders(customHeaders, pageUrl),
+      );
     });
 
     return () => {
@@ -495,19 +603,38 @@ function App() {
     return safe.trim() || 'download';
   };
 
-  const startDownload = async (url: string, filename: string, force: boolean = false, customHeaders?: Record<string, string>, mirrors?: [string, string][]) => {
+  const revealDownload = useCallback((taskId?: string) => {
+    setActiveTab('downloads');
+
+    if (!taskId) {
+      setDownloadSpotlight(null);
+      return;
+    }
+
+    downloadSpotlightCounterRef.current += 1;
+    setDownloadSpotlight({
+      taskId,
+      token: downloadSpotlightCounterRef.current,
+    });
+  }, []);
+
+  const startDownload = async (url: string, filename: string, force: boolean = false, customHeaders?: Record<string, string>, mirrors?: [string, string][], expectedChecksum?: string) => {
     const safeFilename = sanitizeFilename(filename);
     const downloadId = generateId();
     const normalizedUrl = normalizeDownloadUrl(url);
+    const normalizedChecksum = expectedChecksum?.trim() || undefined;
 
     if (!force) {
       const existingTask = findActiveTaskByUrl(tasksRef.current, url);
       if (existingTask) {
+        revealDownload(existingTask.id);
         toastRef.current?.addToast(`Already downloading: ${existingTask.filename}`, 'info');
         return;
       }
 
-      if (normalizedUrl && pendingDownloadUrlsRef.current.has(normalizedUrl)) {
+      const pendingTaskId = normalizedUrl ? pendingDownloadUrlsRef.current.get(normalizedUrl) : undefined;
+      if (pendingTaskId) {
+        revealDownload(pendingTaskId);
         toastRef.current?.addToast(`Download already starting: ${safeFilename}`, 'info');
         return;
       }
@@ -517,16 +644,18 @@ function App() {
       id: downloadId,
       filename: safeFilename,
       url,
+      expectedChecksum: normalizedChecksum,
       progress: 0,
       downloaded: 0,
       total: 0,
       speed: 0,
-      status: 'Downloading'
+      status: 'Downloading',
+      integrityStatus: normalizedChecksum ? 'pending' : undefined,
     };
 
     lastUpdate.current.delete(downloadId);
     if (normalizedUrl) {
-      pendingDownloadUrlsRef.current.add(normalizedUrl);
+      pendingDownloadUrlsRef.current.set(normalizedUrl, downloadId);
     }
 
     // Add to existing tasks instead of replacing
@@ -539,7 +668,8 @@ function App() {
           primaryUrl: url,
           mirrors,
           path: `${downloadDir}/${safeFilename}`,
-          customHeaders: customHeaders || null
+          customHeaders: customHeaders || null,
+          expectedChecksum: normalizedChecksum || null,
         });
       } else {
         await invoke("start_download", {
@@ -547,7 +677,8 @@ function App() {
           url,
           path: `${downloadDir}/${safeFilename}`,
           force,
-          customHeaders: customHeaders || null
+          customHeaders: customHeaders || null,
+          expectedChecksum: normalizedChecksum || null,
         });
       }
     } catch (error) {
@@ -555,6 +686,7 @@ function App() {
         debug('Duplicate download coalesced in UI:', url, error);
         setTasks(prev => prev.filter(t => t.id !== downloadId));
         const existingTask = findActiveTaskByUrl(tasksRef.current, url, downloadId);
+        revealDownload(existingTask?.id);
         toastRef.current?.addToast(
           existingTask ? `Already downloading: ${existingTask.filename}` : 'This download is already active',
           'info'
@@ -566,7 +698,7 @@ function App() {
       toastRef.current?.addToast(`Failed to start download: ${error}`, 'error');
       setTasks(prev => prev.map(t => t.id === downloadId ? { ...t, status: 'Error' } : t));
     } finally {
-      if (normalizedUrl) {
+      if (normalizedUrl && pendingDownloadUrlsRef.current.get(normalizedUrl) === downloadId) {
         pendingDownloadUrlsRef.current.delete(normalizedUrl);
       }
     }
@@ -632,6 +764,7 @@ function App() {
         mirrors,
         path,
         customHeaders: null,
+        expectedChecksum: task.expectedChecksum || null,
       });
       return;
     }
@@ -642,6 +775,7 @@ function App() {
       path,
       force: false,
       customHeaders: null,
+      expectedChecksum: task.expectedChecksum || null,
     });
   }, [getTaskResumeMirrorsMemo]);
 
@@ -854,6 +988,7 @@ function App() {
         onSpeedLimitChange={handleSpeedLimitChange}
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        onTabIntent={prefetchTab}
         globalSpeed={globalSpeed}
       >
         {activeTab === 'downloads' ? (
@@ -903,6 +1038,7 @@ function App() {
                 onMoveUp={moveUpMemo}
                 onMoveDown={moveDownMemo}
                 downloadDir={downloadDir}
+                spotlightRequest={downloadSpotlight}
               />
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center text-slate-500 opacity-60">
@@ -915,37 +1051,98 @@ function App() {
             )}
           </div>
         ) : activeTab === 'torrents' ? (
-          <TorrentList onPlay={handleStream} />
+          <RecoverableLazy
+            loader={loadTorrentList}
+            resolve={resolveTorrentList}
+            componentProps={{ onPlay: handleStream }}
+            loadingFallback={tabLoadingFallback}
+            failureTitle="Torrents view unavailable"
+            failureMessage="HyperStream couldn’t load the Torrents view. Retry without leaving your current downloads."
+          />
         ) : activeTab === 'feeds' ? (
-          <FeedsTab />
+          <RecoverableLazy
+            loader={loadFeedsTab}
+            resolve={resolveFeedsTab}
+            componentProps={{}}
+            loadingFallback={tabLoadingFallback}
+            failureTitle="Feeds view unavailable"
+            failureMessage="HyperStream couldn’t load the Feeds view. Retry to restore your subscriptions and release feed updates."
+          />
         ) : activeTab === 'plugins' ? (
-          <Suspense fallback={<div className="flex-1 flex items-center justify-center text-slate-500">Loading plugins...</div>}>
-            <PluginEditor />
-          </Suspense>
+          <RecoverableLazy
+            loader={loadPluginEditor}
+            resolve={resolvePluginEditor}
+            componentProps={{}}
+            loadingFallback={<div className="flex-1 flex items-center justify-center text-slate-500">Loading plugins...</div>}
+            failureTitle="Plugins view unavailable"
+            failureMessage="HyperStream couldn’t load the Plugins workspace. Retry to recover plugin management without restarting the app."
+          />
         ) : activeTab === 'history' ? (
-          <HistoryTab />
+          <RecoverableLazy
+            loader={loadHistoryTab}
+            resolve={resolveHistoryTab}
+            componentProps={{}}
+            loadingFallback={tabLoadingFallback}
+            failureTitle="History view unavailable"
+            failureMessage="HyperStream couldn’t load your download history. Retry to restore the archived session view."
+          />
         ) : activeTab === 'activity' ? (
-          <ActivityTab />
+          <RecoverableLazy
+            loader={loadActivityTab}
+            resolve={resolveActivityTab}
+            componentProps={{}}
+            loadingFallback={tabLoadingFallback}
+            failureTitle="Activity view unavailable"
+            failureMessage="HyperStream couldn’t load the activity log. Retry to recover recent download diagnostics."
+          />
         ) : activeTab === 'queue' ? (
-          <QueueManager />
+          <RecoverableLazy
+            loader={loadQueueManager}
+            resolve={resolveQueueManager}
+            componentProps={{}}
+            loadingFallback={tabLoadingFallback}
+            failureTitle="Queue view unavailable"
+            failureMessage="HyperStream couldn’t load the queue manager. Retry to recover scheduling and priority controls."
+          />
         ) : (
-          <SearchTab onStartDownload={startDownload} />
-        )}
-      </Layout>
-      <Suspense fallback={null}>
-        {isModalOpen && (
-          <AddDownloadModal
-            isOpen={isModalOpen}
-            onClose={() => { setIsModalOpen(false); setDroppedUrl(undefined); }}
-            onStart={startDownload}
-            initialUrl={droppedUrl}
+          <RecoverableLazy
+            loader={loadSearchTab}
+            resolve={resolveSearchTab}
+            componentProps={{ onStartDownload: startDownload }}
+            loadingFallback={tabLoadingFallback}
+            failureTitle="Discover view unavailable"
+            failureMessage="HyperStream couldn’t load the Discover view. Retry to restore search-driven download discovery."
           />
         )}
-        {isTorrentModalOpen && (
-          <AddTorrentModal
-            isOpen={isTorrentModalOpen}
-            onClose={() => setIsTorrentModalOpen(false)}
-            onAdd={async (magnet, savePath, paused, initialPriority, pinned) => {
+      </Layout>
+      {isModalOpen && (
+        <RecoverableLazy
+          loader={loadAddDownloadModal}
+          resolve={resolveAddDownloadModal}
+          componentProps={{
+            isOpen: isModalOpen,
+            onClose: () => { setIsModalOpen(false); setDroppedUrl(undefined); },
+            onStart: startDownload,
+            initialUrl: droppedUrl,
+          }}
+          loadingFallback={null}
+          failureTitle="Add download unavailable"
+          failureMessage="HyperStream couldn’t load the Add Download modal. Retry without losing the URL you were preparing."
+          renderFailure={renderModalLoadFailure({
+            title: "Add download unavailable",
+            message: "HyperStream couldn’t load the Add Download modal. Retry without losing the URL you were preparing.",
+            onClose: () => { setIsModalOpen(false); setDroppedUrl(undefined); },
+          })}
+        />
+      )}
+      {isTorrentModalOpen && (
+        <RecoverableLazy
+          loader={loadAddTorrentModal}
+          resolve={resolveAddTorrentModal}
+          componentProps={{
+            isOpen: isTorrentModalOpen,
+            onClose: () => setIsTorrentModalOpen(false),
+            onAdd: async (magnet, savePath, paused, initialPriority, pinned) => {
               debug("Adding magnet:", magnet);
               try {
                 return await invoke<AddTorrentResult>("add_magnet_link", {
@@ -960,74 +1157,175 @@ function App() {
                 toastRef.current?.addToast(`Failed to add magnet: ${err}`, 'error');
                 throw err;
               }
-            }}
-          />
-        )}
-        {isSettingsOpen && (
-          <SettingsPage isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
-        )}
-        {batchLinks.length > 0 && (
-          <BatchDownloadModal
-            isOpen={true}
-            links={batchLinks}
-            onClose={() => setBatchLinks([])}
-            onDownload={(links) => {
+            },
+          }}
+          loadingFallback={null}
+          failureTitle="Torrent import unavailable"
+          failureMessage="HyperStream couldn’t load the torrent import modal. Retry without leaving your current session."
+          renderFailure={renderModalLoadFailure({
+            title: "Torrent import unavailable",
+            message: "HyperStream couldn’t load the torrent import modal. Retry without leaving your current session.",
+            onClose: () => setIsTorrentModalOpen(false),
+          })}
+        />
+      )}
+      {isSettingsOpen && (
+        <RecoverableLazy
+          loader={loadSettingsPage}
+          resolve={resolveSettingsPage}
+          componentProps={{ isOpen: isSettingsOpen, onClose: () => setIsSettingsOpen(false) }}
+          loadingFallback={null}
+          failureTitle="Settings unavailable"
+          failureMessage="HyperStream couldn’t load Settings. Retry to recover preferences without restarting the app."
+          renderFailure={renderModalLoadFailure({
+            title: "Settings unavailable",
+            message: "HyperStream couldn’t load Settings. Retry to recover preferences without restarting the app.",
+            onClose: () => setIsSettingsOpen(false),
+          })}
+        />
+      )}
+      {batchLinks.length > 0 && (
+        <RecoverableLazy
+          loader={loadBatchDownloadModal}
+          resolve={resolveBatchDownloadModal}
+          componentProps={{
+            isOpen: true,
+            links: batchLinks,
+            onClose: () => setBatchLinks([]),
+            onDownload: (links) => {
               links.forEach(link => startDownload(link.url, link.filename));
               setBatchLinks([]);
-            }}
-          />
-        )}
-        {isScheduleOpen && (
-          <ScheduleModal
-            isOpen={isScheduleOpen}
-            onClose={() => setIsScheduleOpen(false)}
-          />
-        )}
-        {isSpiderOpen && (
-          <SpiderModal
-            isOpen={isSpiderOpen}
-            onClose={() => setIsSpiderOpen(false)}
-            onDownload={(files) => {
+            },
+          }}
+          loadingFallback={null}
+          failureTitle="Batch download unavailable"
+          failureMessage="HyperStream couldn’t load the batch download modal. Retry without losing the captured link set."
+          renderFailure={renderModalLoadFailure({
+            title: "Batch download unavailable",
+            message: "HyperStream couldn’t load the batch download modal. Retry without losing the captured link set.",
+            onClose: () => setBatchLinks([]),
+          })}
+        />
+      )}
+      {isScheduleOpen && (
+        <RecoverableLazy
+          loader={loadScheduleModal}
+          resolve={resolveScheduleModal}
+          componentProps={{ isOpen: isScheduleOpen, onClose: () => setIsScheduleOpen(false) }}
+          loadingFallback={null}
+          failureTitle="Scheduler unavailable"
+          failureMessage="HyperStream couldn’t load the scheduler modal. Retry to recover delayed-download controls."
+          renderFailure={renderModalLoadFailure({
+            title: "Scheduler unavailable",
+            message: "HyperStream couldn’t load the scheduler modal. Retry to recover delayed-download controls.",
+            onClose: () => setIsScheduleOpen(false),
+          })}
+        />
+      )}
+      {isSpiderOpen && (
+        <RecoverableLazy
+          loader={loadSpiderModal}
+          resolve={resolveSpiderModal}
+          componentProps={{
+            isOpen: isSpiderOpen,
+            onClose: () => setIsSpiderOpen(false),
+            onDownload: (files) => {
               files.forEach(f => startDownload(f.url, f.filename));
               setIsSpiderOpen(false);
-            }}
-          />
-        )}
-        {isCrashRecoveryOpen && (
-          <CrashRecoveryModal
-            isOpen={isCrashRecoveryOpen}
-            onClose={() => setIsCrashRecoveryOpen(false)}
-          />
-        )}
-        {isStreamDetectorOpen && (
-          <StreamDetectorModal
-            isOpen={isStreamDetectorOpen}
-            onClose={() => setIsStreamDetectorOpen(false)}
-            onDownload={(url, filename) => {
+            },
+          }}
+          loadingFallback={null}
+          failureTitle="Site spider unavailable"
+          failureMessage="HyperStream couldn’t load the site spider modal. Retry to recover bulk link discovery."
+          renderFailure={renderModalLoadFailure({
+            title: "Site spider unavailable",
+            message: "HyperStream couldn’t load the site spider modal. Retry to recover bulk link discovery.",
+            onClose: () => setIsSpiderOpen(false),
+          })}
+        />
+      )}
+      {isCrashRecoveryOpen && (
+        <RecoverableLazy
+          loader={loadCrashRecoveryModal}
+          resolve={resolveCrashRecoveryModal}
+          componentProps={{ isOpen: isCrashRecoveryOpen, onClose: () => setIsCrashRecoveryOpen(false) }}
+          loadingFallback={null}
+          failureTitle="Crash recovery unavailable"
+          failureMessage="HyperStream couldn’t load crash recovery. Retry to restore the interrupted session workflow."
+          renderFailure={renderModalLoadFailure({
+            title: "Crash recovery unavailable",
+            message: "HyperStream couldn’t load crash recovery. Retry to restore the interrupted session workflow.",
+            onClose: () => setIsCrashRecoveryOpen(false),
+          })}
+        />
+      )}
+      {isStreamDetectorOpen && (
+        <RecoverableLazy
+          loader={loadStreamDetectorModal}
+          resolve={resolveStreamDetectorModal}
+          componentProps={{
+            isOpen: isStreamDetectorOpen,
+            onClose: () => setIsStreamDetectorOpen(false),
+            onDownload: (url, filename) => {
               startDownload(url, filename || url.split('/').pop() || 'stream');
               setIsStreamDetectorOpen(false);
-            }}
-          />
-        )}
-        {isNetworkDiagOpen && (
-          <NetworkDiagnosticsModal
-            isOpen={isNetworkDiagOpen}
-            onClose={() => setIsNetworkDiagOpen(false)}
-          />
-        )}
-        {isMediaProcessingOpen && (
-          <MediaProcessingModal
-            isOpen={isMediaProcessingOpen}
-            onClose={() => setIsMediaProcessingOpen(false)}
-          />
-        )}
-        {isIpfsOpen && (
-          <IpfsDownloadModal
-            isOpen={isIpfsOpen}
-            onClose={() => setIsIpfsOpen(false)}
-          />
-        )}
-      </Suspense>
+            },
+          }}
+          loadingFallback={null}
+          failureTitle="Stream detector unavailable"
+          failureMessage="HyperStream couldn’t load the stream detector modal. Retry to recover capture-and-download flow."
+          renderFailure={renderModalLoadFailure({
+            title: "Stream detector unavailable",
+            message: "HyperStream couldn’t load the stream detector modal. Retry to recover capture-and-download flow.",
+            onClose: () => setIsStreamDetectorOpen(false),
+          })}
+        />
+      )}
+      {isNetworkDiagOpen && (
+        <RecoverableLazy
+          loader={loadNetworkDiagnosticsModal}
+          resolve={resolveNetworkDiagnosticsModal}
+          componentProps={{ isOpen: isNetworkDiagOpen, onClose: () => setIsNetworkDiagOpen(false) }}
+          loadingFallback={null}
+          failureTitle="Network diagnostics unavailable"
+          failureMessage="HyperStream couldn’t load network diagnostics. Retry to recover troubleshooting tools."
+          renderFailure={renderModalLoadFailure({
+            title: "Network diagnostics unavailable",
+            message: "HyperStream couldn’t load network diagnostics. Retry to recover troubleshooting tools.",
+            onClose: () => setIsNetworkDiagOpen(false),
+          })}
+        />
+      )}
+      {isMediaProcessingOpen && (
+        <RecoverableLazy
+          loader={loadMediaProcessingModal}
+          resolve={resolveMediaProcessingModal}
+          componentProps={{ isOpen: isMediaProcessingOpen, onClose: () => setIsMediaProcessingOpen(false) }}
+          loadingFallback={null}
+          failureTitle="Media processing unavailable"
+          failureMessage="HyperStream couldn’t load media processing. Retry to recover post-download tooling."
+          renderFailure={renderModalLoadFailure({
+            title: "Media processing unavailable",
+            message: "HyperStream couldn’t load media processing. Retry to recover post-download tooling.",
+            onClose: () => setIsMediaProcessingOpen(false),
+          })}
+        />
+      )}
+      {isIpfsOpen && (
+        <RecoverableLazy
+          loader={loadIpfsDownloadModal}
+          resolve={resolveIpfsDownloadModal}
+          componentProps={{ isOpen: isIpfsOpen, onClose: () => setIsIpfsOpen(false) }}
+          loadingFallback={null}
+          failureTitle="IPFS download unavailable"
+          failureMessage="HyperStream couldn’t load the IPFS modal. Retry to recover decentralized download setup."
+          renderFailure={renderModalLoadFailure({
+            title: "IPFS download unavailable",
+            message: "HyperStream couldn’t load the IPFS modal. Retry to recover decentralized download setup.",
+            onClose: () => setIsIpfsOpen(false),
+          })}
+        />
+      )}
 
       <AnimatePresence>
         {clipboardData && (

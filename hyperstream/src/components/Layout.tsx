@@ -28,12 +28,15 @@ interface LayoutProps {
     onSpeedLimitChange: (limit: number) => void;
     activeTab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue';
     onTabChange: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue') => void;
+    onTabIntent?: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue') => void;
     globalSpeed?: number;
 }
 
-const NavItem: React.FC<{ icon: LucideIcon; label: string; active: boolean; onClick: () => void; badge?: string | number }> = ({ icon: Icon, label, active, onClick, badge }) => (
+const NavItem: React.FC<{ icon: LucideIcon; label: string; active: boolean; onClick: () => void; badge?: string | number; onIntent?: () => void }> = ({ icon: Icon, label, active, onClick, badge, onIntent }) => (
     <button
         onClick={onClick}
+        onMouseEnter={onIntent}
+        onFocus={onIntent}
         aria-current={active ? 'page' : undefined}
         className={`
             relative px-4 py-3 cursor-pointer flex items-center gap-3 transition-all duration-300 group rounded-xl mx-2 overflow-hidden w-[calc(100%-1rem)] text-left border-0 bg-transparent
@@ -80,6 +83,7 @@ export const Layout: React.FC<LayoutProps> = ({
     onSpeedLimitChange,
     activeTab,
     onTabChange,
+    onTabIntent,
     globalSpeed
 }) => {
     const [speedLimit, setSpeedLimit] = useState(0);
@@ -148,42 +152,49 @@ export const Layout: React.FC<LayoutProps> = ({
                             label="Torrents"
                             active={activeTab === 'torrents'}
                             onClick={() => onTabChange('torrents')}
+                            onIntent={() => onTabIntent?.('torrents')}
                         />
                         <NavItem
                             icon={Rss}
                             label="Feeds"
                             active={activeTab === 'feeds'}
                             onClick={() => onTabChange('feeds')}
+                            onIntent={() => onTabIntent?.('feeds')}
                         />
                         <NavItem
                             icon={Search}
                             label="Discover"
                             active={activeTab === 'search'}
                             onClick={() => onTabChange('search')}
+                            onIntent={() => onTabIntent?.('search')}
                         />
                         <NavItem
                             icon={Puzzle}
                             label="Plugins"
                             active={activeTab === 'plugins'}
                             onClick={() => onTabChange('plugins')}
+                            onIntent={() => onTabIntent?.('plugins')}
                         />
                         <NavItem
                             icon={History}
                             label="History"
                             active={activeTab === 'history'}
                             onClick={() => onTabChange('history')}
+                            onIntent={() => onTabIntent?.('history')}
                         />
                         <NavItem
                             icon={Activity}
                             label="Activity Log"
                             active={activeTab === 'activity'}
                             onClick={() => onTabChange('activity')}
+                            onIntent={() => onTabIntent?.('activity')}
                         />
                         <NavItem
                             icon={ListOrdered}
                             label="Queue"
                             active={activeTab === 'queue'}
                             onClick={() => onTabChange('queue')}
+                            onIntent={() => onTabIntent?.('queue')}
                         />
 
                         <div className="px-4 mt-8 mb-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest pl-4">Tools</div>

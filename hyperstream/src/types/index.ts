@@ -118,6 +118,7 @@ export interface SavedDownload {
     total_size: number;
     downloaded_bytes: number;
     status: string; // Rust sends "Paused" | "Error" | "Done" | "Downloading"
+    expected_checksum?: string | null;
 }
 
 /** Safely coerce a backend status string to a DownloadTask status union */
@@ -228,7 +229,10 @@ export interface ClipboardUrlPayload {
 /** Extension download event payload */
 export interface ExtensionDownloadPayload {
     url: string;
-    filename: string;
+    filename?: string | null;
+    customHeaders?: Record<string, string> | null;
+    pageUrl?: string | null;
+    source?: string | null;
 }
 
 /** Batch link entry from browser extension */
@@ -338,6 +342,7 @@ export interface DownloadTask {
     id: string;
     filename: string;
     url?: string;
+    expectedChecksum?: string;
     progress: number; // 0-100
     downloaded: number; // bytes
     total: number; // bytes

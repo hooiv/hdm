@@ -18,6 +18,7 @@ interface DownloadItemProps {
     onMoveUp?: (id: string) => void;
     onMoveDown?: (id: string) => void;
     downloadDir: string;
+    isSpotlighted?: boolean;
 }
 
 // File type categories
@@ -67,7 +68,7 @@ const getFileCategory = (filename: string): { icon: string; label: string; color
 };
 
 // Memoize Item to prevent re-renders of non-updating downloads
-export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir }) => {
+export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir, isSpotlighted = false }) => {
     const [showPreview, setShowPreview] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const [showP2PShare, setShowP2PShare] = useState(false);
@@ -125,14 +126,16 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
         <motion.div
             layout
             initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
+            animate={{ opacity: 1, y: 0, scale: isSpotlighted ? 1.01 : 1 }}
             exit={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.2 }}
             className={`relative overflow-hidden mb-3 rounded-xl border transition-all duration-300 ${task.status === 'Downloading'
                 ? 'bg-slate-900/60 backdrop-blur-md border-cyan-500/20 shadow-[0_0_20px_rgba(6,182,212,0.05)]'
                 : 'glass-card'
-                }`}
+                } ${isSpotlighted ? 'ring-2 ring-cyan-300/70 border-cyan-300/50 shadow-[0_0_35px_rgba(34,211,238,0.18)]' : ''}`}
             onClick={() => setIsExpanded(!isExpanded)}
+            data-testid={`download-item-${task.id}`}
+            data-spotlighted={isSpotlighted ? 'true' : 'false'}
         >
             <div className="flex items-center p-4 cursor-pointer">
                 {/* Icon */}

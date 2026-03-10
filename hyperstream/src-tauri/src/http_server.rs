@@ -47,9 +47,17 @@ pub enum StreamingSource {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DownloadRequest {
     pub url: String,
+    #[serde(default)]
     pub filename: Option<String>,
+    #[serde(default)]
+    pub custom_headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub page_url: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -474,8 +482,11 @@ async fn handle_download(
     // broadcast event for listeners
     let _ = get_event_sender().send(serde_json::json!({
         "type": "download_requested",
-        "url": req.url,
-        "filename": req.filename
+        "url": &req.url,
+        "filename": &req.filename,
+        "customHeaders": &req.custom_headers,
+        "pageUrl": &req.page_url,
+        "source": &req.source
     }));
     // URL validation: only allow http/https schemes, block private/loopback IPs
     if let Ok(parsed) = reqwest::Url::parse(&req.url) {

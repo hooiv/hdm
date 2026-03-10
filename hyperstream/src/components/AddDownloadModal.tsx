@@ -26,6 +26,7 @@ interface AddDownloadModalProps {
         force?: boolean,
         customHeaders?: Record<string, string>,
         mirrors?: [string, string][],
+        expectedChecksum?: string,
     ) => void;
     initialUrl?: string;
 }
@@ -38,6 +39,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
 }) => {
     const [url, setUrl] = useState(initialUrl || "");
     const [filename, setFilename] = useState("");
+    const [expectedChecksum, setExpectedChecksum] = useState("");
     const userEditedFilename = React.useRef(false);
     const [isForceMode, setIsForceMode] = useState(false);
     const [isWarcMode, setIsWarcMode] = useState(false);
@@ -66,11 +68,34 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
 
     // Update URL when initialUrl changes (e.g., from drag-and-drop)
     useEffect(() => {
-        if (initialUrl) {
+        if (isOpen && initialUrl) {
             setUrl(initialUrl);
             userEditedFilename.current = false;
         }
+    }, [initialUrl, isOpen]);
+
+    const resetForm = React.useCallback(() => {
+        setUrl(initialUrl || "");
+        setFilename("");
+        setExpectedChecksum("");
+        userEditedFilename.current = false;
+        setIsForceMode(false);
+        setIsWarcMode(false);
+        setBibtex("");
+        setDockerInfo(null);
+        setHlsInfo(null);
+        setSelectedVariantUrl(null);
+        setMirrors([]);
+        setShowMirrors(false);
+        setProbeResults(null);
+        setDuplicatePath(null);
+        setIsCheckingCas(false);
     }, [initialUrl]);
+
+    const handleClose = React.useCallback(() => {
+        resetForm();
+        onClose();
+    }, [onClose, resetForm]);
 
     const isDoi = url.trim().startsWith("10.") || url.includes("doi.org/");
     const isDocker =
@@ -266,17 +291,14 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (!canSubmit) return;
+        const normalizedChecksum = expectedChecksum.trim() || undefined;
 
         if (dockerInfo) {
             dockerInfo.layers.forEach((layer, idx) => {
                 const layerFilename = `docker_${dockerInfo.name.replace("/", "_")}_${dockerInfo.tag}_layer${idx}.tar.gz`;
                 onStart(layer.url, layerFilename, false, layer.headers);
             });
-            setUrl("");
-            setFilename("");
-            userEditedFilename.current = false;
-            setDockerInfo(null);
-            onClose();
+            handleClose();
             return;
         }
 
@@ -302,22 +324,12 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                     .filter(m => m.url.trim())
                     .map(m => [m.url.trim(), m.label || 'Mirror']);
                 if (isHls && selectedVariantUrl) {
-                    onStart(selectedVariantUrl, filename, isForceMode, undefined, validMirrors.length > 0 ? validMirrors : undefined);
+                    onStart(selectedVariantUrl, filename, isForceMode, undefined, validMirrors.length > 0 ? validMirrors : undefined, normalizedChecksum);
                 } else {
-                    onStart(url, filename, isForceMode, undefined, validMirrors.length > 0 ? validMirrors : undefined);
+                    onStart(url, filename, isForceMode, undefined, validMirrors.length > 0 ? validMirrors : undefined, normalizedChecksum);
                 }
             }
-            setUrl("");
-            setFilename("");
-            userEditedFilename.current = false;
-            setIsForceMode(false);
-            setIsWarcMode(false);
-            setBibtex("");
-            setDockerInfo(null);
-            setMirrors([]);
-            setShowMirrors(false);
-            setProbeResults(null);
-            onClose();
+            handleClose();
         }
     };
 
@@ -327,12 +339,12 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
         const onKey = (e: KeyboardEvent) => {
             if (e.key === 'Escape') {
                 e.preventDefault();
-                onClose();
+                handleClose();
             }
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [isOpen, onClose]);
+    }, [handleClose, isOpen]);
 
     return (
         <AnimatePresence>
@@ -343,7 +355,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        onClick={onClose}
+                        onClick={handleClose}
                         className="absolute inset-0 bg-black/60 backdrop-blur-sm"
                     />
 
@@ -365,7 +377,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                 Add Download
                             </h2>
                             <button
-                                onClick={onClose}
+                                onClick={handleClose}
                                 className="text-slate-400 hover:text-white transition-colors"
                             >
                                 <X size={20} />
@@ -480,6 +492,24 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                     />
                                 </div>
                             </div>
+
+                            {!dockerInfo && !isWarcMode && (
+                                <div className="space-y-1">
+                                    <label className="text-xs uppercase font-semibold text-slate-500 tracking-wider ml-1">
+                                        Expected Checksum (optional)
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={expectedChecksum}
+                                        onChange={(e) => setExpectedChecksum(e.target.value)}
+                                        placeholder="sha256:abc123... or md5:..."
+                                        className="w-full bg-slate-800/50 border border-slate-700 rounded-lg py-2.5 px-3 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all font-mono text-sm"
+                                    />
+                                    <p className="text-[11px] text-slate-500 px-1">
+                                        Supports <code>sha256:</code>, <code>md5:</code>, <code>crc32:</code>, or raw hex checksums.
+                                    </p>
+                                </div>
+                            )}
 
                             {bibtex && (
                                 <motion.div
@@ -699,7 +729,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                             <div className="flex gap-3 mt-6 pt-2">
                                 <button
                                     type="button"
-                                    onClick={onClose}
+                                    onClick={handleClose}
                                     className="flex-1 py-2.5 rounded-lg border border-slate-700 text-slate-400 font-medium hover:bg-slate-800 transition-all text-sm"
                                 >
                                     Cancel

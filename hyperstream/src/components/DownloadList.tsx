@@ -1,7 +1,7 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DownloadItem } from './DownloadItem';
 import type { DiscoveredMirror, DownloadTask } from '../types';
-import { Virtuoso } from 'react-virtuoso';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { Inbox, Search, ArrowUpDown, ArrowUp, ArrowDown, X } from 'lucide-react';
 import { motion } from 'framer-motion';
 
@@ -20,13 +20,24 @@ interface DownloadListProps {
     onMoveUp?: (id: string) => void;
     onMoveDown?: (id: string) => void;
     downloadDir: string;
+    spotlightRequest?: {
+        taskId: string;
+        token: number;
+    } | null;
 }
 
-export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir }) => {
+const DOWNLOAD_SPOTLIGHT_MS = 2500;
+
+export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir, spotlightRequest }) => {
     const [search, setSearch] = useState('');
     const [sortField, setSortField] = useState<SortField | null>(null);
     const [sortDir, setSortDir] = useState<SortDir>('asc');
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+    const [spotlightedTaskId, setSpotlightedTaskId] = useState<string | null>(null);
+    const virtuosoRef = useRef<VirtuosoHandle | null>(null);
+    const spotlightTimerRef = useRef<number | null>(null);
+    const lastActivatedSpotlightTokenRef = useRef<number | null>(null);
+    const lastScrolledSpotlightTokenRef = useRef<number | null>(null);
 
     const toggleSort = (field: SortField) => {
         if (sortField === field) {
@@ -69,6 +80,62 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
         return counts;
     }, [tasks]);
 
+    useEffect(() => {
+        if (!spotlightRequest) return;
+
+        const task = tasks.find((candidate) => candidate.id === spotlightRequest.taskId);
+        if (!task) return;
+
+        const searchQuery = search.trim().toLowerCase();
+        const matchesSearch = !searchQuery
+            || task.filename.toLowerCase().includes(searchQuery)
+            || Boolean(task.url?.toLowerCase().includes(searchQuery));
+
+        if (searchQuery && !matchesSearch) {
+            setSearch('');
+        }
+
+        if (statusFilter !== 'all' && task.status !== statusFilter) {
+            setStatusFilter('all');
+        }
+
+        if (lastActivatedSpotlightTokenRef.current === spotlightRequest.token) {
+            return;
+        }
+
+        lastActivatedSpotlightTokenRef.current = spotlightRequest.token;
+        setSpotlightedTaskId(spotlightRequest.taskId);
+
+        if (spotlightTimerRef.current) {
+            window.clearTimeout(spotlightTimerRef.current);
+        }
+
+        spotlightTimerRef.current = window.setTimeout(() => {
+            setSpotlightedTaskId((current) => current === spotlightRequest.taskId ? null : current);
+        }, DOWNLOAD_SPOTLIGHT_MS);
+    }, [search, spotlightRequest, statusFilter, tasks]);
+
+    useEffect(() => () => {
+        if (spotlightTimerRef.current) {
+            window.clearTimeout(spotlightTimerRef.current);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!spotlightRequest) return;
+
+        const spotlightIndex = filtered.findIndex((task) => task.id === spotlightRequest.taskId);
+        if (spotlightIndex < 0 || lastScrolledSpotlightTokenRef.current === spotlightRequest.token) {
+            return;
+        }
+
+        const listHandle = virtuosoRef.current;
+        if (!listHandle) return;
+
+        lastScrolledSpotlightTokenRef.current = spotlightRequest.token;
+        listHandle.scrollToIndex({ index: spotlightIndex, align: 'center' });
+    }, [filtered, spotlightRequest]);
+
     const itemContent = useCallback((_index: number, task: DownloadTask) => {
         return (
             <div style={{ paddingBottom: '8px', paddingLeft: '5px', paddingRight: '5px' }}>
@@ -81,10 +148,11 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
                     onMoveUp={onMoveUp}
                     onMoveDown={onMoveDown}
                     downloadDir={downloadDir}
+                    isSpotlighted={task.id === spotlightedTaskId}
                 />
             </div>
         );
-    }, [onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir]);
+    }, [downloadDir, onDelete, onDiscoveredMirrors, onMoveDown, onMoveUp, onPause, onResume, spotlightedTaskId]);
 
     if (tasks.length === 0) {
         return (
@@ -193,6 +261,7 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
             {/* List */}
             {filtered.length > 0 ? (
                 <Virtuoso
+                    ref={virtuosoRef}
                     style={{ height: '100%', width: '100%' }}
                     data={filtered}
                     itemContent={itemContent}

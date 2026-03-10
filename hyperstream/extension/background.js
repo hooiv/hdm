@@ -52,6 +52,119 @@ async function checkConnection() {
     }
 }
 
+const REQUEST_CONTEXT_TTL_MS = 2 * 60 * 1000;
+const INTERCEPT_DEDUPE_TTL_MS = 15 * 1000;
+const recentRequestContext = new Map();
+const recentIntercepts = new Map();
+const FORWARDABLE_REQUEST_HEADERS = new Set([
+    'authorization',
+    'cookie',
+    'origin',
+    'referer',
+    'user-agent',
+    'accept',
+    'accept-language',
+]);
+
+function normalizeTrackedUrl(url) {
+    try {
+        const parsed = new URL(url);
+        parsed.hash = '';
+        return parsed.toString();
+    } catch {
+        return url;
+    }
+}
+
+function pruneExpiredEntries(store, ttlMs) {
+    const now = Date.now();
+    for (const [key, value] of store.entries()) {
+        if ((value.timestamp || 0) + ttlMs < now) {
+            store.delete(key);
+        }
+    }
+}
+
+function canonicalizeHeaderName(name) {
+    return name
+        .split('-')
+        .map(part => part ? part[0].toUpperCase() + part.slice(1).toLowerCase() : part)
+        .join('-');
+}
+
+function isForwardableHeader(name) {
+    return FORWARDABLE_REQUEST_HEADERS.has(name) || name.startsWith('x-');
+}
+
+function buildForwardHeaders(requestHeaders = []) {
+    const forwarded = {};
+    for (const header of requestHeaders) {
+        const rawName = (header?.name || '').trim();
+        const lowerName = rawName.toLowerCase();
+        const value = typeof header?.value === 'string' ? header.value.trim() : '';
+        if (!lowerName || !value || !isForwardableHeader(lowerName)) continue;
+        forwarded[canonicalizeHeaderName(lowerName)] = value;
+    }
+    return forwarded;
+}
+
+function mergeRequestContext(primary = {}, fallback = {}) {
+    const customHeaders = {
+        ...(fallback.customHeaders || {}),
+        ...(primary.customHeaders || {}),
+    };
+    const pageUrl = primary.pageUrl || fallback.pageUrl || null;
+    if (pageUrl && !Object.keys(customHeaders).some((key) => key.toLowerCase() === 'referer')) {
+        customHeaders.Referer = pageUrl;
+    }
+
+    return {
+        customHeaders: Object.keys(customHeaders).length > 0 ? customHeaders : null,
+        pageUrl,
+        source: primary.source || fallback.source || null,
+    };
+}
+
+function rememberRequestContext(url, context = {}) {
+    pruneExpiredEntries(recentRequestContext, REQUEST_CONTEXT_TTL_MS);
+    recentRequestContext.set(normalizeTrackedUrl(url), {
+        ...mergeRequestContext(context),
+        timestamp: Date.now(),
+    });
+}
+
+function getRequestContext(url, fallback = {}) {
+    pruneExpiredEntries(recentRequestContext, REQUEST_CONTEXT_TTL_MS);
+    const stored = recentRequestContext.get(normalizeTrackedUrl(url));
+    return mergeRequestContext(stored || {}, fallback);
+}
+
+function markRecentlyIntercepted(url) {
+    pruneExpiredEntries(recentIntercepts, INTERCEPT_DEDUPE_TTL_MS);
+    recentIntercepts.set(normalizeTrackedUrl(url), { timestamp: Date.now() });
+}
+
+function wasRecentlyIntercepted(url) {
+    pruneExpiredEntries(recentIntercepts, INTERCEPT_DEDUPE_TTL_MS);
+    return recentIntercepts.has(normalizeTrackedUrl(url));
+}
+
+function buildPageContext(pageUrl, source) {
+    return mergeRequestContext({
+        customHeaders: pageUrl ? { Referer: pageUrl } : null,
+        pageUrl: pageUrl || null,
+        source,
+    });
+}
+
+function buildCapturedContext(details, source) {
+    return mergeRequestContext({
+        customHeaders: buildForwardHeaders(details.requestHeaders || []),
+        pageUrl: details.initiator || details.documentUrl || null,
+        source,
+    });
+}
+
 // periodically update badge to show connectivity
 async function updateConnectionBadge() {
     const connected = await checkConnection();
@@ -61,21 +174,26 @@ async function updateConnectionBadge() {
 setInterval(updateConnectionBadge, 15000);
 updateConnectionBadge();
 
-// intercept network requests
 const downloadExtensions = ['.exe', '.msi', '.zip', '.rar', '.7z', '.iso', '.mp4', '.mkv', '.mp3', '.pdf', '.dmg', '.pkg', '.torrent'];
-chrome.webRequest.onBeforeRequest.addListener(
+// intercept network requests after headers are available so auth/referrer survive handoff
+chrome.webRequest.onBeforeSendHeaders.addListener(
     (details) => {
-        if (!INTERCEPT_ENABLED || !AUTH_TOKEN) {
+        if (!INTERCEPT_ENABLED || !AUTH_TOKEN || !details.url || details.url.startsWith(API_URL)) {
             return;
         }
+
+        const context = buildCapturedContext(details, 'webRequest');
+        rememberRequestContext(details.url, context);
+
         const url = details.url.toLowerCase();
-        if (downloadExtensions.some(ext => url.endsWith(ext))) {
-            sendToHyperStream(details.url, null, true);
+        if (downloadExtensions.some(ext => url.endsWith(ext)) && !wasRecentlyIntercepted(details.url)) {
+            markRecentlyIntercepted(details.url);
+            sendToHyperStream(details.url, null, context, true);
             return { cancel: true };
         }
     },
     { urls: ["<all_urls>"] },
-    ["blocking"]
+    ["blocking", "requestHeaders", "extraHeaders"]
 );
 
 // Create context menu
@@ -99,7 +217,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     if (info.menuItemId === "download-hyperstream") {
         const url = info.linkUrl || info.srcUrl;
         if (url) {
-            sendToHyperStream(url);
+            sendToHyperStream(url, null, buildPageContext(info.pageUrl || tab?.url || null, 'contextMenu'));
         }
     }
 });
@@ -112,9 +230,17 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
 
     // Check if valid URL (http/https/magnet)
     if (downloadItem.url.startsWith('http') || downloadItem.url.startsWith('magnet')) {
+        if (wasRecentlyIntercepted(downloadItem.url)) {
+            return;
+        }
         chrome.downloads.cancel(downloadItem.id, async () => {
             if (chrome.runtime.lastError) console.warn(chrome.runtime.lastError);
-            await sendToHyperStream(downloadItem.url, getFilename(downloadItem), true);
+            await sendToHyperStream(
+                downloadItem.url,
+                getFilename(downloadItem),
+                buildPageContext(downloadItem.referrer || null, 'downloadsApi'),
+                true
+            );
         });
     }
 });
@@ -126,7 +252,7 @@ function getFilename(item) {
 }
 
 // Function to send URL to HyperStream (using Local API)
-async function sendToHyperStream(url, filename = null, allowBrowserFallback = false) {
+async function sendToHyperStream(url, filename = null, requestContext = {}, allowBrowserFallback = false) {
     if (!AUTH_TOKEN) {
         chrome.notifications.create({
             type: 'basic',
@@ -140,6 +266,8 @@ async function sendToHyperStream(url, filename = null, allowBrowserFallback = fa
         return false;
     }
 
+    const context = getRequestContext(url, requestContext);
+
     let lastErr;
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
@@ -147,8 +275,11 @@ async function sendToHyperStream(url, filename = null, allowBrowserFallback = fa
                 method: "POST",
                 headers: buildAuthHeaders(AUTH_TOKEN),
                 body: JSON.stringify({
-                    url: url,
-                    filename: filename
+                    url,
+                    filename,
+                    customHeaders: context.customHeaders,
+                    pageUrl: context.pageUrl,
+                    source: context.source,
                 })
             });
 

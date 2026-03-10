@@ -223,8 +223,122 @@ async function checkConnection() {
     }
 }
 
+const REQUEST_CONTEXT_TTL_MS = 2 * 60 * 1000;
+const INTERCEPT_DEDUPE_TTL_MS = 15 * 1000;
+const recentRequestContext = new Map();
+const recentIntercepts = new Map();
+const FORWARDABLE_REQUEST_HEADERS = new Set([
+    'authorization',
+    'cookie',
+    'origin',
+    'referer',
+    'user-agent',
+    'accept',
+    'accept-language',
+]);
+
+function normalizeTrackedUrl(url) {
+    try {
+        const parsed = new URL(url);
+        parsed.hash = '';
+        return parsed.toString();
+    } catch {
+        return url;
+    }
+}
+
+function pruneExpiredEntries(store, ttlMs) {
+    const now = Date.now();
+    for (const [key, value] of store.entries()) {
+        if ((value.timestamp || 0) + ttlMs < now) {
+            store.delete(key);
+        }
+    }
+}
+
+function canonicalizeHeaderName(name) {
+    return name
+        .split('-')
+        .map(part => part ? part[0].toUpperCase() + part.slice(1).toLowerCase() : part)
+        .join('-');
+}
+
+function isForwardableHeader(name) {
+    return FORWARDABLE_REQUEST_HEADERS.has(name) || name.startsWith('x-');
+}
+
+function buildForwardHeaders(requestHeaders = []) {
+    const forwarded = {};
+    for (const header of requestHeaders) {
+        const rawName = (header?.name || '').trim();
+        const lowerName = rawName.toLowerCase();
+        const value = typeof header?.value === 'string' ? header.value.trim() : '';
+        if (!lowerName || !value || !isForwardableHeader(lowerName)) continue;
+        forwarded[canonicalizeHeaderName(lowerName)] = value;
+    }
+    return forwarded;
+}
+
+function mergeRequestContext(primary = {}, fallback = {}) {
+    const customHeaders = {
+        ...(fallback.customHeaders || {}),
+        ...(primary.customHeaders || {}),
+    };
+    const pageUrl = primary.pageUrl || fallback.pageUrl || null;
+    if (pageUrl && !Object.keys(customHeaders).some((key) => key.toLowerCase() === 'referer')) {
+        customHeaders.Referer = pageUrl;
+    }
+
+    return {
+        customHeaders: Object.keys(customHeaders).length > 0 ? customHeaders : null,
+        pageUrl,
+        source: primary.source || fallback.source || null,
+    };
+}
+
+function rememberRequestContext(url, context = {}) {
+    pruneExpiredEntries(recentRequestContext, REQUEST_CONTEXT_TTL_MS);
+    recentRequestContext.set(normalizeTrackedUrl(url), {
+        ...mergeRequestContext(context),
+        timestamp: Date.now(),
+    });
+}
+
+function getRequestContext(url, fallback = {}) {
+    pruneExpiredEntries(recentRequestContext, REQUEST_CONTEXT_TTL_MS);
+    const stored = recentRequestContext.get(normalizeTrackedUrl(url));
+    return mergeRequestContext(stored || {}, fallback);
+}
+
+function markRecentlyIntercepted(url) {
+    pruneExpiredEntries(recentIntercepts, INTERCEPT_DEDUPE_TTL_MS);
+    recentIntercepts.set(normalizeTrackedUrl(url), { timestamp: Date.now() });
+}
+
+function wasRecentlyIntercepted(url) {
+    pruneExpiredEntries(recentIntercepts, INTERCEPT_DEDUPE_TTL_MS);
+    return recentIntercepts.has(normalizeTrackedUrl(url));
+}
+
+function buildPageContext(pageUrl, source) {
+    return mergeRequestContext({
+        customHeaders: pageUrl ? { Referer: pageUrl } : null,
+        pageUrl: pageUrl || null,
+        source,
+    });
+}
+
+function buildCapturedContext(details, source) {
+    return mergeRequestContext({
+        customHeaders: buildForwardHeaders(details.requestHeaders || []),
+        pageUrl: details.initiator || details.documentUrl || null,
+        source,
+    });
+}
+
 // Send download to HyperStream
-async function sendToHyperStream(url, filename) {
+async function sendToHyperStream(url, filename, requestContext = {}) {
+    const context = getRequestContext(url, requestContext);
     // Retry loop with exponential backoff to handle brief outages
     let lastErr;
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -233,7 +347,13 @@ async function sendToHyperStream(url, filename) {
             const response = await fetch(`${HYPERSTREAM_URL}/download`, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ url, filename }),
+                body: JSON.stringify({
+                    url,
+                    filename,
+                    customHeaders: context.customHeaders,
+                    pageUrl: context.pageUrl,
+                    source: context.source,
+                }),
             });
 
             if (response.status === 401 || response.status === 403) {
@@ -280,22 +400,30 @@ async function updateConnectionBadge() {
 setInterval(updateConnectionBadge, 15000);
 updateConnectionBadge();
 
-// WebRequest interception for common file types (blocking rule)
-const downloadExtensions = ['.exe', '.msi', '.zip', '.rar', '.7z', '.iso', '.mp4', '.mkv', '.mp3', '.pdf', '.dmg', '.pkg', '.torrent'];
-chrome.webRequest.onBeforeRequest.addListener(
+// Capture browser request headers before browser-managed downloads strip them away.
+chrome.webRequest.onBeforeSendHeaders.addListener(
     (details) => {
-        const url = details.url;
-        const lower = url.toLowerCase();
+        if (!details.url || details.url.startsWith(HYPERSTREAM_URL)) {
+            return;
+        }
+
+        const context = buildCapturedContext(details, 'webRequest');
+        rememberRequestContext(details.url, context);
+
+        const lower = details.url.toLowerCase();
         const matches = downloadExtensions.some(ext => lower.endsWith(ext));
-        if (matches) {
-            // fire-and-forget
-            sendToHyperStream(url, null);
+        if (matches && !wasRecentlyIntercepted(details.url)) {
+            markRecentlyIntercepted(details.url);
+            sendToHyperStream(details.url, null, context);
             return { cancel: true };
         }
     },
-    { urls: ["<all_urls>"] },
-    ["blocking"]
+    { urls: ['<all_urls>'] },
+    ['blocking', 'requestHeaders', 'extraHeaders']
 );
+
+// WebRequest interception for common file types (blocking rule)
+const downloadExtensions = ['.exe', '.msi', '.zip', '.rar', '.7z', '.iso', '.mp4', '.mkv', '.mp3', '.pdf', '.dmg', '.pkg', '.torrent'];
 
 // Listen for download events
 chrome.downloads.onCreated.addListener(async (downloadItem) => {
@@ -317,13 +445,20 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     // Get the URL and filename
     const url = downloadItem.finalUrl || downloadItem.url;
     const filename = downloadItem.filename ? downloadItem.filename.split(/[/\\]/).pop() : null;
+    if (wasRecentlyIntercepted(url)) {
+        return;
+    }
 
     // Cancel the browser download
     chrome.downloads.cancel(downloadItem.id);
     chrome.downloads.erase({ id: downloadItem.id });
 
     // Send to HyperStream
-    const result = await sendToHyperStream(url, filename);
+    const result = await sendToHyperStream(
+        url,
+        filename,
+        buildPageContext(downloadItem.referrer || null, 'downloadsApi')
+    );
 
     if (result.success) {
         // Show notification
@@ -380,7 +515,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         case 'download-link':
             if (info.linkUrl) {
                 const filename = info.linkUrl.split('/').pop()?.split('?')[0] || 'download';
-                const result = await sendToHyperStream(info.linkUrl, filename);
+                const result = await sendToHyperStream(info.linkUrl, filename, buildPageContext(info.pageUrl || tab?.url || null, 'contextMenu'));
                 if (result.success) showBadge('\u2713');
             }
             break;
@@ -388,7 +523,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         case 'download-video':
             if (info.srcUrl) {
                 const filename = info.srcUrl.split('/').pop()?.split('?')[0] || 'video.mp4';
-                const result = await sendToHyperStream(info.srcUrl, filename);
+                const result = await sendToHyperStream(info.srcUrl, filename, buildPageContext(info.pageUrl || tab?.url || null, 'contextMenu'));
                 if (result.success) showBadge('\u2713');
             }
             break;
@@ -396,7 +531,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         case 'download-image':
             if (info.srcUrl) {
                 const filename = info.srcUrl.split('/').pop()?.split('?')[0] || 'image.jpg';
-                const result = await sendToHyperStream(info.srcUrl, filename);
+                const result = await sendToHyperStream(info.srcUrl, filename, buildPageContext(info.pageUrl || tab?.url || null, 'contextMenu'));
                 if (result.success) showBadge('\u2713');
             }
             break;
@@ -481,7 +616,7 @@ function showBadge(text) {
 // Listen for messages from content script or popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'download') {
-        sendToHyperStream(message.url, message.filename)
+        sendToHyperStream(message.url, message.filename, buildPageContext(sender.tab?.url || message.pageUrl || null, 'runtimeMessage'))
             .then(result => sendResponse(result));
         return true; // Keep message channel open for async response
     }
@@ -519,7 +654,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const pathname = new URL(stream.url).pathname;
                 filename = pathname.split('/').pop() || null;
             } catch (e) { /* ignore */ }
-            sendToHyperStream(stream.url, filename)
+            sendToHyperStream(stream.url, filename, buildPageContext(stream.page_url || sender.tab?.url || null, 'streamDetector'))
                 .then(result => sendResponse(result));
             return true;
         }
@@ -532,13 +667,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const tabId = sender.tab?.id || message.tabId;
         (async () => {
             try {
-                const headers = await getAuthHeaders();
-                const resp = await fetch(`${HYPERSTREAM_URL}/download`, {
-                    method: 'POST',
-                    headers,
-                    body: JSON.stringify({ url: message.pageUrl, filename: null }),
-                });
-                sendResponse({ success: resp.ok });
+                const result = await sendToHyperStream(
+                    message.pageUrl,
+                    null,
+                    buildPageContext(sender.tab?.url || message.pageUrl || null, 'pageScan')
+                );
+                sendResponse({ success: Boolean(result?.success), message: result?.message });
             } catch (e) {
                 sendResponse({ success: false, message: e.message });
             }

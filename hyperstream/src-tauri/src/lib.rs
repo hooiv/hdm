@@ -1164,7 +1164,8 @@ async fn start_download(
     url: String,
     path: String,
     force: Option<bool>,
-    custom_headers: Option<std::collections::HashMap<String, String>>
+    custom_headers: Option<std::collections::HashMap<String, String>>,
+    expected_checksum: Option<String>,
 ) -> Result<(), String> {
     let force = force.unwrap_or(false);
 
@@ -1186,6 +1187,20 @@ async fn start_download(
         queue.mark_active(&id, &url);
     }
 
+    {
+        let mut meta = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+        meta.insert(id.clone(), queue_manager::RetryMetadata {
+            url: url.clone(),
+            path: path.clone(),
+            priority: queue_manager::DownloadPriority::Normal,
+            custom_headers: custom_headers.clone(),
+            expected_checksum: expected_checksum.clone(),
+            fresh_restart: false,
+            retry_count: 0,
+            max_retries: 0,
+        });
+    }
+
     let result = crate::engine::start_download_routed(
         &app,
         &state,
@@ -1197,6 +1212,7 @@ async fn start_download(
     ).await;
 
     if result.is_err() {
+        crate::engine::session::clear_retry_metadata(&id);
         let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
         queue.mark_finished(&id);
     }
@@ -1273,6 +1289,7 @@ mod pause_download_cmd {
                     segments: Some(segments),
                     last_active: Some(chrono::Utc::now().to_rfc3339()),
                     error_message: None,
+                    expected_checksum: crate::engine::session::get_expected_checksum(id),
                 };
                 let _ = persistence::upsert_download(saved);
                 state.unregister_streaming_source(id);
@@ -1300,6 +1317,7 @@ mod pause_download_cmd {
                     segments: None,
                     last_active: Some(chrono::Utc::now().to_rfc3339()),
                     error_message: None,
+                    expected_checksum: crate::engine::session::get_expected_checksum(id),
                 };
                 let _ = persistence::upsert_download(saved);
                 mark_queue_finished(id, notify_queue);
@@ -1327,6 +1345,7 @@ mod pause_download_cmd {
                     segments: None,
                     last_active: Some(chrono::Utc::now().to_rfc3339()),
                     error_message: None,
+                    expected_checksum: crate::engine::session::get_expected_checksum(id),
                 };
                 let _ = persistence::upsert_download(saved);
                 mark_queue_finished(id, notify_queue);
@@ -2219,6 +2238,7 @@ async fn start_multi_source_download(
     mirrors: Vec<(String, String)>,
     path: String,
     custom_headers: Option<std::collections::HashMap<String, String>>,
+    expected_checksum: Option<String>,
 ) -> Result<(), String> {
     if state.has_active_download_id(&id) {
         return Err(duplicate_download_id_error());
@@ -2238,11 +2258,26 @@ async fn start_multi_source_download(
         queue.mark_active(&id, &primary_url);
     }
 
+    {
+        let mut meta = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+        meta.insert(id.clone(), queue_manager::RetryMetadata {
+            url: primary_url.clone(),
+            path: path.clone(),
+            priority: queue_manager::DownloadPriority::Normal,
+            custom_headers: custom_headers.clone(),
+            expected_checksum: expected_checksum.clone(),
+            fresh_restart: false,
+            retry_count: 0,
+            max_retries: 0,
+        });
+    }
+
     let result = engine::multi_source::start_multi_source_download(
-        &app, &state, id.clone(), primary_url, mirrors, path, custom_headers,
+        &app, &state, id.clone(), primary_url, mirrors, path, custom_headers, expected_checksum,
     ).await;
 
     if let Err(_) = result {
+        crate::engine::session::clear_retry_metadata(&id);
         let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
         queue.mark_finished(&id);
     }
@@ -4357,14 +4392,20 @@ fn classify_network_requests(
                 while let Some(req) = rx.recv().await {
                     println!("DEBUG: Processing download from extension: {}", req.url);
                     let _ = handle.emit("extension_download", serde_json::json!({
-                        "url": req.url,
-                        "filename": req.filename
+                        "url": &req.url,
+                        "filename": &req.filename,
+                        "customHeaders": &req.custom_headers,
+                        "pageUrl": &req.page_url,
+                        "source": &req.source
                     }));
                     // broadcast to any HTTP listeners
                     let _ = crate::http_server::get_event_sender().send(serde_json::json!({
                         "type": "extension_download",
-                        "url": req.url,
-                        "filename": req.filename
+                        "url": &req.url,
+                        "filename": &req.filename,
+                        "customHeaders": &req.custom_headers,
+                        "pageUrl": &req.page_url,
+                        "source": &req.source
                     }));
                 }
             });

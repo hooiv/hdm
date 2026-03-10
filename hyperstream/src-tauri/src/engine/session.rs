@@ -85,13 +85,15 @@ pub(crate) fn clear_retry_metadata(id: &str) {
     store.remove(id);
 }
 
+pub(crate) fn get_expected_checksum(id: &str) -> Option<String> {
+    let store = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
+    store.get(id).and_then(|m| m.expected_checksum.clone())
+}
+
 /// Verify queue-supplied checksum before finalizing success.
 /// Emits `integrity_check_passed` or `integrity_check_failed` events.
 pub(crate) async fn verify_queued_integrity(app: &tauri::AppHandle, id: &str, path: &str) -> Result<(), String> {
-    let expected = {
-        let store = queue_manager::RETRY_METADATA.lock().unwrap_or_else(|e| e.into_inner());
-        store.get(id).and_then(|m| m.expected_checksum.clone())
-    };
+    let expected = get_expected_checksum(id);
 
     if let Some(expected_checksum) = expected {
         match crate::integrity::verify_file_checksum(path, &expected_checksum).await {
@@ -172,6 +174,7 @@ fn record_integrity_failure(
     segments_used: u32,
     error_message: &str,
 ) {
+    let expected_checksum = get_expected_checksum(id);
     let _ = app.emit("download_error", serde_json::json!({
         "id": id,
         "error": error_message,
@@ -189,6 +192,7 @@ fn record_integrity_failure(
         segments: None,
         last_active: Some(chrono::Utc::now().to_rfc3339()),
         error_message: Some(error_message.to_string()),
+        expected_checksum,
     });
 
     let avg_speed = if elapsed.as_secs() > 0 {
@@ -245,6 +249,7 @@ fn finalize_http_success_side_effects(
     etag: Option<String>,
     chatops: std::sync::Arc<crate::network::chatops::ChatOpsManager>,
 ) {
+    let expected_checksum = get_expected_checksum(&id);
     clear_retry_metadata(&id);
     crate::media::sounds::play_complete();
     crate::cas_manager::register_cas(etag.as_deref(), md5.as_deref(), &path);
@@ -338,6 +343,7 @@ fn finalize_http_success_side_effects(
         segments: None,
         last_active: Some(chrono::Utc::now().to_rfc3339()),
         error_message: None,
+        expected_checksum,
     });
 
     let avg_speed = if elapsed.as_secs() > 0 {
@@ -1042,6 +1048,7 @@ pub(crate) async fn start_download_impl(
                                 segments: Some(segs_snap),
                                 last_active: Some(chrono::Utc::now().to_rfc3339()),
                                 error_message: Some(error_msg.clone()),
+                                expected_checksum: get_expected_checksum(&id_monitor),
                             });
                             let elapsed = monitor_start.elapsed();
                             let _ = crate::download_history::record(crate::download_history::HistoryEntry {
@@ -1113,6 +1120,7 @@ pub(crate) async fn start_download_impl(
                                         segments: Some(segs_snap),
                                         last_active: Some(chrono::Utc::now().to_rfc3339()),
                                         error_message: Some(error_msg.clone()),
+                                        expected_checksum: get_expected_checksum(&id_monitor),
                                     });
                                     let elapsed = monitor_start.elapsed();
                                     let _ = crate::download_history::record(crate::download_history::HistoryEntry {
@@ -1727,6 +1735,7 @@ pub(crate) async fn start_download_impl(
                          segments: Some(segments),
                          last_active: Some(chrono::Utc::now().to_rfc3339()),
                          error_message: None,
+                         expected_checksum: get_expected_checksum(&id_worker),
                      };
                      
                      let _ = persistence::upsert_download(saved);
@@ -1930,6 +1939,7 @@ pub(crate) async fn start_download_impl(
                         segments: Some(segments),
                         last_active: Some(chrono::Utc::now().to_rfc3339()),
                         error_message: None,
+                        expected_checksum: get_expected_checksum(&id_save),
                     };
                     // Silent save, ignore errors
                     let _ = persistence::upsert_download(saved);

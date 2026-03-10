@@ -159,8 +159,14 @@ export interface ReplayResult {
 
 export const api = {
     // --- Core Downloads ---
-    startDownload: (id: string, url: string, path: string, force?: boolean, customHeaders?: Record<string, string>) =>
-        invoke<void>('start_download', { id, url, path, force, customHeaders }),
+    startDownload: (
+        id: string,
+        url: string,
+        path: string,
+        force?: boolean,
+        customHeaders?: Record<string, string>,
+        expectedChecksum?: string,
+    ) => invoke<void>('start_download', { id, url, path, force, customHeaders, expectedChecksum }),
     pauseDownload: (id: string) =>
         invoke<void>('pause_download', { id }),
     getDownloads: () =>

@@ -4,12 +4,24 @@ import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { RefreshCw, Plus, Trash2, Download, Rss, ExternalLink, Cog } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
-// notification type definitions are missing under certain build setups;
-// silence the error by ignoring the import type check.
-// @ts-ignore
-import { notify } from '@tauri-apps/api/notification';
 import { AppSettings } from '../types';
 import { safeListen } from '../utils/tauri';
+
+async function notifyFeedUpdate(title: string, body: string) {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+        return;
+    }
+
+    if (Notification.permission !== 'granted') {
+        return;
+    }
+
+    try {
+        new Notification(title, { body });
+    } catch (error) {
+        logError('Failed to show feed notification', error);
+    }
+}
 
 interface FeedConfig {
     id: string;
@@ -57,10 +69,7 @@ export const FeedsTab: React.FC = () => {
         safeListen<{feed_id:string, new_items:FeedItem[]}>('feed_update', async event => {
             const { feed_id, new_items } = event.payload;
             toast.success(`${new_items.length} new item${new_items.length !== 1 ? 's' : ''} received`);
-            // fire OS notification as well (ignore failures)
-            try {
-                await notify({ title: 'RSS Feed', body: `${new_items.length} new item${new_items.length !== 1 ? 's' : ''}` });
-            } catch(_) {}
+            await notifyFeedUpdate('RSS Feed', `${new_items.length} new item${new_items.length !== 1 ? 's' : ''}`);
             // refresh feed list counts
             loadFeeds();
             if (selectedFeedId === feed_id) {

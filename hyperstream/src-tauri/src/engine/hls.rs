@@ -30,6 +30,7 @@ fn record_hls_failure(
     segments_used: u32,
     error_message: &str,
 ) {
+    let expected_checksum = crate::engine::session::get_expected_checksum(id);
     let _ = app.emit("download_error", serde_json::json!({
         "id": id,
         "error": error_message,
@@ -47,6 +48,7 @@ fn record_hls_failure(
         segments: None,
         last_active: Some(chrono::Utc::now().to_rfc3339()),
         error_message: Some(error_message.to_string()),
+        expected_checksum,
     });
 
     let avg_speed = if elapsed.as_secs() > 0 {
@@ -147,6 +149,7 @@ async fn finalize_hls_success(
         return Ok(());
     }
 
+    let expected_checksum = crate::engine::session::get_expected_checksum(id);
     crate::engine::session::clear_retry_metadata(id);
     crate::media::sounds::play_complete();
     crate::cas_manager::register_cas(Some(url), None, path);
@@ -162,6 +165,7 @@ async fn finalize_hls_success(
         segments: None,
         last_active: Some(chrono::Utc::now().to_rfc3339()),
         error_message: None,
+        expected_checksum,
     });
 
     let avg_speed = if elapsed.as_secs() > 0 { total_size / elapsed.as_secs() } else { 0 };
@@ -490,6 +494,7 @@ pub(crate) async fn start_hls_download_impl(
                         segments: None,
                         last_active: Some(chrono::Utc::now().to_rfc3339()),
                         error_message: None,
+                        expected_checksum: crate::engine::session::get_expected_checksum(&id_save),
                     };
                     let _ = persistence::upsert_download(saved);
                 }

@@ -532,6 +532,7 @@ pub async fn start_multi_source_download(
     mirrors: Vec<(String, String)>,
     path: String,
     custom_headers: Option<HashMap<String, String>>,
+    expected_checksum: Option<String>,
 ) -> Result<(), String> {
     use crate::core_state::*;
     use crate::downloader::disk::*;
@@ -573,6 +574,7 @@ pub async fn start_multi_source_download(
         let downloads = persistence::load_downloads().unwrap_or_default();
         downloads.into_iter().find(|d| d.id == id)
     };
+    let expected_checksum = expected_checksum.or_else(|| saved.as_ref().and_then(|d| d.expected_checksum.clone()));
     let resume_from = saved.as_ref().map(|s| s.downloaded_bytes).unwrap_or(0);
     let requested_segments = configured_multi_source_segments(settings.segments);
     let mut prefer_range_probe = requested_segments > 1 || resume_from > 0;
@@ -784,6 +786,7 @@ pub async fn start_multi_source_download(
         let stop_tx_monitor = stop_tx.clone();
         let disk_io_error_monitor = disk_io_error.clone();
         let pool_monitor = pool.clone();
+        let expected_checksum_monitor = expected_checksum.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(33));
@@ -858,6 +861,48 @@ pub async fn start_multi_source_download(
 
                         // Completion check
                         if total_size > 0 && d >= total_size {
+                            if let Err(integrity_error) = crate::engine::session::verify_queued_integrity(&app_monitor, &id_monitor, &path_monitor).await {
+                                crate::engine::session::mark_retry_for_fresh_restart(&id_monitor);
+                                crate::media::sounds::play_error();
+                                let _ = stop_tx_monitor.send(());
+                                let elapsed = monitor_start.elapsed();
+                                let seg_count = manager_monitor.lock().unwrap_or_else(|e| e.into_inner())
+                                    .segments.read().unwrap_or_else(|e| e.into_inner()).len() as u32;
+                                let mirror_count = pool_monitor.get_stats().len();
+                                let _ = persistence::upsert_download(persistence::SavedDownload {
+                                    id: id_monitor.clone(),
+                                    url: url_monitor.clone(),
+                                    path: path_monitor.clone(),
+                                    filename: extract_filename(&path_monitor).to_string(),
+                                    total_size,
+                                    downloaded_bytes: d,
+                                    status: "Error".to_string(),
+                                    segments: None,
+                                    last_active: Some(chrono::Utc::now().to_rfc3339()),
+                                    error_message: Some(integrity_error.clone()),
+                                    expected_checksum: expected_checksum_monitor.clone(),
+                                });
+                                let _ = crate::download_history::record(crate::download_history::HistoryEntry {
+                                    id: id_monitor.clone(),
+                                    url: url_monitor.clone(),
+                                    path: path_monitor.clone(),
+                                    filename: extract_filename(&path_monitor).to_string(),
+                                    total_size,
+                                    downloaded_bytes: d,
+                                    status: "Error".to_string(),
+                                    started_at: monitor_start_iso.clone(),
+                                    finished_at: chrono::Local::now().to_rfc3339(),
+                                    avg_speed_bps: if elapsed.as_secs() > 0 { d / elapsed.as_secs() } else { 0 },
+                                    duration_secs: elapsed.as_secs(),
+                                    segments_used: seg_count,
+                                    error_message: Some(integrity_error),
+                                    source_type: Some(format!("multi-source({})", mirror_count)),
+                                });
+                                crate::engine::session::handle_download_failure_cleanup(&app_monitor, &id_monitor);
+                                break;
+                            }
+
+                            crate::engine::session::clear_retry_metadata(&id_monitor);
                             crate::media::sounds::play_complete();
                             crate::cas_manager::register_cas(
                                 etag_monitor.as_deref(),
@@ -877,6 +922,7 @@ pub async fn start_multi_source_download(
                                 segments: None,
                                 last_active: Some(chrono::Utc::now().to_rfc3339()),
                                 error_message: None,
+                                expected_checksum: expected_checksum_monitor.clone(),
                             };
                             let _ = persistence::upsert_download(saved);
                             // Record in download history
@@ -1156,6 +1202,7 @@ pub async fn start_multi_source_download(
                         segments: Some(segments),
                         last_active: Some(chrono::Utc::now().to_rfc3339()),
                         error_message: None,
+                        expected_checksum: expected_checksum.clone(),
                     });
                     crate::media::sounds::play_error();
                     return;
@@ -1376,6 +1423,7 @@ pub async fn start_multi_source_download(
         let id_save = id.clone();
         let url_save = primary_url.clone();
         let path_save = path.clone();
+        let expected_checksum_save = expected_checksum.clone();
         let filename_save = std::path::Path::new(&path)
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
@@ -1400,6 +1448,7 @@ pub async fn start_multi_source_download(
                             segments: Some(segments),
                             last_active: Some(chrono::Utc::now().to_rfc3339()),
                             error_message: None,
+                            expected_checksum: expected_checksum_save.clone(),
                         });
                     }
                 }
