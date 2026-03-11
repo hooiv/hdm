@@ -75,7 +75,7 @@ fn get_mirror_host_health_path() -> PathBuf {
         .join("mirror-host-health.json")
 }
 
-fn write_json_atomically<T: Serialize>(path: &PathBuf, value: &T) -> Result<(), String> {
+fn write_json_atomically<T: Serialize + ?Sized>(path: &PathBuf, value: &T) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
     }
@@ -85,12 +85,32 @@ fn write_json_atomically<T: Serialize>(path: &PathBuf, value: &T) -> Result<(), 
 
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write temp file: {}", e))?;
+
+    // Rotate backups before overwriting: keep up to 3 generations
+    // .bak3 ← .bak2 ← .bak1 ← current
+    if path.exists() {
+        rotate_backups(path);
+    }
+
     if let Err(_rename_err) = fs::rename(&tmp_path, path) {
         fs::write(path, &json).map_err(|e| format!("Failed to write file: {}", e))?;
         let _ = fs::remove_file(&tmp_path);
     }
 
     Ok(())
+}
+
+/// Rotate backup files: .bak3 ← .bak2 ← .bak1 ← current
+fn rotate_backups(path: &PathBuf) {
+    let bak1 = path.with_extension("json.bak1");
+    let bak2 = path.with_extension("json.bak2");
+    let bak3 = path.with_extension("json.bak3");
+
+    let _ = fs::remove_file(&bak3);
+    if bak2.exists() { let _ = fs::rename(&bak2, &bak3); }
+    if bak1.exists() { let _ = fs::rename(&bak1, &bak2); }
+    // Copy (not move) current to bak1 so the primary file stays intact for the rename
+    let _ = fs::copy(path, &bak1);
 }
 
 /// Save downloads to disk atomically (write to temp file, then rename)
@@ -100,19 +120,54 @@ pub fn save_downloads(downloads: &[SavedDownload]) -> Result<(), String> {
     write_json_atomically(&path, downloads)
 }
 
-/// Load downloads from disk
+/// Load downloads from disk. On corruption, automatically tries backup files.
 pub fn load_downloads() -> Result<Vec<SavedDownload>, String> {
     let path = get_storage_path();
     
     match fs::read_to_string(&path) {
         Ok(json) => {
-            let downloads: Vec<SavedDownload> = serde_json::from_str(&json)
-                .map_err(|e| format!("Failed to deserialize: {}", e))?;
-            Ok(downloads)
+            match serde_json::from_str::<Vec<SavedDownload>>(&json) {
+                Ok(downloads) => Ok(downloads),
+                Err(e) => {
+                    eprintln!("WARNING: downloads.json corrupted ({}), attempting backup recovery", e);
+                    recover_from_backups(&path)
+                }
+            }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(format!("Failed to read file: {}", e)),
+        Err(e) => {
+            eprintln!("WARNING: Could not read downloads.json ({}), attempting backup recovery", e);
+            recover_from_backups(&path)
+        }
     }
+}
+
+/// Try to load from backup files (.bak1, .bak2, .bak3) in order.
+/// If a backup is valid, restore it as the primary file.
+fn recover_from_backups(path: &PathBuf) -> Result<Vec<SavedDownload>, String> {
+    for suffix in &["json.bak1", "json.bak2", "json.bak3"] {
+        let backup = path.with_extension(suffix);
+        if !backup.exists() {
+            continue;
+        }
+        match fs::read_to_string(&backup) {
+            Ok(json) => {
+                match serde_json::from_str::<Vec<SavedDownload>>(&json) {
+                    Ok(downloads) => {
+                        eprintln!("RECOVERED: Restored {} downloads from {}", downloads.len(), suffix);
+                        // Restore the backup as the primary file
+                        let _ = fs::copy(&backup, path);
+                        return Ok(downloads);
+                    }
+                    Err(_) => continue,
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    // All backups failed — start fresh rather than losing the app
+    eprintln!("WARNING: All backup files corrupted or missing. Starting with empty download list.");
+    Ok(Vec::new())
 }
 
 pub fn load_mirror_host_health() -> Result<HashMap<String, MirrorHostHealth>, String> {

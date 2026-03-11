@@ -1,0 +1,511 @@
+    Checking hyperstream v0.1.0 (C:\Users\aditya\Desktop\hdm\hyperstream\src-tauri)
+warning: unused import: `reqwest::Client`
+ --> src\engine\hls.rs:4:5
+  |
+4 | use reqwest::Client;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `stream::FuturesUnordered`
+ --> src\engine\hls.rs:5:15
+  |
+5 | use futures::{stream::FuturesUnordered, StreamExt};
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `HlsSegment`
+ --> src\engine\hls.rs:8:31
+  |
+8 | use crate::media::{HlsParser, HlsSegment};
+  |                               ^^^^^^^^^^
+
+warning: unused import: `crate::downloader::network`
+  --> src\engine\hls.rs:10:5
+   |
+10 | use crate::downloader::network;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Mutex`
+ --> src\engine\dash.rs:1:22
+  |
+1 | use std::sync::{Arc, Mutex};
+  |                      ^^^^^
+
+warning: unused import: `DashManifest`
+ --> src\engine\dash.rs:6:33
+  |
+6 | use crate::media::dash_parser::{DashManifest, DashRepresentation, DashSegment};
+  |                                 ^^^^^^^^^^^^
+
+warning: unused import: `tokio_stream::wrappers::BroadcastStream`
+ --> src\http_server.rs:7:5
+  |
+7 | use tokio_stream::wrappers::BroadcastStream;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Emitter`
+ --> src\http_server.rs:9:5
+  |
+9 | use tauri::Emitter;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused variable: `path_w`
+    --> src\engine\session.rs:1228:33
+     |
+1228 | ...                   let path_w = path_monitor.clone();
+     |                           ^^^^^^ help: if this is intentional, prefix it with an underscore: `_path_w`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `app_w`
+    --> src\engine\session.rs:1229:33
+     |
+1229 | ...                   let app_w = window_monitor.clone();
+     |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_app_w`
+
+warning: unused variable: `seg_size`
+   --> src\engine\hls.rs:547:13
+    |
+547 |         let seg_size = sizes[idx];
+    |             ^^^^^^^^
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+547 |         let _seg_size = sizes[idx];
+    |             +
+help: you might have meant to pattern match on the similarly named constant `MAX_RANGE_SIZE`
+    |
+547 -         let seg_size = sizes[idx];
+547 +         let start_range_download::{closure#0}::MAX_RANGE_SIZE = sizes[idx];
+    |
+
+warning: variable does not need to be mutable
+   --> src\engine\hls.rs:511:13
+    |
+511 |         let mut writer = crate::downloader::disk::DiskWriter::new(file_writer_clone, rx);
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\engine\hls.rs:548:13
+    |
+548 |         let mut seg_offset = if idx == start_index { offset_in_segment } else { 0 };
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+error[E0382]: borrow of moved value: `expected_checksum`
+    --> src\engine\multi_source.rs:1426:38
+     |
+ 577 |     let expected_checksum = expected_checksum.or_else(|| saved.as_ref().and_then(|d| d.expected_checksum.clone()));
+     |         ----------------- move occurs because `expected_checksum` has type `std::option::Option<std::string::String>`, which does not implement the `Copy` trait
+...
+ 990 |     for i in 0..segments_count {
+     |     -------------------------- inside of this loop
+...
+1007 |         tokio::spawn(async move {
+     |                      ---------- value moved here, in previous iteration of loop
+...
+1048 |             loop {
+     |             ---- inside of this loop
+...
+1426 |         let expected_checksum_save = expected_checksum.clone();
+     |                                      ^^^^^^^^^^^^^^^^^ value borrowed here after move
+     |
+help: consider cloning the value before moving it into the closure
+     |
+1007 ~         let value = expected_checksum.clone();
+1008 ~         tokio::spawn(async move {
+1009 |             let (start, end, seg_id) = {
+ ...
+1205 |                         error_message: None,
+1206 ~                         expected_checksum: value.clone(),
+     |
+
+warning: unused variable: `feed_enabled`
+   --> src\feeds.rs:359:24
+    |
+359 |         let (feed_url, feed_enabled, feed_id_owned, auto_download_regex) = {
+    |                        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_feed_enabled`
+
+warning: variable does not need to be mutable
+   --> src\feeds.rs:434:13
+    |
+434 |         for mut feed in feeds_snapshot {
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `checksum`
+   --> src\queue_manager.rs:576:33
+    |
+576 | ...                   let checksum = dl.expected_checksum.clone();
+    |                           ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_checksum`
+
+error[E0277]: `*mut lua_State` cannot be sent between threads safely
+    --> src\lib.rs:3250:1
+     |
+3250 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ `*mut lua_State` cannot be sent between threads safely
+3251 | / async fn perform_search(
+3252 | |     query: String,
+3253 | |     pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>,
+3254 | | ) -> Result<Vec<search::SearchResult>, String> {
+     | |______________________________________________- within this `impl futures_util::Future<Output = Result<Vec<search::SearchResult>, std::string::String>>`
+...
+3969 |           .invoke_handler(tauri::generate_handler![
+     |  _________________________-
+3970 | |             start_download, 
+3971 | |             pause_download_cmd::pause_download, 
+3972 | |             get_downloads, 
+...    |
+4275 | |             classify_network_requests
+4276 | |         ])
+     | |_________- in this macro invocation
+     |
+     = help: within `impl futures_util::Future<Output = Result<Vec<search::SearchResult>, std::string::String>>`, the trait `std::marker::Send` is not implemented for `*mut lua_State`
+note: required because it appears within the type `LuaThread<'_>`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\mlua-0.9.9\src\thread.rs:46:12
+     |
+  46 | pub struct Thread<'lua>(pub(crate) LuaRef<'lua>, pub(crate) *mut ffi::lua_State);
+     |            ^^^^^^
+note: required because it appears within the type `AsyncThread<'_, LuaValue<'_>>`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\mlua-0.9.9\src\thread.rs:81:12
+     |
+  81 | pub struct AsyncThread<'lua, R> {
+     |            ^^^^^^^^^^^
+note: required because it's used within this `async` block
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\mlua-0.9.9\src\function.rs:190:9
+     |
+ 190 |         async move { thread_res?.await }
+     |         ^^^^^^^^^^
+note: required because it's used within this `async` fn body
+    --> src\plugin_vm\lua_host.rs:286:112
+     |
+ 286 |       pub async fn search(&self, query: &str, default_engine: &str) -> Result<Option<Vec<search::SearchResult>>> {
+     |  ________________________________________________________________________________________________________________^
+ 287 | |         let lua = self.lua.lock().await;
+ 288 | |         let globals = lua.globals();
+...    |
+ 296 | |         Ok(None)
+ 297 | |     }
+     | |_____^
+note: required because it's used within this `async` fn body
+    --> src\plugin_vm\manager.rs:99:82
+     |
+  99 |       pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>, String> {
+     |  __________________________________________________________________________________^
+ 100 | |         let query = search::sanitize_query(query)?;
+ 101 | |
+ 102 | |         let providers: Vec<(String, String, Arc<LuaPluginHost>)> = {
+...    |
+ 131 | |         Ok(search::finalize_results(aggregated))
+ 132 | |     }
+     | |_____^
+note: required because it's used within this `async` fn body
+    --> src\lib.rs:3254:48
+     |
+3254 |   ) -> Result<Vec<search::SearchResult>, String> {
+     |  ________________________________________________^
+3255 | |     pm.search(&query).await
+3256 | | }
+     | |_^
+note: required by a bound in `ResultFutureTag::future`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-2.9.4\src\ipc\command.rs:314:42
+     |
+ 310 |     pub async fn future<T, E, F>(self, value: F) -> Result<InvokeResponseBody, InvokeError>
+     |                  ------ required by a bound in this associated function
+...
+ 314 |       F: Future<Output = Result<T, E>> + Send,
+     |                                          ^^^^ required by this bound in `ResultFutureTag::future`
+     = note: this error originates in the macro `__cmd__perform_search` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: future cannot be sent between threads safely
+    --> src\lib.rs:3250:1
+     |
+3250 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ future returned by `perform_search` is not `Send`
+...
+3969 |           .invoke_handler(tauri::generate_handler![
+     |  _________________________-
+3970 | |             start_download, 
+3971 | |             pause_download_cmd::pause_download, 
+3972 | |             get_downloads, 
+...    |
+4275 | |             classify_network_requests
+4276 | |         ])
+     | |_________- in this macro invocation
+     |
+     = help: within `mlua::lua::LuaInner`, the trait `std::marker::Sync` is not implemented for `*mut lua_State`
+note: future is not `Send` as this value is used across an await
+    --> src\plugin_vm\lua_host.rs:291:73
+     |
+ 288 |         let globals = lua.globals();
+     |             ------- has type `LuaTable<'_>` which is not `Send`
+...
+ 291 |             let result: Value = search_fn.call_async(query.to_string()).await?;
+     |                                                                         ^^^^^ await occurs here, with `globals` maybe used later
+note: required by a bound in `ResultFutureTag::future`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-2.9.4\src\ipc\command.rs:314:42
+     |
+ 310 |     pub async fn future<T, E, F>(self, value: F) -> Result<InvokeResponseBody, InvokeError>
+     |                  ------ required by a bound in this associated function
+...
+ 314 |       F: Future<Output = Result<T, E>> + Send,
+     |                                          ^^^^ required by this bound in `ResultFutureTag::future`
+     = note: this error originates in the macro `__cmd__perform_search` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: future cannot be sent between threads safely
+    --> src\lib.rs:3250:1
+     |
+3250 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ future returned by `perform_search` is not `Send`
+...
+3969 |           .invoke_handler(tauri::generate_handler![
+     |  _________________________-
+3970 | |             start_download, 
+3971 | |             pause_download_cmd::pause_download, 
+3972 | |             get_downloads, 
+...    |
+4275 | |             classify_network_requests
+4276 | |         ])
+     | |_________- in this macro invocation
+     |
+     = help: the trait `std::marker::Sync` is not implemented for `UnsafeCell<mlua::lua::ExtraData>`
+note: future is not `Send` as this value is used across an await
+    --> src\plugin_vm\lua_host.rs:291:73
+     |
+ 288 |         let globals = lua.globals();
+     |             ------- has type `LuaTable<'_>` which is not `Send`
+...
+ 291 |             let result: Value = search_fn.call_async(query.to_string()).await?;
+     |                                                                         ^^^^^ await occurs here, with `globals` maybe used later
+note: required by a bound in `ResultFutureTag::future`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-2.9.4\src\ipc\command.rs:314:42
+     |
+ 310 |     pub async fn future<T, E, F>(self, value: F) -> Result<InvokeResponseBody, InvokeError>
+     |                  ------ required by a bound in this associated function
+...
+ 314 |       F: Future<Output = Result<T, E>> + Send,
+     |                                          ^^^^ required by this bound in `ResultFutureTag::future`
+     = note: this error originates in the macro `__cmd__perform_search` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `*mut c_void` cannot be sent between threads safely
+    --> src\lib.rs:3250:1
+     |
+3250 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ `*mut c_void` cannot be sent between threads safely
+3251 | / async fn perform_search(
+3252 | |     query: String,
+3253 | |     pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>,
+3254 | | ) -> Result<Vec<search::SearchResult>, String> {
+     | |______________________________________________- within this `impl futures_util::Future<Output = Result<Vec<search::SearchResult>, std::string::String>>`
+...
+3969 |           .invoke_handler(tauri::generate_handler![
+     |  _________________________-
+3970 | |             start_download, 
+3971 | |             pause_download_cmd::pause_download, 
+3972 | |             get_downloads, 
+...    |
+4275 | |             classify_network_requests
+4276 | |         ])
+     | |_________- in this macro invocation
+     |
+     = help: within `impl futures_util::Future<Output = Result<Vec<search::SearchResult>, std::string::String>>`, the trait `std::marker::Send` is not implemented for `*mut c_void`
+note: required because it appears within the type `LuaLightUserData`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\mlua-0.9.9\src\types.rs:44:12
+     |
+  44 | pub struct LightUserData(pub *mut c_void);
+     |            ^^^^^^^^^^^^^
+note: required because it appears within the type `LuaValue<'_>`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\mlua-0.9.9\src\value.rs:35:10
+     |
+  35 | pub enum Value<'lua> {
+     |          ^^^^^
+note: required because it appears within the type `PhantomData<LuaValue<'_>>`
+    --> C:\Users\aditya\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\marker.rs:822:12
+     |
+ 822 | pub struct PhantomData<T: PointeeSized>;
+     |            ^^^^^^^^^^^
+note: required because it appears within the type `AsyncThread<'_, LuaValue<'_>>`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\mlua-0.9.9\src\thread.rs:81:12
+     |
+  81 | pub struct AsyncThread<'lua, R> {
+     |            ^^^^^^^^^^^
+note: required because it's used within this `async` block
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\mlua-0.9.9\src\function.rs:190:9
+     |
+ 190 |         async move { thread_res?.await }
+     |         ^^^^^^^^^^
+note: required because it's used within this `async` fn body
+    --> src\plugin_vm\lua_host.rs:286:112
+     |
+ 286 |       pub async fn search(&self, query: &str, default_engine: &str) -> Result<Option<Vec<search::SearchResult>>> {
+     |  ________________________________________________________________________________________________________________^
+ 287 | |         let lua = self.lua.lock().await;
+ 288 | |         let globals = lua.globals();
+...    |
+ 296 | |         Ok(None)
+ 297 | |     }
+     | |_____^
+note: required because it's used within this `async` fn body
+    --> src\plugin_vm\manager.rs:99:82
+     |
+  99 |       pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>, String> {
+     |  __________________________________________________________________________________^
+ 100 | |         let query = search::sanitize_query(query)?;
+ 101 | |
+ 102 | |         let providers: Vec<(String, String, Arc<LuaPluginHost>)> = {
+...    |
+ 131 | |         Ok(search::finalize_results(aggregated))
+ 132 | |     }
+     | |_____^
+note: required because it's used within this `async` fn body
+    --> src\lib.rs:3254:48
+     |
+3254 |   ) -> Result<Vec<search::SearchResult>, String> {
+     |  ________________________________________________^
+3255 | |     pm.search(&query).await
+3256 | | }
+     | |_^
+note: required by a bound in `ResultFutureTag::future`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-2.9.4\src\ipc\command.rs:314:42
+     |
+ 310 |     pub async fn future<T, E, F>(self, value: F) -> Result<InvokeResponseBody, InvokeError>
+     |                  ------ required by a bound in this associated function
+...
+ 314 |       F: Future<Output = Result<T, E>> + Send,
+     |                                          ^^^^ required by this bound in `ResultFutureTag::future`
+     = note: this error originates in the macro `__cmd__perform_search` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: future cannot be sent between threads safely
+    --> src\lib.rs:3250:1
+     |
+3250 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ future returned by `perform_search` is not `Send`
+...
+3969 |           .invoke_handler(tauri::generate_handler![
+     |  _________________________-
+3970 | |             start_download, 
+3971 | |             pause_download_cmd::pause_download, 
+3972 | |             get_downloads, 
+...    |
+4275 | |             classify_network_requests
+4276 | |         ])
+     | |_________- in this macro invocation
+     |
+     = help: within `UnsafeCell<mlua::lua::ExtraData>`, the trait `std::marker::Send` is not implemented for `*const c_void`
+note: future is not `Send` as this value is used across an await
+    --> src\plugin_vm\lua_host.rs:291:73
+     |
+ 288 |         let globals = lua.globals();
+     |             ------- has type `LuaTable<'_>` which is not `Send`
+...
+ 291 |             let result: Value = search_fn.call_async(query.to_string()).await?;
+     |                                                                         ^^^^^ await occurs here, with `globals` maybe used later
+note: required by a bound in `ResultFutureTag::future`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-2.9.4\src\ipc\command.rs:314:42
+     |
+ 310 |     pub async fn future<T, E, F>(self, value: F) -> Result<InvokeResponseBody, InvokeError>
+     |                  ------ required by a bound in this associated function
+...
+ 314 |       F: Future<Output = Result<T, E>> + Send,
+     |                                          ^^^^ required by this bound in `ResultFutureTag::future`
+     = note: this error originates in the macro `__cmd__perform_search` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: future cannot be sent between threads safely
+    --> src\lib.rs:3250:1
+     |
+3250 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ future returned by `perform_search` is not `Send`
+...
+3969 |           .invoke_handler(tauri::generate_handler![
+     |  _________________________-
+3970 | |             start_download, 
+3971 | |             pause_download_cmd::pause_download, 
+3972 | |             get_downloads, 
+...    |
+4275 | |             classify_network_requests
+4276 | |         ])
+     | |_________- in this macro invocation
+     |
+     = help: within `UnsafeCell<mlua::lua::ExtraData>`, the trait `std::marker::Send` is not implemented for `NonNull<Waker>`
+note: future is not `Send` as this value is used across an await
+    --> src\plugin_vm\lua_host.rs:291:73
+     |
+ 288 |         let globals = lua.globals();
+     |             ------- has type `LuaTable<'_>` which is not `Send`
+...
+ 291 |             let result: Value = search_fn.call_async(query.to_string()).await?;
+     |                                                                         ^^^^^ await occurs here, with `globals` maybe used later
+note: required by a bound in `ResultFutureTag::future`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-2.9.4\src\ipc\command.rs:314:42
+     |
+ 310 |     pub async fn future<T, E, F>(self, value: F) -> Result<InvokeResponseBody, InvokeError>
+     |                  ------ required by a bound in this associated function
+...
+ 314 |       F: Future<Output = Result<T, E>> + Send,
+     |                                          ^^^^ required by this bound in `ResultFutureTag::future`
+     = note: this error originates in the macro `__cmd__perform_search` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: future cannot be sent between threads safely
+    --> src\lib.rs:3250:1
+     |
+3250 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ future returned by `perform_search` is not `Send`
+...
+3969 |           .invoke_handler(tauri::generate_handler![
+     |  _________________________-
+3970 | |             start_download, 
+3971 | |             pause_download_cmd::pause_download, 
+3972 | |             get_downloads, 
+...    |
+4275 | |             classify_network_requests
+4276 | |         ])
+     | |_________- in this macro invocation
+     |
+     = help: the trait `std::marker::Sync` is not implemented for `dyn Fn(&Lua, Debug<'b>) -> Result<(), Error> + Send`
+note: future is not `Send` as this value is used across an await
+    --> src\plugin_vm\lua_host.rs:291:73
+     |
+ 288 |         let globals = lua.globals();
+     |             ------- has type `LuaTable<'_>` which is not `Send`
+...
+ 291 |             let result: Value = search_fn.call_async(query.to_string()).await?;
+     |                                                                         ^^^^^ await occurs here, with `globals` maybe used later
+note: required by a bound in `ResultFutureTag::future`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-2.9.4\src\ipc\command.rs:314:42
+     |
+ 310 |     pub async fn future<T, E, F>(self, value: F) -> Result<InvokeResponseBody, InvokeError>
+     |                  ------ required by a bound in this associated function
+...
+ 314 |       F: Future<Output = Result<T, E>> + Send,
+     |                                          ^^^^ required by this bound in `ResultFutureTag::future`
+     = note: the full name for the type has been written to 'C:\Users\aditya\Desktop\hdm\hyperstream\src-tauri\target\debug\deps\hyperstream_lib-8e684d3071374c00.long-type-13155771189945731982.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `__cmd__perform_search` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `Emitter`
+  --> src\engine\multi_source.rs:36:13
+   |
+36 | use tauri::{Emitter, Manager};
+   |             ^^^^^^^
+
+error[E0502]: cannot borrow `parsed` as mutable because it is also borrowed as immutable
+   --> src\mirror_hunter.rs:337:9
+    |
+336 |         let normalized_path = parsed.path().trim_end_matches('/');
+    |                               ------ immutable borrow occurs here
+337 |         parsed.set_path(if normalized_path.is_empty() { "/" } else { normalized_path });
+    |         ^^^^^^^--------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |         |      |
+    |         |      immutable borrow later used by call
+    |         mutable borrow occurs here
+
+Some errors have detailed explanations: E0277, E0382, E0502.
+For more information about an error, try `rustc --explain E0277`.
+warning: `hyperstream` (lib) generated 17 warnings
+error: could not compile `hyperstream` (lib) due to 16 previous errors; 17 warnings emitted

@@ -49,6 +49,9 @@ fn try_auto_retry(app: &tauri::AppHandle, id: &str) -> bool {
                 retry_count: meta.retry_count,
                 max_retries: meta.max_retries,
                 retry_delay_ms: 0,
+                depends_on: Vec::new(),
+                custom_segments: None,
+                group: None,
             };
             let mut queue = DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
             queue.requeue_failed(retry_item)
@@ -793,7 +796,7 @@ pub(crate) async fn start_download_impl(
 
             {
                 let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                queue.mark_finished(&id);
+                queue.mark_finished_success(&id);
             }
 
             if let Some(action) = crate::scheduler::handle_download_complete(&id) {
@@ -819,9 +822,16 @@ pub(crate) async fn start_download_impl(
 
     // 4. Initialize Manager
     // Force single segment if server doesn't support Range requests
+    let per_download_segments = {
+        let mut overrides = crate::queue_manager::DOWNLOAD_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
+        overrides.remove(&id).and_then(|o| o.custom_segments)
+    };
     let effective_segments = if !supports_range {
         println!("[download] Server does not support Range — falling back to single segment for {}", actual_url);
         1
+    } else if let Some(custom) = per_download_segments {
+        println!("[download] Using per-download segment override: {} for {}", custom, id);
+        custom.clamp(1, 64)
     } else {
         settings.segments
     };
@@ -1495,10 +1505,10 @@ pub(crate) async fn start_download_impl(
                         );
                         // Signal save loop and workers to stop
                         let _ = stop_tx_monitor.send(());
-                        // Notify queue manager that a slot opened up
+                        // Notify queue manager that a slot opened up (success path resolves deps)
                         {
                             let mut queue = crate::queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                            queue.mark_finished(&id_monitor);
+                            queue.mark_finished_success(&id_monitor);
                         }
                         crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
                         // Clean up session from in-memory state to prevent memory leak

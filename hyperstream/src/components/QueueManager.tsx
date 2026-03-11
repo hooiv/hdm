@@ -3,7 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ListOrdered, ArrowUp, ArrowBigUp, ChevronUp, ChevronDown,
-  RefreshCw, Play, X, Settings2, AlertCircle
+  RefreshCw, Play, X, Settings2, AlertCircle, Pause, PauseCircle,
+  PlayCircle, Link2, Unlink, Hash, FolderOpen
 } from 'lucide-react';
 
 interface QueuedDownload {
@@ -17,6 +18,9 @@ interface QueuedDownload {
   retry_count: number;
   max_retries: number;
   retry_delay_ms: number;
+  depends_on: string[];
+  custom_segments: number | null;
+  group: string | null;
 }
 
 interface QueueStatus {
@@ -25,6 +29,8 @@ interface QueueStatus {
   queued_count: number;
   queued_items: QueuedDownload[];
   active_ids: string[];
+  paused: boolean;
+  blocked_ids: string[];
 }
 
 const priorityColors: Record<string, { text: string; bg: string; border: string }> = {
@@ -38,12 +44,18 @@ export const QueueManager: React.FC = () => {
   const [maxConcurrent, setMaxConcurrent] = useState<number>(3);
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [groups, setGroups] = useState<string[]>([]);
+  const [filterGroup, setFilterGroup] = useState<string | null>(null);
 
   const refreshQueue = useCallback(async () => {
     try {
-      const s = await invoke<QueueStatus>('get_queue_status');
+      const [s, g] = await Promise.all([
+        invoke<QueueStatus>('get_queue_status'),
+        invoke<string[]>('get_queue_groups'),
+      ]);
       setStatus(s);
       setMaxConcurrent(s.max_concurrent);
+      setGroups(g);
       setError(null);
     } catch (err) {
       setError(String(err));
@@ -85,6 +97,27 @@ export const QueueManager: React.FC = () => {
     } catch { /* ignore */ }
   };
 
+  const handlePauseQueue = async () => {
+    try {
+      await invoke('pause_download_queue');
+      refreshQueue();
+    } catch { /* ignore */ }
+  };
+
+  const handleResumeQueue = async () => {
+    try {
+      await invoke('resume_download_queue');
+      refreshQueue();
+    } catch { /* ignore */ }
+  };
+
+  const handleRemoveDependency = async (downloadId: string, depId: string) => {
+    try {
+      await invoke('remove_download_dependency', { downloadId, dependsOnId: depId });
+      refreshQueue();
+    } catch { /* ignore */ }
+  };
+
   const handleMaxConcurrentChange = async (val: number) => {
     const clamped = Math.max(1, Math.min(20, val));
     try {
@@ -117,10 +150,35 @@ export const QueueManager: React.FC = () => {
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-mono">
                 {status.queued_count} queued
               </span>
+              {status.paused && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono animate-pulse">
+                  PAUSED
+                </span>
+              )}
             </div>
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Pause / Resume Queue */}
+          {status && (
+            status.paused ? (
+              <button
+                onClick={handleResumeQueue}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors"
+                title="Resume Queue"
+              >
+                <PlayCircle size={14} /> Resume
+              </button>
+            ) : (
+              <button
+                onClick={handlePauseQueue}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-amber-400 bg-amber-500/10 border border-amber-500/20 hover:bg-amber-500/20 transition-colors"
+                title="Pause Queue — stops dequeuing new downloads"
+              >
+                <PauseCircle size={14} /> Pause
+              </button>
+            )
+          )}
           <button
             onClick={() => setShowSettings(!showSettings)}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
@@ -189,6 +247,36 @@ export const QueueManager: React.FC = () => {
         </div>
       )}
 
+      {/* Group Filter */}
+      {groups.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <FolderOpen size={14} className="text-slate-500" />
+          <button
+            onClick={() => setFilterGroup(null)}
+            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+              filterGroup === null
+                ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30'
+                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+            }`}
+          >
+            All
+          </button>
+          {groups.map(g => (
+            <button
+              key={g}
+              onClick={() => setFilterGroup(g)}
+              className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                filterGroup === g
+                  ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30'
+                  : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+              }`}
+            >
+              {g}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Active Downloads */}
       {status && status.active_ids.length > 0 && (
         <div className="space-y-2">
@@ -215,15 +303,22 @@ export const QueueManager: React.FC = () => {
           </h3>
           <div className="space-y-1.5">
             <AnimatePresence>
-              {status.queued_items.map((item, index) => {
+              {status.queued_items
+                .filter(item => !filterGroup || item.group === filterGroup)
+                .map((item, index) => {
                 const pc = priorityColors[item.priority] || priorityColors.Normal;
+                const isBlocked = status.blocked_ids?.includes(item.id);
                 return (
                   <motion.div
                     key={item.id}
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, x: 10 }}
-                    className={`flex items-center gap-3 p-3 rounded-lg bg-slate-900/50 border border-slate-700/30 hover:border-slate-600/50 transition-colors group`}
+                    className={`flex items-center gap-3 p-3 rounded-lg bg-slate-900/50 border transition-colors group ${
+                      isBlocked
+                        ? 'border-amber-500/30 bg-amber-500/5'
+                        : 'border-slate-700/30 hover:border-slate-600/50'
+                    }`}
                   >
                     {/* Position */}
                     <span className="text-[10px] font-mono text-slate-500 w-6 text-center">#{index + 1}</span>
@@ -241,7 +336,7 @@ export const QueueManager: React.FC = () => {
                       <div className="text-[10px] text-slate-500 truncate mt-0.5">
                         {item.url}
                       </div>
-                      <div className="flex gap-3 mt-1 text-[10px] text-slate-500">
+                      <div className="flex gap-3 mt-1 text-[10px] text-slate-500 flex-wrap">
                         <span>Added {relativeTime(item.added_at)}</span>
                         {item.retry_count > 0 && (
                           <span className="text-amber-400">Retry {item.retry_count}/{item.max_retries}</span>
@@ -249,7 +344,43 @@ export const QueueManager: React.FC = () => {
                         {item.expected_checksum && (
                           <span className="text-cyan-400" title={item.expected_checksum}>✓ Checksum</span>
                         )}
+                        {item.custom_segments && (
+                          <span className="text-violet-400 flex items-center gap-0.5" title={`${item.custom_segments} segments`}>
+                            <Hash size={9} /> {item.custom_segments} seg
+                          </span>
+                        )}
+                        {item.group && (
+                          <span className="text-teal-400 flex items-center gap-0.5">
+                            <FolderOpen size={9} /> {item.group}
+                          </span>
+                        )}
                       </div>
+                      {/* Dependency badges */}
+                      {item.depends_on.length > 0 && (
+                        <div className="flex gap-1 mt-1 flex-wrap">
+                          {item.depends_on.map(depId => (
+                            <span
+                              key={depId}
+                              className="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                            >
+                              <Link2 size={8} />
+                              <span className="max-w-[100px] truncate" title={depId}>{depId}</span>
+                              <button
+                                onClick={() => handleRemoveDependency(item.id, depId)}
+                                className="ml-0.5 hover:text-red-400 transition-colors"
+                                title="Remove dependency"
+                              >
+                                <Unlink size={8} />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {isBlocked && (
+                        <div className="text-[9px] text-amber-400 mt-1 flex items-center gap-1">
+                          <Pause size={9} /> Waiting for dependencies
+                        </div>
+                      )}
                     </div>
 
                     {/* Actions */}

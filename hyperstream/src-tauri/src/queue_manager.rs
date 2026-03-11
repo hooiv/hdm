@@ -9,6 +9,18 @@ lazy_static::lazy_static! {
     /// Retry metadata for downloads started via the queue. The session monitor
     /// reads this to decide whether a failed download should be re-queued.
     pub static ref RETRY_METADATA: Mutex<HashMap<String, RetryMetadata>> = Mutex::new(HashMap::new());
+    /// Per-download settings overrides set by the queue before starting a download.
+    /// The engine reads and removes these on startup.
+    pub static ref DOWNLOAD_OVERRIDES: Mutex<HashMap<String, DownloadOverrides>> = Mutex::new(HashMap::new());
+}
+
+/// Per-download settings that override globals for a specific download.
+#[derive(Debug, Clone, Default)]
+pub struct DownloadOverrides {
+    /// Override the global segment count.
+    pub custom_segments: Option<u32>,
+    /// Group label.
+    pub group: Option<String>,
 }
 
 /// Metadata stored per-download so the session monitor can re-queue on failure.
@@ -84,6 +96,17 @@ pub struct QueuedDownload {
     /// Delay in ms before retrying (doubles each retry).
     #[serde(default)]
     pub retry_delay_ms: u64,
+    /// Download IDs that must complete before this download can start.
+    /// The download will remain queued until all dependencies are "Done".
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// Override the global segment count for this specific download.
+    /// None = use global settings.segments.
+    #[serde(default)]
+    pub custom_segments: Option<u32>,
+    /// Group tag for organizing related downloads (e.g. "project-assets").
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 /// Snapshot of queue state for the frontend.
@@ -94,6 +117,9 @@ pub struct QueueStatus {
     pub queued_count: usize,
     pub queued_items: Vec<QueuedDownload>,
     pub active_ids: Vec<String>,
+    pub paused: bool,
+    /// IDs of downloads whose dependencies are not yet satisfied.
+    pub blocked_ids: Vec<String>,
 }
 
 /// The download queue manages concurrency limits and priority ordering.
@@ -113,6 +139,11 @@ pub struct DownloadQueue {
     max_concurrent: u32,
     /// Channel sender to notify the queue processor that a slot opened.
     notify_tx: Option<mpsc::UnboundedSender<QueueEvent>>,
+    /// When true, the queue processor will not start any new downloads.
+    paused: bool,
+    /// IDs of downloads that have completed (for dependency resolution).
+    /// Cleared periodically to avoid unbounded growth.
+    completed_ids: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +163,8 @@ impl DownloadQueue {
             active_urls: HashMap::new(),
             max_concurrent: 5, // sensible default; overridden by settings
             notify_tx: None,
+            paused: false,
+            completed_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -157,20 +190,121 @@ impl DownloadQueue {
     }
 
     /// Try to dequeue the next download if a slot is available.
-    /// Returns `None` if the concurrency limit is reached or the queue is empty.
+    /// Returns `None` if the queue is paused, the concurrency limit is reached,
+    /// the queue is empty, or all queued items have unsatisfied dependencies.
     pub fn try_dequeue(&mut self) -> Option<QueuedDownload> {
+        if self.paused {
+            return None;
+        }
         if self.active.len() as u32 >= self.max_concurrent {
             return None;
         }
-        // Dequeue from highest priority first
-        let item = self.high.pop_front()
-            .or_else(|| self.normal.pop_front())
-            .or_else(|| self.low.pop_front());
+        // Try each priority lane. Within each lane, find the first item whose
+        // dependencies are all satisfied (i.e. all in completed_ids).
+        let item = self.dequeue_ready_from(&mut self.high.clone(), &self.completed_ids)
+            .map(|idx| self.high.remove(idx).unwrap())
+            .or_else(|| {
+                self.dequeue_ready_from(&self.normal.clone(), &self.completed_ids)
+                    .map(|idx| self.normal.remove(idx).unwrap())
+            })
+            .or_else(|| {
+                self.dequeue_ready_from(&self.low.clone(), &self.completed_ids)
+                    .map(|idx| self.low.remove(idx).unwrap())
+            });
 
         if let Some(ref dl) = item {
             self.mark_active(&dl.id, &dl.url);
         }
         item
+    }
+
+    /// Find the index of the first item in a lane whose dependencies are satisfied.
+    fn dequeue_ready_from(
+        &self,
+        lane: &VecDeque<QueuedDownload>,
+        completed: &std::collections::HashSet<String>,
+    ) -> Option<usize> {
+        lane.iter().position(|dl| self.dependencies_satisfied(dl, completed))
+    }
+
+    /// Check if all dependencies of a download are satisfied.
+    fn dependencies_satisfied(
+        &self,
+        dl: &QueuedDownload,
+        completed: &std::collections::HashSet<String>,
+    ) -> bool {
+        dl.depends_on.is_empty() || dl.depends_on.iter().all(|dep| completed.contains(dep))
+    }
+
+    /// Record a download as completed for dependency resolution.
+    pub fn mark_completed(&mut self, id: &str) {
+        self.completed_ids.insert(id.to_string());
+    }
+
+    /// Pause the queue — no new downloads will be started.
+    pub fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    /// Resume the queue — allow starting new downloads again.
+    pub fn resume(&mut self) {
+        self.paused = false;
+        if let Some(tx) = &self.notify_tx {
+            let _ = tx.send(QueueEvent::SlotAvailable);
+        }
+    }
+
+    /// Whether the queue is currently paused.
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Get distinct groups across all queued items.
+    pub fn groups(&self) -> Vec<String> {
+        let mut groups = std::collections::HashSet::new();
+        for dl in self.high.iter().chain(self.normal.iter()).chain(self.low.iter()) {
+            if let Some(ref g) = dl.group {
+                groups.insert(g.clone());
+            }
+        }
+        let mut sorted: Vec<String> = groups.into_iter().collect();
+        sorted.sort();
+        sorted
+    }
+
+    /// Get IDs of downloads with unsatisfied dependencies.
+    pub fn blocked_ids(&self) -> Vec<String> {
+        let mut blocked = Vec::new();
+        for dl in self.high.iter().chain(self.normal.iter()).chain(self.low.iter()) {
+            if !self.dependencies_satisfied(dl, &self.completed_ids) {
+                blocked.push(dl.id.clone());
+            }
+        }
+        blocked
+    }
+
+    /// Add a dependency: `download_id` must wait for `depends_on_id` to complete.
+    pub fn add_dependency(&mut self, download_id: &str, depends_on_id: &str) -> bool {
+        for lane in [&mut self.high, &mut self.normal, &mut self.low] {
+            if let Some(dl) = lane.iter_mut().find(|d| d.id == download_id) {
+                if !dl.depends_on.contains(&depends_on_id.to_string()) {
+                    dl.depends_on.push(depends_on_id.to_string());
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Remove a dependency from a queued download.
+    pub fn remove_dependency(&mut self, download_id: &str, depends_on_id: &str) -> bool {
+        for lane in [&mut self.high, &mut self.normal, &mut self.low] {
+            if let Some(dl) = lane.iter_mut().find(|d| d.id == download_id) {
+                dl.depends_on.retain(|d| d != depends_on_id);
+                return true;
+            }
+        }
+        false
     }
 
     /// Mark a download as no longer active (completed, errored, or paused).
@@ -194,6 +328,14 @@ impl DownloadQueue {
                 let _ = tx.send(QueueEvent::SlotAvailable);
             }
         }
+    }
+
+    /// Mark a download as successfully completed — records it so dependent
+    /// downloads can proceed. Call this instead of `mark_finished` when
+    /// a download reaches "Done" / "Complete" status.
+    pub fn mark_finished_success(&mut self, id: &str) {
+        self.completed_ids.insert(id.to_string());
+        self.mark_finished_with_notify(id, true);
     }
 
     /// Mark a download as actively running (called when starting directly, not via queue).
@@ -234,6 +376,8 @@ impl DownloadQueue {
             queued_count: self.queued_count(),
             queued_items,
             active_ids: self.active.clone(),
+            paused: self.paused,
+            blocked_ids: self.blocked_ids(),
         }
     }
 
@@ -438,6 +582,8 @@ pub async fn queue_processor(app: tauri::AppHandle, mut rx: mpsc::UnboundedRecei
                             let dl_headers_retry = dl.custom_headers.clone();
                             let checksum_retry = dl.expected_checksum.clone();
                             let retry_delay = dl.retry_delay_ms;
+                            let custom_segments = dl.custom_segments;
+                            let group = dl.group.clone();
 
                             // Spawn the download in its own task.
                             // NOTE: start_download_impl spawns background tasks and returns
@@ -465,6 +611,15 @@ pub async fn queue_processor(app: tauri::AppHandle, mut rx: mpsc::UnboundedRecei
                                         fresh_restart: dl.fresh_restart,
                                         retry_count: dl_retry_count,
                                         max_retries: dl_max_retries,
+                                    });
+                                }
+
+                                // Store per-download overrides for the engine to pick up
+                                if custom_segments.is_some() || group.is_some() {
+                                    let mut overrides = DOWNLOAD_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
+                                    overrides.insert(dl_id.clone(), DownloadOverrides {
+                                        custom_segments,
+                                        group: group.clone(),
                                     });
                                 }
 
@@ -503,6 +658,9 @@ pub async fn queue_processor(app: tauri::AppHandle, mut rx: mpsc::UnboundedRecei
                                             retry_count: dl_retry_count,
                                             max_retries: dl_max_retries,
                                             retry_delay_ms: 0,
+                                            depends_on: Vec::new(),
+                                            custom_segments,
+                                            group,
                                         };
                                         let mut queue = DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
                                         queue.requeue_failed(retry_item)
@@ -584,6 +742,9 @@ mod tests {
             retry_count: 0,
             max_retries: 3,
             retry_delay_ms: 0,
+            depends_on: Vec::new(),
+            custom_segments: None,
+            group: None,
         }
     }
 

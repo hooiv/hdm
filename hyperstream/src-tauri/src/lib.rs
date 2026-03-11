@@ -87,6 +87,7 @@ mod network_monitor;
 mod event_bus;
 mod event_sourcing;
 mod video_detector;
+mod bandwidth_history;
 
 use persistence::SavedDownload;
 
@@ -1525,7 +1526,7 @@ pub(crate) fn cancel_download_by_id(state: &AppState, id: &str) -> Result<bool, 
 
 pub(crate) fn control_active_download(state: &AppState, id: &str, action: &str) -> Result<bool, String> {
     match action {
-        "pause" => Ok(pause_download_by_id(state, id)),
+        "pause" => Ok(pause_download_cmd::pause_download_by_id(state, id)),
         "cancel" => cancel_download_by_id(state, id),
         _ => Err("unknown action".to_string()),
     }
@@ -1561,6 +1562,9 @@ fn enqueue_download(
     priority: Option<String>,
     expected_checksum: Option<String>,
     custom_headers: Option<std::collections::HashMap<String, String>>,
+    depends_on: Option<Vec<String>>,
+    custom_segments: Option<u32>,
+    group: Option<String>,
 ) -> Result<(), String> {
     if state.has_active_download_id(&id) {
         return Err(duplicate_download_id_error());
@@ -1574,6 +1578,13 @@ fn enqueue_download(
     let settings = settings::load_settings();
     let max_retries = settings.queue_retry_max_retries;
 
+    // If custom segments, store the override for session.rs to pick up
+    if let Some(segs) = custom_segments {
+        let segs = segs.clamp(1, 64);
+        let mut overrides = queue_manager::DOWNLOAD_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
+        overrides.insert(id.clone(), queue_manager::DownloadOverrides { custom_segments: Some(segs), group: None });
+    }
+
     let item = queue_manager::QueuedDownload {
         id,
         url,
@@ -1586,6 +1597,9 @@ fn enqueue_download(
         retry_count: 0,
         max_retries,
         retry_delay_ms: 0,
+        depends_on: depends_on.unwrap_or_default(),
+        custom_segments,
+        group,
     };
 
     let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1716,6 +1730,143 @@ fn clear_download_queue() -> Result<(), String> {
     drop(queue);
     queue_manager::persist_queue();
     Ok(())
+}
+
+// ─── Queue Pause / Resume / Dependencies / Per-Download Overrides ─────────
+
+#[tauri::command]
+fn pause_download_queue() -> Result<(), String> {
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    queue.pause();
+    Ok(())
+}
+
+#[tauri::command]
+fn resume_download_queue() -> Result<(), String> {
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    queue.resume();
+    Ok(())
+}
+
+#[tauri::command]
+fn add_download_dependency(download_id: String, depends_on_id: String) -> Result<bool, String> {
+    // Prevent circular dependency: A → B → A
+    {
+        let queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        // Simple cycle check: if depends_on_id itself depends on download_id
+        let status = queue.status();
+        for item in &status.queued_items {
+            if item.id == depends_on_id && item.depends_on.contains(&download_id) {
+                return Err("Circular dependency detected".to_string());
+            }
+        }
+    }
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let result = queue.add_dependency(&download_id, &depends_on_id);
+    drop(queue);
+    queue_manager::persist_queue();
+    Ok(result)
+}
+
+#[tauri::command]
+fn remove_download_dependency(download_id: String, depends_on_id: String) -> Result<bool, String> {
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let result = queue.remove_dependency(&download_id, &depends_on_id);
+    drop(queue);
+    queue_manager::persist_queue();
+    Ok(result)
+}
+
+#[tauri::command]
+fn enqueue_download_chain(
+    state: State<'_, AppState>,
+    downloads: Vec<serde_json::Value>,
+) -> Result<Vec<String>, String> {
+    // Enqueue a chain of downloads where each depends on the previous one.
+    // Input: [{id, url, path, priority?, expected_checksum?, custom_segments?, group?}, ...]
+    // Returns: list of IDs in chain order.
+    let settings = settings::load_settings();
+    let max_retries = settings.queue_retry_max_retries;
+    let mut ids = Vec::new();
+    let mut prev_id: Option<String> = None;
+
+    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+
+    for dl_json in &downloads {
+        let id = dl_json["id"].as_str().unwrap_or("").to_string();
+        let url = dl_json["url"].as_str().unwrap_or("").to_string();
+        let path = dl_json["path"].as_str().unwrap_or("").to_string();
+
+        if id.is_empty() || url.is_empty() || path.is_empty() {
+            return Err("Each download must have id, url, and path".to_string());
+        }
+        if state.has_active_download_id(&id) || queue.contains(&id) {
+            return Err(format!("Duplicate download ID: {}", id));
+        }
+
+        let prio = dl_json["priority"].as_str()
+            .map(|p| queue_manager::DownloadPriority::from_str(p))
+            .unwrap_or(queue_manager::DownloadPriority::Normal);
+        let custom_segments = dl_json["custom_segments"].as_u64().map(|v| v as u32);
+        let group = dl_json["group"].as_str().map(|s| s.to_string());
+
+        let mut depends_on = Vec::new();
+        if let Some(prev) = &prev_id {
+            depends_on.push(prev.clone());
+        }
+
+        let item = queue_manager::QueuedDownload {
+            id: id.clone(),
+            url,
+            path,
+            priority: prio,
+            added_at: chrono::Utc::now().timestamp_millis(),
+            custom_headers: None,
+            expected_checksum: dl_json["expected_checksum"].as_str().map(|s| s.to_string()),
+            fresh_restart: false,
+            retry_count: 0,
+            max_retries,
+            retry_delay_ms: 0,
+            depends_on,
+            custom_segments,
+            group,
+        };
+
+        queue.enqueue(item);
+        ids.push(id.clone());
+        prev_id = Some(id);
+    }
+
+    drop(queue);
+    queue_manager::persist_queue();
+    Ok(ids)
+}
+
+#[tauri::command]
+fn set_download_segments(download_id: String, segments: u32) -> Result<(), String> {
+    let segments = segments.clamp(1, 64);
+    let mut overrides = queue_manager::DOWNLOAD_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = overrides.entry(download_id).or_insert_with(queue_manager::DownloadOverrides::default);
+    entry.custom_segments = Some(segments);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_queue_groups() -> Vec<String> {
+    let queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    queue.groups()
+}
+
+// ─── Bandwidth History Commands ──────────────────────────────────────────
+
+#[tauri::command]
+fn get_bandwidth_history(since_secs: Option<u64>) -> bandwidth_history::BandwidthStats {
+    bandwidth_history::get_stats(since_secs.unwrap_or(3600))
+}
+
+#[tauri::command]
+fn get_bandwidth_samples(since_secs: u64) -> Vec<bandwidth_history::SpeedSample> {
+    bandwidth_history::get_samples(since_secs)
 }
 
 // ─── Integrity Verification Commands ─────────────────────────────────────
@@ -4102,6 +4253,16 @@ fn classify_network_requests(
             move_queue_item_to_front,
             set_max_concurrent_downloads,
             clear_download_queue,
+            pause_download_queue,
+            resume_download_queue,
+            add_download_dependency,
+            remove_download_dependency,
+            enqueue_download_chain,
+            set_download_segments,
+            get_queue_groups,
+            // Bandwidth History
+            get_bandwidth_history,
+            get_bandwidth_samples,
             // Integrity Verification
             verify_download_checksum,
             compute_file_checksums,
@@ -4130,6 +4291,9 @@ fn classify_network_requests(
             speed_profiles::start_speed_profile_scheduler();
             bandwidth_allocator::start_rebalancer();
             crash_recovery::recover_on_startup(&handle);
+            // Initialize bandwidth history (restore persisted data + start sampler)
+            bandwidth_history::restore_history();
+            bandwidth_history::start_bandwidth_sampler(handle.clone());
             // Initialize event bus and event sourcing
             event_bus::init_event_bus(&handle);
             app.manage(std::sync::Arc::new(event_sourcing::SharedLog::new(&handle)));
