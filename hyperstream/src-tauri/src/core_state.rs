@@ -12,6 +12,7 @@ pub struct Payload {
     pub id: String,
     pub downloaded: u64,
     pub total: u64,
+    pub speed_bps: u64,
     pub segments: Vec<SlimSegment>,
 }
 
@@ -31,6 +32,7 @@ pub struct HlsSession {
     pub segment_sizes: Vec<u64>,
     /// Cumulative number of bytes written so far.
     pub downloaded: Arc<std::sync::atomic::AtomicU64>,
+    pub speed_bps: Arc<std::sync::atomic::AtomicU64>,
     pub stop_tx: broadcast::Sender<()>,
     pub file_writer: Arc<Mutex<std::fs::File>>,
 }
@@ -204,6 +206,7 @@ mod tests {
                 segments: Vec::new(),
                 segment_sizes: Vec::new(),
                 downloaded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                speed_bps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 stop_tx: hls_stop_tx,
                 file_writer: make_temp_writer("hls"),
             },

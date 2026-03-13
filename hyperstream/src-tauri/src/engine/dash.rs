@@ -908,15 +908,12 @@ async fn download_track(
                     id: id_clone.clone(),
                     downloaded: current_dl,
                     total: global_total,
+                    speed_bps: current_speed,
                     segments: vec![], // dash.rs logic doesn't populate segments state yet
                 };
-                let mut value = serde_json::to_value(&payload).unwrap_or(serde_json::json!(null));
-                if let Some(obj) = value.as_object_mut() {
-                    obj.insert("speed_bps".to_string(), serde_json::json!(current_speed));
-                }
                 
-                let _ = app_clone.emit("download_progress", value.clone());
-                let _ = crate::http_server::get_event_sender().send(value);
+                let _ = app_clone.emit("download_progress", payload.clone());
+                let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
 
                 // Check stop signal
                 if stop_rx.try_recv().is_ok() {

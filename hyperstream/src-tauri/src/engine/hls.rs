@@ -459,6 +459,8 @@ pub(crate) async fn start_hls_download_impl(
     let file = initialization::setup_file(&path, resume_from, total_size)?;
     let file_mutex = file;
     let downloaded_atomic = Arc::new(std::sync::atomic::AtomicU64::new(resume_from));
+    let speed_bps = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let bytes_in_window = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // 5. register HLS session in state
     let (stop_tx, _) = broadcast::channel(1);
@@ -468,6 +470,7 @@ pub(crate) async fn start_hls_download_impl(
         segments: stream.segments.clone(),
         segment_sizes: sizes.clone(),
         downloaded: downloaded_atomic.clone(),
+        speed_bps: speed_bps.clone(),
         stop_tx: stop_tx.clone(),
         file_writer: file_mutex.clone(),
     };
@@ -506,25 +509,13 @@ pub(crate) async fn start_hls_download_impl(
         }
     });
 
-    // ── 6. Disk writer thread (FIX: DiskWriter::new drives the loop internally) ─
+    // ── 6. Disk writer thread (FIX: use direct io_error_flag) ─
     let (tx, rx) = std::sync::mpsc::channel::<crate::downloader::disk::WriteRequest>();
-    let file_writer_clone = file_mutex.clone();
-    let disk_io_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let disk_io_error_bridge = disk_io_error.clone();
+    let mut writer = crate::downloader::disk::DiskWriter::new(file_mutex.clone(), rx);
+    let disk_io_error = writer.io_error_flag(); // Shared atomic bool
+    
     std::thread::spawn(move || {
-        // DiskWriter::new() consumes the receiver and runs its own internal
-        // write loop blocking until the channel closes. We only need to
-        // bridge its error flag back to our shared AtomicBool.
-        let writer = crate::downloader::disk::DiskWriter::new(file_writer_clone, rx);
-        let writer_flag = writer.io_error_flag();
-        // Busy-poll the writer flag (low-cost: we sleep 200ms between checks)
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            if writer_flag.load(Ordering::Acquire) {
-                disk_io_error_bridge.store(true, Ordering::Release);
-                break;
-            }
-        }
+        writer.run();
     });
 
     // ── 7. Shared AES-128 key cache (FIX: one cache for ALL segment tasks) ─
@@ -534,8 +525,6 @@ pub(crate) async fn start_hls_download_impl(
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     // ── 8. Speed measurement: count bytes in a rolling 1-second window ─────
-    let bytes_in_window = Arc::new(AtomicU64::new(0));
-    let speed_bps = Arc::new(AtomicU64::new(0));
     {
         let b_w = bytes_in_window.clone();
         let spd = speed_bps.clone();
@@ -737,11 +726,12 @@ pub(crate) async fn start_hls_download_impl(
 
                 // ── Emit progress with speed ────────────────────────────
                 let current_dl = downloaded_clone.load(Ordering::Relaxed);
-                let _current_speed = speed_clone.load(Ordering::Relaxed);
+                let current_speed = speed_clone.load(Ordering::Relaxed);
                 let payload = crate::core_state::Payload {
                     id: id_clone.clone(),
                     downloaded: current_dl,
                     total: total_size,
+                    speed_bps: current_speed,
                     segments: vec![],
                 };
                 let _ = app_clone.emit("download_progress", payload.clone());
@@ -932,9 +922,12 @@ pub(crate) async fn start_hls_download_impl(
                             id: id.clone(),
                             downloaded: downloaded_atomic.load(Ordering::Relaxed),
                             total: 0, // live: total unknown
+                            speed_bps: speed_bps.load(Ordering::Relaxed),
                             segments: vec![],
                         };
                         let _ = app.emit("download_progress", payload.clone());
+                        let _ = crate::http_server::get_event_sender()
+                            .send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
                     }
                 }
             }

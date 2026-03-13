@@ -775,6 +775,7 @@ pub(crate) async fn start_download_impl(
                 id: id.clone(),
                 downloaded: total_size,
                 total: total_size,
+                speed_bps: 0,
                 segments: vec![],
             };
             let _ = app.emit("download_progress", payload.clone());
@@ -1458,10 +1459,12 @@ pub(crate) async fn start_download_impl(
                         s.speed_bps
                     )).collect();
 
+                    let total_speed: u64 = segments.iter().map(|s| s.speed_bps).sum();
                     let payload = Payload { 
                         id: id_monitor.clone(), 
                         downloaded: d, 
                         total: total_size,
+                        speed_bps: total_speed,
                         segments: slim_segments.clone()
                     };
                     let _ = window_monitor.emit("download_progress", payload.clone());
@@ -1754,6 +1757,7 @@ pub(crate) async fn start_download_impl(
                          id: id_worker.clone(),
                          downloaded: total_downloaded,
                          total: 0, 
+                         speed_bps: 0,
                          segments: vec![],
                      };
                      let _ = app_handle_clone.emit("download_progress", payload.clone());

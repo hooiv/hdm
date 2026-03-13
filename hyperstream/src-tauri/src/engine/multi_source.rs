@@ -838,10 +838,12 @@ pub async fn start_multi_source_download(
                             s.id, s.start_byte, s.end_byte, s.downloaded_cursor, s.state as u8, s.speed_bps
                         )).collect();
 
+                        let total_speed: u64 = segments.iter().map(|s| s.speed_bps).sum();
                         let payload = Payload {
                             id: id_monitor.clone(),
                             downloaded: d,
                             total: total_size,
+                            speed_bps: total_speed,
                             segments: slim_segments,
                         };
                         let _ = app_monitor.emit("download_progress", payload.clone());
@@ -1006,43 +1008,96 @@ pub async fn start_multi_source_download(
 
         let expected_checksum = expected_checksum.clone();
         tokio::spawn(async move {
-            let (start, end, seg_id) = {
+            let mut current_seg_id = {
                 let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
                 let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
                 let seg = &mut segs[i];
                 seg.state = crate::downloader::structures::SegmentState::Downloading;
-                (seg.downloaded_cursor, seg.end_byte, seg.id)
+                seg.id
             };
 
-            if end == 0 || start >= end {
-                return;
-            }
-
-            let mut current_pos = start;
-            let mut retry_count: u32 = 0;
-            const MAX_RETRIES: u32 = 5;
-            let mut bytes_since_cursor_update: u64 = 0;
-            const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024;
-
-            // Pick initial mirror for this worker
-            let initial_request_requires_range = current_pos > 0 || end < total_size_worker;
-            let mut current_mirror = match if initial_request_requires_range {
-                pool_worker.pick_best_matching(true)
-            } else {
-                Some(pool_worker.pick_best())
-            } {
-                Some(url) if !url.is_empty() => url,
-                _ => {
+            'worker: loop {
+                let (start, mut end, seg_id) = {
                     let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
                     let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
-                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
-                        seg.downloaded_cursor = current_pos;
-                        seg.state = crate::downloader::structures::SegmentState::Error;
+                    if let Some(seg) = segs.iter_mut().find(|s| s.id == current_seg_id) {
+                        (seg.downloaded_cursor, seg.end_byte, seg.id)
+                    } else {
+                        break 'worker;
                     }
-                    crate::media::sounds::play_error();
-                    return;
+                };
+
+                if end == 0 || start >= end {
+                    // Start stealing logic via completion path if already done
+                    current_seg_id = {
+                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                        let mut max_remaining = 0;
+                        let mut max_idx = None;
+                        for (idx, seg) in segs.iter().enumerate() {
+                            if seg.state != crate::downloader::structures::SegmentState::Complete 
+                               && seg.state != crate::downloader::structures::SegmentState::Error {
+                                let remaining = seg.end_byte.saturating_sub(seg.downloaded_cursor);
+                                if remaining > max_remaining {
+                                    max_remaining = remaining;
+                                    max_idx = Some(idx);
+                                }
+                            }
+                        }
+
+                        if max_remaining >= 2 * 1024 * 1024 {
+                            if let Some(idx) = max_idx {
+                                let split_point = segs[idx].downloaded_cursor + (max_remaining / 2);
+                                let target_end = segs[idx].end_byte;
+                                segs[idx].end_byte = split_point; // Split slow segment
+
+                                let new_id = segs.iter().map(|s| s.id).max().unwrap_or(0) + 1;
+                                let new_seg = crate::downloader::structures::Segment {
+                                    id: new_id,
+                                    start_byte: split_point,
+                                    end_byte: target_end,
+                                    downloaded_cursor: split_point,
+                                    state: crate::downloader::structures::SegmentState::Downloading,
+                                    last_update: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64),
+                                    speed_bps: 0,
+                                };
+                                segs.push(new_seg);
+                                new_id
+                            } else {
+                                break 'worker;
+                            }
+                        } else {
+                            break 'worker;
+                        }
+                    };
+                    continue 'worker;
                 }
-            };
+
+                let mut current_pos = start;
+                let mut retry_count: u32 = 0;
+                const MAX_RETRIES: u32 = 5;
+                let mut bytes_since_cursor_update: u64 = 0;
+                const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024;
+
+                // Pick initial mirror for this worker
+                let initial_request_requires_range = current_pos > 0 || end < total_size_worker;
+                let mut current_mirror = match if initial_request_requires_range {
+                    pool_worker.pick_best_matching(true)
+                } else {
+                    Some(pool_worker.pick_best())
+                } {
+                    Some(url) if !url.is_empty() => url,
+                    _ => {
+                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                        if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                            seg.downloaded_cursor = current_pos;
+                            seg.state = crate::downloader::structures::SegmentState::Error;
+                        }
+                        crate::media::sounds::play_error();
+                        break 'worker;
+                    }
+                };
             let mut chunk_start_time = std::time::Instant::now();
             let mut chunk_bytes: u64 = 0;
 
@@ -1055,7 +1110,7 @@ pub async fn start_multi_source_download(
                         seg.downloaded_cursor = current_pos;
                         seg.state = crate::downloader::structures::SegmentState::Paused;
                     }
-                    break;
+                    break 'worker;
                 }
 
                 // Disk I/O error check
@@ -1076,12 +1131,51 @@ pub async fn start_multi_source_download(
                     if chunk_bytes > 0 {
                         pool_worker.record_success(&current_mirror, chunk_bytes, elapsed);
                     }
-                    let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
-                    if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
-                        seg.state = crate::downloader::structures::SegmentState::Complete;
+                    {
+                        let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                        if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
+                            seg.state = crate::downloader::structures::SegmentState::Complete;
+                            seg.downloaded_cursor = current_pos;
+                        }
+
+                        // Dynamic Stealing Mechanism
+                        let mut max_remaining = 0;
+                        let mut max_idx = None;
+                        for (idx, seg) in segs.iter().enumerate() {
+                            if seg.state != crate::downloader::structures::SegmentState::Complete 
+                               && seg.state != crate::downloader::structures::SegmentState::Error {
+                                let remaining = seg.end_byte.saturating_sub(seg.downloaded_cursor);
+                                if remaining > max_remaining {
+                                    max_remaining = remaining;
+                                    max_idx = Some(idx);
+                                }
+                            }
+                        }
+
+                        if max_remaining >= 2 * 1024 * 1024 { // Split slow heavily loaded segments 2MB+
+                            if let Some(idx) = max_idx {
+                                let split_point = segs[idx].downloaded_cursor + (max_remaining / 2);
+                                let target_end = segs[idx].end_byte;
+                                segs[idx].end_byte = split_point;
+
+                                let new_id = segs.iter().map(|s| s.id).max().unwrap_or(0) + 1;
+                                let new_seg = crate::downloader::structures::Segment {
+                                    id: new_id,
+                                    start_byte: split_point,
+                                    end_byte: target_end,
+                                    downloaded_cursor: split_point,
+                                    state: crate::downloader::structures::SegmentState::Downloading,
+                                    last_update: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64),
+                                    speed_bps: 0,
+                                };
+                                segs.push(new_seg);
+                                current_seg_id = new_id;
+                                continue 'worker; // Loop to fetch newly dynamically generated seg block
+                            }
+                        }
                     }
-                    break;
+                    break 'worker;
                 }
 
                 let requires_range_request = current_pos > 0 || end < total_size_worker;
@@ -1150,7 +1244,7 @@ pub async fn start_multi_source_download(
                                 seg.state = crate::downloader::structures::SegmentState::Error;
                             }
                             crate::media::sounds::play_error();
-                            break;
+                            break 'worker;
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         continue;
@@ -1206,7 +1300,7 @@ pub async fn start_multi_source_download(
                         expected_checksum: expected_checksum.clone(),
                     });
                     crate::media::sounds::play_error();
-                    return;
+                    break 'worker;
                 }
 
                 // Handle 429/503 rate limiting
@@ -1265,7 +1359,7 @@ pub async fn start_multi_source_download(
                         seg.state = crate::downloader::structures::SegmentState::Error;
                     }
                     crate::media::sounds::play_error();
-                    break;
+                    break 'worker;
                 }
 
                 if !response.status().is_success() {
@@ -1296,7 +1390,7 @@ pub async fn start_multi_source_download(
                             seg.state = crate::downloader::structures::SegmentState::Error;
                         }
                         crate::media::sounds::play_error();
-                        break;
+                        break 'worker;
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     continue;
@@ -1333,7 +1427,7 @@ pub async fn start_multi_source_download(
                         seg.state = crate::downloader::structures::SegmentState::Error;
                     }
                     crate::media::sounds::play_error();
-                    break;
+                    break 'worker;
                 }
 
                 // Stream response body
@@ -1386,6 +1480,7 @@ pub async fn start_multi_source_download(
                                         let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
                                         if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
                                             seg.downloaded_cursor = current_pos;
+                                            end = seg.end_byte; // Dynamically adopt shortened end if stolen from
                                         }
                                     }
 
@@ -1415,6 +1510,7 @@ pub async fn start_multi_source_download(
                     }
                 }
             }
+            } // END 'worker LOOP
         });
     }
 
