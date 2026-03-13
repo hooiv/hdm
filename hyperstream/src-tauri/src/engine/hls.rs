@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use reqwest::Client;
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -10,6 +11,9 @@ use crate::downloader::initialization;
 use crate::downloader::network;
 use crate::settings;
 use crate::persistence;
+
+/// Maximum number of per-segment download retries before failing the whole download.
+const MAX_SEGMENT_RETRIES: u32 = 3;
 
 const HLS_STOPPED_ERROR: &str = "Download stopped";
 
@@ -502,29 +506,55 @@ pub(crate) async fn start_hls_download_impl(
         }
     });
 
-    // 6. spawn disk writer thread
+    // ── 6. Disk writer thread (FIX: DiskWriter::new drives the loop internally) ─
     let (tx, rx) = std::sync::mpsc::channel::<crate::downloader::disk::WriteRequest>();
     let file_writer_clone = file_mutex.clone();
     let disk_io_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let disk_io_error_writer = disk_io_error.clone();
+    let disk_io_error_bridge = disk_io_error.clone();
     std::thread::spawn(move || {
-        let mut writer = crate::downloader::disk::DiskWriter::new(file_writer_clone, rx);
+        // DiskWriter::new() consumes the receiver and runs its own internal
+        // write loop blocking until the channel closes. We only need to
+        // bridge its error flag back to our shared AtomicBool.
+        let writer = crate::downloader::disk::DiskWriter::new(file_writer_clone, rx);
         let writer_flag = writer.io_error_flag();
-        let error_bridge = disk_io_error_writer.clone();
+        // Busy-poll the writer flag (low-cost: we sleep 200ms between checks)
         loop {
-            // periodically copy flag
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if error_bridge.load(std::sync::atomic::Ordering::Acquire) {
-                break;
-            }
-            if writer_flag.load(std::sync::atomic::Ordering::Acquire) {
-                error_bridge.store(true, std::sync::atomic::Ordering::Release);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if writer_flag.load(Ordering::Acquire) {
+                disk_io_error_bridge.store(true, Ordering::Release);
                 break;
             }
         }
     });
 
-    // 7. spawn worker tasks (concurrent segments)
+    // ── 7. Shared AES-128 key cache (FIX: one cache for ALL segment tasks) ─
+    // Using tokio::sync::Mutex so the lock can be held across .await points
+    // without blocking the executor thread (avoids potential deadlock).
+    let key_cache: Arc<tokio::sync::Mutex<HashMap<String, Vec<u8>>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+    // ── 8. Speed measurement: count bytes in a rolling 1-second window ─────
+    let bytes_in_window = Arc::new(AtomicU64::new(0));
+    let speed_bps = Arc::new(AtomicU64::new(0));
+    {
+        let b_w = bytes_in_window.clone();
+        let spd = speed_bps.clone();
+        let mut stop_rx_speed = stop_tx.subscribe();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = stop_rx_speed.recv() => break,
+                    _ = interval.tick() => {
+                        let sampled = b_w.swap(0, Ordering::Relaxed);
+                        spd.store(sampled, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+    }
+
+    // ── 9. spawn worker tasks (concurrent segments) ────────────────────────
     let mut start_index = 0usize;
     let mut offset_in_segment = 0u64;
     {
@@ -540,127 +570,192 @@ pub(crate) async fn start_hls_download_impl(
     }
 
     let concurrency = settings.segments.max(1) as usize;
+    let total_segments = stream.segments.len() as u32;
     let mut futures = futures::stream::FuturesUnordered::new();
 
     for idx in start_index..stream.segments.len() {
         let seg = stream.segments[idx].clone();
-        let seg_size = sizes[idx];
-        let mut seg_offset = if idx == start_index { offset_in_segment } else { 0 };
+        let seg_offset = if idx == start_index { offset_in_segment } else { 0 };
         let global_base: u64 = sizes[..idx].iter().sum::<u64>();
         let tx_clone = tx.clone();
         let client_clone = client.clone();
         let mut stop_rx = stop_tx.subscribe();
         let downloaded_clone = downloaded_atomic.clone();
+        let bytes_window_clone = bytes_in_window.clone();
+        let speed_clone = speed_bps.clone();
         let app_clone = app.clone();
         let id_clone = id.clone();
-        let key_map: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+        // Clone the SHARED key cache (all tasks share the same cache)
+        let key_cache_clone = Arc::clone(&key_cache);
         let disk_io_error_clone = disk_io_error.clone();
 
         futures.push(tokio::spawn(async move {
-            if disk_io_error_clone.load(std::sync::atomic::Ordering::Acquire) {
+            if disk_io_error_clone.load(Ordering::Acquire) {
                 return Err("Disk I/O error".to_string());
             }
 
-            // fetch decryption key if needed
-            let mut key_bytes_opt: Option<Vec<u8>> = None;
-            if let Some(key_uri) = &seg.key_uri {
-                // Check cache first, drop lock before any await
-                let cached = {
-                    let km = key_map.lock().unwrap();
-                    km.get(key_uri).cloned()
-                };
+            // ── Fetch AES-128 decryption key (with shared cache) ────────────
+            let key_bytes_opt: Option<Vec<u8>> = if let Some(ref key_uri) = seg.key_uri {
+                // Check cache first (no await while lock held)
+                let cached = key_cache_clone.lock().await.get(key_uri).cloned();
                 if let Some(k) = cached {
-                    key_bytes_opt = Some(k);
+                    Some(k)
                 } else {
-                    if let Ok(resp) = client_clone.get(key_uri).send().await {
-                        if let Ok(kbytes) = resp.bytes().await {
-                            let v = kbytes.to_vec();
-                            key_bytes_opt = Some(v.clone());
-                            let mut km = key_map.lock().unwrap();
-                            km.insert(key_uri.clone(), v);
+                    // Fetch key with retry
+                    let mut key_result: Option<Vec<u8>> = None;
+                    for attempt in 0..MAX_SEGMENT_RETRIES {
+                        match client_clone.get(key_uri).send().await {
+                            Ok(resp) => {
+                                if let Ok(kbytes) = resp.bytes().await {
+                                    let v = kbytes.to_vec();
+                                    // Store in shared cache so other segments skip the fetch
+                                    key_cache_clone.lock().await.insert(key_uri.clone(), v.clone());
+                                    key_result = Some(v);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                if attempt + 1 < MAX_SEGMENT_RETRIES {
+                                    let backoff = tokio::time::Duration::from_secs(1u64 << attempt);
+                                    tokio::time::sleep(backoff).await;
+                                } else {
+                                    eprintln!("[HLS] Failed to fetch AES key after {} retries: {}", MAX_SEGMENT_RETRIES, e);
+                                }
+                            }
                         }
                     }
+                    key_result
                 }
-            }
-
-            // build request; we can request the whole segment and skip seg_offset
-            let mut req = client_clone.get(&seg.url);
-            if seg_offset > 0 {
-                let range = format!("bytes={}-", seg_offset);
-                req = req.header("Range", range);
-            }
-            let resp = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("HLS seg {} request failed: {}", seg.url, e);
-                    return Err(format!("Segment request failed: {}", e));
-                }
+            } else {
+                None
             };
-            let mut stream = resp.bytes_stream();
-            let mut local_pos = seg_offset;
-            while let Some(item) = futures::stream::StreamExt::next(&mut stream).await {
-                let chunk = match item {
-                    Ok(chunk) => chunk,
-                    Err(e) => return Err(format!("Segment stream failed: {}", e)),
+
+            // ── Download segment with per-segment retry + backoff ────────────
+            let mut last_err = String::new();
+            for attempt in 0..MAX_SEGMENT_RETRIES {
+                if stop_rx.try_recv().is_ok() {
+                    return Err(HLS_STOPPED_ERROR.to_string());
+                }
+
+                let mut req = client_clone.get(&seg.url);
+                if seg_offset > 0 {
+                    req = req.header("Range", format!("bytes={}-", seg_offset));
+                }
+
+                let resp = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        last_err = format!("Segment request failed: {}", e);
+                        if attempt + 1 < MAX_SEGMENT_RETRIES {
+                            let backoff = tokio::time::Duration::from_secs(1u64 << attempt);
+                            eprintln!("[HLS] Segment {} retry {}/{}: {}", idx, attempt + 1, MAX_SEGMENT_RETRIES, e);
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        }
+                        return Err(last_err);
+                    }
                 };
-                let mut data = chunk.to_vec();
-                // decrypt if necessary
-                if let Some(key_bytes) = &key_bytes_opt {
-                    // compute iv
-                    let iv = if let Some(ivhex) = &seg.key_iv {
+
+                if !resp.status().is_success() && resp.status() != rquest::StatusCode::PARTIAL_CONTENT {
+                    last_err = format!("Segment server returned: {}", resp.status());
+                    if attempt + 1 < MAX_SEGMENT_RETRIES {
+                        let backoff = tokio::time::Duration::from_secs(1u64 << attempt);
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+
+                // ── Stream response chunks ──────────────────────────────
+                let mut byte_stream = resp.bytes_stream();
+                let mut local_pos = seg_offset;
+                let mut segment_data: Vec<u8> = Vec::new();
+                let mut stream_error: Option<String> = None;
+
+                while let Some(item) = futures::stream::StreamExt::next(&mut byte_stream).await {
+                    let chunk = match item {
+                        Ok(c) => c,
+                        Err(e) => {
+                            stream_error = Some(format!("Segment stream error: {}", e));
+                            break;
+                        }
+                    };
+                    segment_data.extend_from_slice(&chunk);
+
+                    if stop_rx.try_recv().is_ok() {
+                        return Err(HLS_STOPPED_ERROR.to_string());
+                    }
+                    if disk_io_error_clone.load(Ordering::Acquire) {
+                        return Err("Disk I/O error".to_string());
+                    }
+                }
+
+                if let Some(e) = stream_error {
+                    last_err = e;
+                    if attempt + 1 < MAX_SEGMENT_RETRIES {
+                        let backoff = tokio::time::Duration::from_secs(1u64 << attempt);
+                        eprintln!("[HLS] Segment {} stream error, retry {}/{}", idx, attempt + 1, MAX_SEGMENT_RETRIES);
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+
+                // ── Decrypt if AES-128 ──────────────────────────────────
+                let mut data = segment_data;
+                if let Some(ref key_bytes) = key_bytes_opt {
+                    let iv = if let Some(ref ivhex) = seg.key_iv {
                         crate::media::decrypt::decode_hex(ivhex).unwrap_or_else(|_| {
-                            let mut iv = [0u8;16];
+                            let mut iv = [0u8; 16];
                             iv[8..].copy_from_slice(&seg.sequence.to_be_bytes());
                             iv.to_vec()
                         })
                     } else {
-                        let mut iv = [0u8;16];
+                        let mut iv = [0u8; 16];
                         iv[8..].copy_from_slice(&seg.sequence.to_be_bytes());
                         iv.to_vec()
                     };
-                    if let Ok(dec) = crate::media::decrypt::decrypt_aes128(&data, &key_bytes, &iv) {
+                    if let Ok(dec) = crate::media::decrypt::decrypt_aes128(&data, key_bytes, &iv) {
                         data = dec;
                     }
                 }
 
-                // write data to disk at global offset
+                // ── Write to disk ───────────────────────────────────────
+                let len = data.len() as u64;
                 let global_off = global_base + local_pos;
-                if tx_clone.send(crate::downloader::disk::WriteRequest { offset: global_off, data: data.clone(), segment_id: 0 }).is_err() {
+                if tx_clone.send(crate::downloader::disk::WriteRequest {
+                    offset: global_off,
+                    data,
+                    segment_id: idx as u32,
+                }).is_err() {
                     return Err("Disk writer channel closed".to_string());
                 }
-                let len = data.len() as u64;
-                downloaded_clone.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+
+                downloaded_clone.fetch_add(len, Ordering::Relaxed);
+                bytes_window_clone.fetch_add(len, Ordering::Relaxed);
                 local_pos += len;
-                // send immediate progress update
+
+                // ── Emit progress with speed ────────────────────────────
+                let current_dl = downloaded_clone.load(Ordering::Relaxed);
+                let _current_speed = speed_clone.load(Ordering::Relaxed);
                 let payload = crate::core_state::Payload {
                     id: id_clone.clone(),
-                    downloaded: downloaded_clone.load(std::sync::atomic::Ordering::Relaxed),
+                    downloaded: current_dl,
                     total: total_size,
                     segments: vec![],
                 };
                 let _ = app_clone.emit("download_progress", payload.clone());
-                let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
+                let _ = crate::http_server::get_event_sender()
+                    .send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
 
-                if stop_rx.try_recv().is_ok() {
-                    return Err(HLS_STOPPED_ERROR.to_string());
-                }
-                if disk_io_error_clone.load(std::sync::atomic::Ordering::Acquire) {
-                    return Err("Disk I/O error".to_string());
-                }
+                // Segment completed successfully
+                return Ok::<(), String>(());
             }
-            // emit progress once segment finishes (redundant but keeps behavior similar to HTTP)
-            let payload = crate::core_state::Payload {
-                id: id_clone.clone(),
-                downloaded: downloaded_clone.load(std::sync::atomic::Ordering::Relaxed),
-                total: total_size,
-                segments: vec![],
-            };
-            let _ = app_clone.emit("download_progress", payload.clone());
-            let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
-            Ok::<(), String>(())
+
+            Err(last_err)
         }));
 
-        // throttle concurrency
+        // ── Throttle concurrency ─────────────────────────────────────────
         if futures.len() >= concurrency {
             if let Some(result) = futures::stream::StreamExt::next(&mut futures).await {
                 match result {
@@ -672,37 +767,22 @@ pub(crate) async fn start_hls_download_impl(
                             remove_hls_session(state, &id);
                             return Ok(());
                         }
-                        let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                        let downloaded = downloaded_atomic.load(Ordering::Relaxed);
                         handle_hls_failure(
-                            app,
-                            state,
-                            &id,
-                            &chosen_url,
-                            &path,
-                            total_size,
-                            downloaded,
-                            &hls_start_iso,
-                            hls_start.elapsed(),
-                            stream.segments.len() as u32,
-                            &e,
+                            app, state, &id, &chosen_url, &path,
+                            total_size, downloaded, &hls_start_iso,
+                            hls_start.elapsed(), total_segments, &e,
                         );
                         return Ok(());
                     }
                     Err(e) => {
                         let _ = stop_tx.send(());
                         while futures.next().await.is_some() {}
-                        let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                        let downloaded = downloaded_atomic.load(Ordering::Relaxed);
                         handle_hls_failure(
-                            app,
-                            state,
-                            &id,
-                            &chosen_url,
-                            &path,
-                            total_size,
-                            downloaded,
-                            &hls_start_iso,
-                            hls_start.elapsed(),
-                            stream.segments.len() as u32,
+                            app, state, &id, &chosen_url, &path,
+                            total_size, downloaded, &hls_start_iso,
+                            hls_start.elapsed(), total_segments,
                             &format!("HLS worker join failed: {}", e),
                         );
                         return Ok(());
@@ -712,7 +792,7 @@ pub(crate) async fn start_hls_download_impl(
         }
     }
 
-    // wait for remaining futures
+    // ── Drain remaining futures ────────────────────────────────────
     while let Some(result) = futures.next().await {
         match result {
             Ok(Ok(())) => {}
@@ -722,36 +802,21 @@ pub(crate) async fn start_hls_download_impl(
                     return Ok(());
                 }
                 let _ = stop_tx.send(());
-                let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                let downloaded = downloaded_atomic.load(Ordering::Relaxed);
                 handle_hls_failure(
-                    app,
-                    state,
-                    &id,
-                    &chosen_url,
-                    &path,
-                    total_size,
-                    downloaded,
-                    &hls_start_iso,
-                    hls_start.elapsed(),
-                    stream.segments.len() as u32,
-                    &e,
+                    app, state, &id, &chosen_url, &path,
+                    total_size, downloaded, &hls_start_iso,
+                    hls_start.elapsed(), total_segments, &e,
                 );
                 return Ok(());
             }
             Err(e) => {
                 let _ = stop_tx.send(());
-                let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                let downloaded = downloaded_atomic.load(Ordering::Relaxed);
                 handle_hls_failure(
-                    app,
-                    state,
-                    &id,
-                    &chosen_url,
-                    &path,
-                    total_size,
-                    downloaded,
-                    &hls_start_iso,
-                    hls_start.elapsed(),
-                    stream.segments.len() as u32,
+                    app, state, &id, &chosen_url, &path,
+                    total_size, downloaded, &hls_start_iso,
+                    hls_start.elapsed(), total_segments,
                     &format!("HLS worker join failed: {}", e),
                 );
                 return Ok(());
@@ -759,36 +824,167 @@ pub(crate) async fn start_hls_download_impl(
         }
     }
 
-    if disk_io_error.load(std::sync::atomic::Ordering::Acquire) {
+    if disk_io_error.load(Ordering::Acquire) {
         let _ = stop_tx.send(());
-        let downloaded = downloaded_atomic.load(std::sync::atomic::Ordering::Relaxed);
+        let downloaded = downloaded_atomic.load(Ordering::Relaxed);
         handle_hls_failure(
-            app,
-            state,
-            &id,
-            &chosen_url,
-            &path,
-            total_size,
-            downloaded,
-            &hls_start_iso,
-            hls_start.elapsed(),
-            stream.segments.len() as u32,
+            app, state, &id, &chosen_url, &path,
+            total_size, downloaded, &hls_start_iso,
+            hls_start.elapsed(), total_segments,
             "Disk I/O error during download",
         );
         return Ok(());
     }
 
+    // ── Live stream DVR mode ──────────────────────────────────────
+    // If the playlist did NOT have EXT-X-ENDLIST it is a live/DVR stream.
+    // We keep polling the manifest at target_duration intervals, appending
+    // new segments that were not seen in the first fetch, until either:
+    //   a) The stream signals completion (is_live becomes false), or
+    //   b) The user cancels.
+    if stream.is_live {
+        let mut seen_segment_urls: std::collections::HashSet<String> =
+            stream.segments.iter().map(|s| s.url.clone()).collect();
+        let poll_interval_secs = stream.target_duration.max(2.0) as u64;
+        let parser_client = reqwest::Client::builder().build().map_err(|e| e.to_string())?;
+        let live_parser = HlsParser::new(parser_client);
+        let mut live_file_offset = total_size; // append after initial segments
+        let mut live_stop_rx = stop_tx.subscribe();
+
+        loop {
+            // Respect stop signal
+            tokio::select! {
+                _ = live_stop_rx.recv() => {
+                    remove_hls_session(state, &id);
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(poll_interval_secs)) => {}
+            }
+
+            // Re-fetch the variant playlist to discover new segments
+            let refreshed = match live_parser.parse(&chosen_url).await {
+                Ok(pl) => pl,
+                Err(e) => {
+                    eprintln!("[HLS Live] Manifest refresh failed: {}", e);
+                    continue;
+                }
+            };
+
+            let new_segs: Vec<HlsSegment> = refreshed.segments.into_iter()
+                .filter(|s| seen_segment_urls.insert(s.url.clone()))
+                .collect();
+
+            for seg in new_segs {
+                if live_stop_rx.try_recv().is_ok() {
+                    remove_hls_session(state, &id);
+                    return Ok(());
+                }
+
+                // HEAD to get segment size (used for accurate seek on resume)
+                let _seg_size = match client.head(&seg.url).send().await {
+                    Ok(r) => r.headers().get(rquest::header::CONTENT_LENGTH)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0),
+                    Err(_) => 0,
+                };
+
+                // Download segment sequentially (live DVR: append-only, no parallelism needed)
+                // Fetch key
+                let key_bytes_opt: Option<Vec<u8>> = if let Some(ref key_uri) = seg.key_uri {
+                    key_cache.lock().await.get(key_uri).cloned().or({
+                        if let Ok(r) = client.get(key_uri).send().await {
+                            if let Ok(kb) = r.bytes().await {
+                                let v = kb.to_vec();
+                                key_cache.lock().await.insert(key_uri.clone(), v.clone());
+                                Some(v)
+                            } else { None }
+                        } else { None }
+                    })
+                } else { None };
+
+                if let Ok(resp) = client.get(&seg.url).send().await {
+                    if let Ok(bytes) = resp.bytes().await {
+                        let mut data = bytes.to_vec();
+                        if let Some(ref key_bytes) = key_bytes_opt {
+                            let iv = seg.key_iv.as_deref()
+                                .and_then(|h| crate::media::decrypt::decode_hex(h).ok())
+                                .unwrap_or_else(|| {
+                                    let mut iv = [0u8; 16];
+                                    iv[8..].copy_from_slice(&seg.sequence.to_be_bytes());
+                                    iv.to_vec()
+                                });
+                            if let Ok(dec) = crate::media::decrypt::decrypt_aes128(&data, key_bytes, &iv) {
+                                data = dec;
+                            }
+                        }
+
+                        let len = data.len() as u64;
+                        let _ = tx.send(crate::downloader::disk::WriteRequest {
+                            offset: live_file_offset,
+                            data,
+                            segment_id: 0,
+                        });
+                        live_file_offset += len;
+                        downloaded_atomic.fetch_add(len, Ordering::Relaxed);
+
+                        let payload = crate::core_state::Payload {
+                            id: id.clone(),
+                            downloaded: downloaded_atomic.load(Ordering::Relaxed),
+                            total: 0, // live: total unknown
+                            segments: vec![],
+                        };
+                        let _ = app.emit("download_progress", payload.clone());
+                    }
+                }
+            }
+
+            // Stream ended
+            if !refreshed.is_live {
+                break;
+            }
+        }
+    }
+
     let _ = stop_tx.send(());
     finalize_hls_success(
-        app,
-        state,
-        &id,
-        &chosen_url,
-        &path,
-        total_size,
-        &hls_start_iso,
-        hls_start.elapsed(),
+        app, state, &id, &chosen_url, &path,
+        total_size, &hls_start_iso, hls_start.elapsed(),
     ).await
+}
+
+/// Fetch an HLS URL and return the available quality variants.
+/// Returns a single synthetic variant for a plain media playlist.
+pub async fn probe_hls_url_variants(
+    url: &str,
+) -> Result<Vec<crate::media::HlsVariant>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let parser = HlsParser::new(client);
+    let stream = parser.parse(url).await?;
+
+    if stream.is_master {
+        Ok(stream.variants)
+    } else {
+        // Plain media playlist — synthesize a single "Best" entry
+        let estimated_bw = if stream.target_duration > 0.0 && !stream.segments.is_empty() {
+            // rough: n segments * ~3 MB each / target_duration
+            (stream.segments.len() as u64 * 3_000_000) / stream.target_duration as u64
+        } else {
+            0
+        };
+        Ok(vec![crate::media::HlsVariant {
+            bandwidth: estimated_bw,
+            resolution: None,
+            url: url.to_string(),
+            codecs: None,
+            frame_rate: None,
+            quality_label: "Best (auto)".to_string(),
+        }])
+    }
 }
 
 

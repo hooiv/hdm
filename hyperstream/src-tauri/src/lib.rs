@@ -2343,11 +2343,21 @@ async fn join_workspace(host_ip: String) -> Result<(), String> {
 #[tauri::command]
 async fn parse_hls_stream(url: String) -> Result<media::HlsStream, String> {
     let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         .build()
         .map_err(|e| e.to_string())?;
     
     let parser = media::HlsParser::new(client);
     parser.parse(&url).await
+}
+
+/// Fetch an HLS master playlist and return the available quality variants.
+/// The frontend calls this to populate the quality-picker dialog before starting
+/// the actual download.  Works for both master playlists (returns multiple
+/// variants) and plain media playlists (returns a single synthetic entry).
+#[tauri::command]
+async fn probe_hls_variants(url: String) -> Result<Vec<media::HlsVariant>, String> {
+    engine::hls::probe_hls_url_variants(&url).await
 }
 
 #[tauri::command]
@@ -4067,6 +4077,7 @@ fn classify_network_requests(
             match_geofence_cmd,
             // HLS/Dash Commands
             parse_hls_stream,
+            probe_hls_variants,
             parse_dash_manifest,
             fetch_dash_manifest,
             check_ffmpeg_available,
