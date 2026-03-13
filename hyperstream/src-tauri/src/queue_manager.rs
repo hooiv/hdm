@@ -573,7 +573,7 @@ pub async fn queue_processor(app: tauri::AppHandle, mut rx: mpsc::UnboundedRecei
                             let dl_url = dl.url.clone();
                             let dl_path = dl.path.clone();
                             let dl_headers = dl.custom_headers.clone();
-                            let checksum = dl.expected_checksum.clone();
+                            let _checksum = dl.expected_checksum.clone();
                             let dl_retry_count = dl.retry_count;
                             let dl_max_retries = dl.max_retries;
                             let dl_priority_retry = dl.priority;

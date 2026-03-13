@@ -333,8 +333,8 @@ fn normalized_url_key(url: &str) -> String {
         if is_default_port {
             let _ = parsed.set_port(None);
         }
-        let normalized_path = parsed.path().trim_end_matches('/');
-        parsed.set_path(if normalized_path.is_empty() { "/" } else { normalized_path });
+        let path_str = parsed.path().trim_end_matches('/').to_string();
+        parsed.set_path(if path_str.is_empty() { "/" } else { &path_str });
         return parsed.to_string();
     }
 

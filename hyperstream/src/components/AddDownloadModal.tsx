@@ -15,7 +15,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "../contexts/ToastContext";
 import { error as logError } from "../utils/logger";
-import type { DockerImageInfo, HlsStream } from "../types";
+import type { DockerImageInfo, HlsStream, DashManifest } from "../types";
 
 interface AddDownloadModalProps {
     isOpen: boolean;
@@ -54,6 +54,11 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
     const [selectedVariantUrl, setSelectedVariantUrl] = useState<string | null>(null);
     const [isParsingHls, setIsParsingHls] = useState(false);
 
+    const [dashManifest, setDashManifest] = useState<DashManifest | null>(null);
+    const [isParsingDash, setIsParsingDash] = useState(false);
+    const [selectedVideoRepId, setSelectedVideoRepId] = useState<string | null>(null);
+    const [selectedAudioRepId, setSelectedAudioRepId] = useState<string | null>(null);
+
     // Mirror URLs: array of [url, label] pairs
     const [mirrors, setMirrors] = useState<{ url: string; label: string }[]>([]);
     const [showMirrors, setShowMirrors] = useState(false);
@@ -85,6 +90,10 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
         setDockerInfo(null);
         setHlsInfo(null);
         setSelectedVariantUrl(null);
+        setDashManifest(null);
+        setIsParsingDash(false);
+        setSelectedVideoRepId(null);
+        setSelectedAudioRepId(null);
         setMirrors([]);
         setShowMirrors(false);
         setProbeResults(null);
@@ -102,6 +111,7 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
         url.trim().startsWith("docker pull ") || url.trim().startsWith("docker:");
     const isHttp = url.trim().startsWith("http");
     const isHls = url.trim().toLowerCase().endsWith(".m3u8");
+    const isDash = isHttp && url.trim().toLowerCase().includes(".mpd");
 
     /** Basic URL validation — must be http(s), DOI, or Docker */
     const isValidUrl = React.useMemo(() => {
@@ -288,6 +298,34 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
             .finally(() => setIsParsingHls(false));
     }, [url, isHls]);
 
+    // whenever URL looks like DASH manifest we parse it to offer representations
+    React.useEffect(() => {
+        if (!isDash) {
+            setDashManifest(null);
+            setSelectedVideoRepId(null);
+            setSelectedAudioRepId(null);
+            return;
+        }
+        setIsParsingDash(true);
+        invoke<DashManifest>("fetch_dash_manifest", { url })
+            .then((manifest) => {
+                setDashManifest(manifest);
+                if (manifest.video_representations.length > 0) {
+                    setSelectedVideoRepId(manifest.video_representations[0].id);
+                }
+                if (manifest.audio_representations.length > 0) {
+                    setSelectedAudioRepId(manifest.audio_representations[0].id);
+                }
+            })
+            .catch((e) => {
+                logError("DASH parse failed", e);
+                setDashManifest(null);
+                setSelectedVideoRepId(null);
+                setSelectedAudioRepId(null);
+            })
+            .finally(() => setIsParsingDash(false));
+    }, [url, isDash]);
+
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (!canSubmit) return;
@@ -323,10 +361,19 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                 const validMirrors: [string, string][] = mirrors
                     .filter(m => m.url.trim())
                     .map(m => [m.url.trim(), m.label || 'Mirror']);
+
+                let customHeaders: Record<string, string> | undefined = undefined;
+                if (isDash) {
+                    customHeaders = {};
+                    if (selectedVideoRepId) customHeaders["X-Dash-Video-Rep"] = selectedVideoRepId;
+                    if (selectedAudioRepId) customHeaders["X-Dash-Audio-Rep"] = selectedAudioRepId;
+                    if (Object.keys(customHeaders).length === 0) customHeaders = undefined;
+                }
+
                 if (isHls && selectedVariantUrl) {
-                    onStart(selectedVariantUrl, filename, isForceMode, undefined, validMirrors.length > 0 ? validMirrors : undefined, normalizedChecksum);
+                    onStart(selectedVariantUrl, filename, isForceMode, customHeaders, validMirrors.length > 0 ? validMirrors : undefined, normalizedChecksum);
                 } else {
-                    onStart(url, filename, isForceMode, undefined, validMirrors.length > 0 ? validMirrors : undefined, normalizedChecksum);
+                    onStart(url, filename, isForceMode, customHeaders, validMirrors.length > 0 ? validMirrors : undefined, normalizedChecksum);
                 }
             }
             handleClose();
@@ -466,6 +513,59 @@ export const AddDownloadModal: React.FC<AddDownloadModalProps> = ({
                                             )
                                         ) : (
                                             <div className="text-sm text-red-400">Failed to parse HLS stream</div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {isDash && (
+                                <div className="space-y-3">
+                                    <label className="text-xs uppercase font-semibold text-slate-500 tracking-wider ml-1">
+                                        DASH Characteristics
+                                    </label>
+                                    <div className="relative group p-3 bg-slate-800/30 rounded-lg border border-slate-700/50">
+                                        {isParsingDash ? (
+                                            <div className="text-sm text-slate-400 italic">Probing MPD Manifest...</div>
+                                        ) : dashManifest ? (
+                                            <div className="flex flex-col gap-3">
+                                                {dashManifest.video_representations.length > 0 && (
+                                                    <div>
+                                                        <label className="text-[11px] uppercase font-bold text-slate-400 block mb-1">Video Track</label>
+                                                        <select
+                                                            value={selectedVideoRepId || ""}
+                                                            onChange={(e) => setSelectedVideoRepId(e.target.value)}
+                                                            className="w-full bg-slate-800 border border-slate-600 rounded p-2 text-slate-200 text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                                                        >
+                                                            {dashManifest.video_representations.map(v => (
+                                                                <option key={v.id} value={v.id}>
+                                                                    ID: {v.id} • {v.width ? `${v.width}x${v.height} • ` : ""}{Math.round(v.bandwidth / 1000)} kbps {v.codecs ? `(${v.codecs})` : ""}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                )}
+                                                {dashManifest.audio_representations.length > 0 && (
+                                                    <div>
+                                                        <label className="text-[11px] uppercase font-bold text-slate-400 block mb-1">Audio Track</label>
+                                                        <select
+                                                            value={selectedAudioRepId || ""}
+                                                            onChange={(e) => setSelectedAudioRepId(e.target.value)}
+                                                            className="w-full bg-slate-800 border border-slate-600 rounded p-2 text-slate-200 text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                                                        >
+                                                            {dashManifest.audio_representations.map(a => (
+                                                                <option key={a.id} value={a.id}>
+                                                                    ID: {a.id} • {Math.round(a.bandwidth / 1000)} kbps {a.codecs ? `(${a.codecs})` : ""}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                )}
+                                                <div className="text-xs text-slate-500 mt-1">
+                                                    Video & Audio tracks will be muxed automatically.
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="text-sm text-amber-500 italic">Could not probe DASH MPD</div>
                                         )}
                                     </div>
                                 </div>

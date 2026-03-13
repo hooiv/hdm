@@ -1225,8 +1225,7 @@ pub(crate) async fn start_download_impl(
                             let mut stop_w = stop_tx_monitor.subscribe();
                             let stop_tx_w = stop_tx_monitor.clone();
                             let id_w = id_monitor.clone();
-                            let path_w = path_monitor.clone();
-                            let app_w = window_monitor.clone();
+                            // path_w and app_w were unused
                             let dio_w = disk_io_error_monitor.clone();
                             let retry_config = dynamic_retry_config.clone();
 

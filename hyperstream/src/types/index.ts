@@ -305,6 +305,32 @@ export interface HlsStream {
     is_master: boolean;
 }
 
+// ---- DASH helpers --------------------------------------------------------
+
+export interface DashSegment {
+    url: string;
+    start_time: number;
+    duration: number;
+    byte_range?: [number, number] | null;
+}
+
+export interface DashRepresentation {
+    id: string;
+    bandwidth: number;
+    width?: number | null;
+    height?: number | null;
+    codecs?: string | null;
+    mime_type: string;
+    segments: DashSegment[];
+}
+
+export interface DashManifest {
+    duration: number;
+    min_buffer_time: number;
+    video_representations: DashRepresentation[];
+    audio_representations: DashRepresentation[];
+}
+
 /** Upscale result from upscale_image */
 export interface UpscaleResult {
     success: boolean;

@@ -3262,7 +3262,12 @@ async fn perform_search(
     query: String,
     pm: State<'_, std::sync::Arc<crate::plugin_vm::manager::PluginManager>>,
 ) -> Result<Vec<search::SearchResult>, String> {
-    pm.search(&query).await
+    let pm = pm.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        futures::executor::block_on(async move {
+            pm.search(&query).await
+        })
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

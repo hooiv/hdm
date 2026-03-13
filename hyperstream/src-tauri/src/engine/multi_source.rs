@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1004,6 +1004,7 @@ pub async fn start_multi_source_download(
         let pool_worker = pool.clone();
         let canonical_identity_worker = canonical_identity.clone();
 
+        let expected_checksum = expected_checksum.clone();
         tokio::spawn(async move {
             let (start, end, seg_id) = {
                 let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());

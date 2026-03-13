@@ -1,9 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 use tauri::{Emitter, Manager};
 use crate::core_state::AppState;
-use crate::media::dash_parser::{DashManifest, DashRepresentation, DashSegment};
+use crate::media::dash_parser::{DashRepresentation, DashSegment};
 use crate::settings;
 use crate::persistence;
 
@@ -401,8 +401,23 @@ pub(crate) async fn start_dash_download_impl(
     }
 
     // ── 3. Choose best representations (highest bandwidth) ───────────
-    let video_rep = manifest.video_representations.first().cloned();
-    let audio_rep = manifest.audio_representations.first().cloned();
+    // If custom_headers provided X-Dash-Video-Rep or X-Dash-Audio-Rep, try to match them.
+    let target_video_rep = custom_headers.as_ref().and_then(|h| h.get("X-Dash-Video-Rep"));
+    let target_audio_rep = custom_headers.as_ref().and_then(|h| h.get("X-Dash-Audio-Rep"));
+
+    let video_rep = if let Some(vid) = target_video_rep {
+        manifest.video_representations.iter().find(|r| &r.id == vid).cloned()
+            .or_else(|| manifest.video_representations.first().cloned())
+    } else {
+        manifest.video_representations.first().cloned()
+    };
+
+    let audio_rep = if let Some(aid) = target_audio_rep {
+        manifest.audio_representations.iter().find(|r| &r.id == aid).cloned()
+            .or_else(|| manifest.audio_representations.first().cloned())
+    } else {
+        manifest.audio_representations.first().cloned()
+    };
 
     // ── 4. Compute sizes and build segment lists ─────────────────────
     let video_segments = video_rep.as_ref().map(|r| &r.segments[..]).unwrap_or(&[]);
@@ -475,6 +490,32 @@ pub(crate) async fn start_dash_download_impl(
         map.insert(id.clone(), session);
     }
 
+    // SPEED MEASUREMENT
+    let speed_atomic = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let downloaded_for_speed = downloaded_atomic.clone();
+    let speed_writer = speed_atomic.clone();
+    let mut speed_stop_rx = stop_tx.subscribe();
+    tokio::spawn(async move {
+        let mut last_dl = downloaded_for_speed.load(std::sync::atomic::Ordering::Relaxed);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {
+                    if speed_stop_rx.try_recv().is_ok() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    let current_dl = downloaded_for_speed.load(std::sync::atomic::Ordering::Relaxed);
+                    let speed = current_dl.saturating_sub(last_dl);
+                    speed_writer.store(speed, std::sync::atomic::Ordering::Relaxed);
+                    last_dl = current_dl;
+                }
+            }
+        }
+    });
+
+
     let id_save = id.clone();
     let url_save = manifest_url.clone();
     let path_save = path.clone();
@@ -522,6 +563,7 @@ pub(crate) async fn start_dash_download_impl(
             resume_from.min(video_total),
             total_size,
             &downloaded_atomic,
+            &speed_atomic,
             &stop_tx,
             app,
             &id,
@@ -566,6 +608,7 @@ pub(crate) async fn start_dash_download_impl(
             audio_resume,
             total_size,
             &downloaded_atomic,
+            &speed_atomic,
             &stop_tx,
             app,
             &id,
@@ -731,6 +774,7 @@ async fn download_track(
     resume_from: u64,
     global_total: u64,
     downloaded_atomic: &Arc<std::sync::atomic::AtomicU64>,
+    speed_atomic: &Arc<std::sync::atomic::AtomicU64>,
     stop_tx: &broadcast::Sender<()>,
     app: &tauri::AppHandle,
     id: &str,
@@ -743,17 +787,14 @@ async fn download_track(
     let (tx, rx) = std::sync::mpsc::channel::<crate::downloader::disk::WriteRequest>();
     let file_writer_clone = file.clone();
     let disk_io_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let disk_io_error_writer = disk_io_error.clone();
+    let disk_io_error_bridge = disk_io_error.clone();
     std::thread::spawn(move || {
         let writer = crate::downloader::disk::DiskWriter::new(file_writer_clone, rx);
         let writer_flag = writer.io_error_flag();
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if disk_io_error_writer.load(std::sync::atomic::Ordering::Acquire) {
-                break;
-            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
             if writer_flag.load(std::sync::atomic::Ordering::Acquire) {
-                disk_io_error_writer.store(true, std::sync::atomic::Ordering::Release);
+                disk_io_error_bridge.store(true, std::sync::atomic::Ordering::Release);
                 break;
             }
         }
@@ -787,6 +828,7 @@ async fn download_track(
         let app_clone = app.clone();
         let id_clone = id.to_string();
         let disk_err = disk_io_error.clone();
+        let speed_atomic = speed_atomic.clone();
 
         futures.push(tokio::spawn(async move {
             // Check for disk error before starting
@@ -794,30 +836,45 @@ async fn download_track(
                 return Err("Disk I/O error".to_string());
             }
 
-            // Build request with optional byte-range
-            let mut req = client_clone.get(&seg.url);
+            const MAX_RETRIES: u32 = 3;
+            let mut attempt = 0;
+            let mut backoff_millis = 1000;
+            let resp = loop {
+                let mut req = client_clone.get(&seg.url);
+                if let Some((range_start, range_end)) = seg.byte_range {
+                    let start = range_start + seg_offset;
+                    req = req.header("Range", format!("bytes={}-{}", start, range_end));
+                } else if seg_offset > 0 {
+                    req = req.header("Range", format!("bytes={}-", seg_offset));
+                }
 
-            // If the manifest specifies a byte range, use it (offset by seg_offset for resume)
-            if let Some((range_start, range_end)) = seg.byte_range {
-                let start = range_start + seg_offset;
-                req = req.header("Range", format!("bytes={}-{}", start, range_end));
-            } else if seg_offset > 0 {
-                req = req.header("Range", format!("bytes={}-", seg_offset));
-            }
-
-            let resp = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    // Retry once (simple retry for transient network errors)
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    match client_clone.get(&seg.url).send().await {
-                        Ok(r) => r,
-                        Err(_) => {
-                            eprintln!("DASH seg {} request failed after retry: {}", seg.url, e);
-                            return Err(format!("Segment fetch failed: {}", e));
+                match req.send().await {
+                    Ok(r) => {
+                        let status = r.status();
+                        if status.is_success() || status == rquest::StatusCode::PARTIAL_CONTENT {
+                            break Ok(r);
+                        } else {
+                            break Err(format!("HTTP error {}", status));
+                        }
+                    }
+                    Err(e) => {
+                        attempt += 1;
+                        if attempt > MAX_RETRIES {
+                            eprintln!("DASH seg {} request failed after {} retries: {}", seg.url, attempt, e);
+                            break Err(format!("Segment fetch failed after retries: {}", e));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_millis)).await;
+                        backoff_millis *= 2;
+                        if stop_rx.try_recv().is_ok() {
+                            break Err(DASH_STOPPED_ERROR.to_string());
                         }
                     }
                 }
+            };
+
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => return Err(e),
             };
 
             let mut stream = resp.bytes_stream();
@@ -845,16 +902,21 @@ async fn download_track(
                 local_pos += len;
 
                 // Emit progress
+                let current_dl = downloaded_clone.load(std::sync::atomic::Ordering::Relaxed);
+                let current_speed = speed_atomic.load(std::sync::atomic::Ordering::Relaxed);
                 let payload = crate::core_state::Payload {
                     id: id_clone.clone(),
-                    downloaded: downloaded_clone.load(std::sync::atomic::Ordering::Relaxed),
+                    downloaded: current_dl,
                     total: global_total,
-                    segments: vec![],
+                    segments: vec![], // dash.rs logic doesn't populate segments state yet
                 };
-                let _ = app_clone.emit("download_progress", payload.clone());
-                let _ = crate::http_server::get_event_sender().send(
-                    serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)),
-                );
+                let mut value = serde_json::to_value(&payload).unwrap_or(serde_json::json!(null));
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("speed_bps".to_string(), serde_json::json!(current_speed));
+                }
+                
+                let _ = app_clone.emit("download_progress", value.clone());
+                let _ = crate::http_server::get_event_sender().send(value);
 
                 // Check stop signal
                 if stop_rx.try_recv().is_ok() {
