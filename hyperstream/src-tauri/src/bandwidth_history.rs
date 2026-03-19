@@ -134,7 +134,7 @@ pub fn get_stats(since_secs: u64) -> BandwidthStats {
 
 /// Start the background sampler that periodically records aggregate speed.
 pub fn start_bandwidth_sampler(app: tauri::AppHandle) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(SAMPLE_INTERVAL_SECS));
         loop {
             interval.tick().await;

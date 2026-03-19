@@ -713,7 +713,7 @@ pub fn init_queue(app: &tauri::AppHandle) {
     restore_queue();
 
     let app_clone = app.clone();
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         queue_processor(app_clone, rx).await;
     });
 

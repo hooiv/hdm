@@ -112,7 +112,12 @@ async fn handle_socks_connection(mut stream: TcpStream, client: TorClient<Prefer
             let mut ip = [0u8; 16];
             stream.read_exact(&mut ip).await?;
             let addr = std::net::Ipv6Addr::from(ip);
-            addr.to_string()
+            // Arti 0.24.0 has a known panic when connecting to raw IPv6 addresses 
+            // ("Dropped the 'PendingChannelHandle' without removing the channel").
+            // Rejecting it here forces HTTP clients (reqwest/rquest) to fallback to IPv4.
+            println!("Tor Proxy: Rejecting IPv6 connection to {} to prevent Arti crash", addr);
+            let _ = stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0,0,0,0, 0,0]).await;
+            return Err("IPv6 not supported by internal Tor client".into());
         },
         _ => {
             // SOCKS5 error reply: address type not supported (0x08)

@@ -288,7 +288,7 @@ lazy_static::lazy_static! {
 
 /// Start the background rebalancer. Call once during app setup.
 pub fn start_rebalancer() {
-    tokio::spawn(async {
+    tauri::async_runtime::spawn(async {
         loop {
             ALLOCATOR.rebalance();
             tokio::time::sleep(Duration::from_secs(2)).await;

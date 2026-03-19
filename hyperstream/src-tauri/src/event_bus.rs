@@ -43,7 +43,7 @@ pub fn init_event_bus(app: &AppHandle) {
     let mut receiver = bus.sender.subscribe();
     let app_handle = app.clone();
     
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(event) => {

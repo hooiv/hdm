@@ -1,14 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::sync::broadcast;
-use reqwest::Client;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::StreamExt;
 use tauri::{Emitter, Manager};
 use crate::core_state::{AppState, HlsSession};
 use crate::media::{HlsParser, HlsSegment};
 use crate::downloader::initialization;
-use crate::downloader::network;
 use crate::settings;
 use crate::persistence;
 
@@ -720,9 +718,9 @@ pub(crate) async fn start_hls_download_impl(
                     return Err("Disk writer channel closed".to_string());
                 }
 
+                let _ = local_pos; // updated in each retry loop, acknowledged
                 downloaded_clone.fetch_add(len, Ordering::Relaxed);
                 bytes_window_clone.fetch_add(len, Ordering::Relaxed);
-                local_pos += len;
 
                 // ── Emit progress with speed ────────────────────────────
                 let current_dl = downloaded_clone.load(Ordering::Relaxed);

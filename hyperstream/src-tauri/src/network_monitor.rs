@@ -54,7 +54,7 @@ pub fn start_network_monitor<R: tauri::Runtime + 'static>(app_handle: tauri::App
         return; // already running
     }
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut was_online = true; // assume online at startup
         let mut consecutive_failures: u32 = 0;
 

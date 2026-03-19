@@ -12,7 +12,7 @@ use crate::speed_limiter::GLOBAL_LIMITER;
 /// The task runs forever in a tokio spawn and re-reads settings on every tick
 /// (so profile changes are picked up immediately, no restart needed).
 pub fn start_speed_profile_scheduler() {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         loop {
             apply_current_profile();
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;

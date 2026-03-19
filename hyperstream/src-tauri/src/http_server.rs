@@ -4,9 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, broadcast};
 use std::collections::HashMap;
 use once_cell::sync::Lazy;
-use tokio_stream::wrappers::BroadcastStream;
 use futures::StreamExt;
-use tauri::Emitter;
 
 /// A video/audio stream detected by the browser extension via Content-Type sniffing.
 #[derive(Debug, Clone, Deserialize, Serialize)]
