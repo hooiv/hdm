@@ -655,7 +655,7 @@ pub(crate) async fn start_hls_download_impl(
 
                 // ── Stream response chunks ──────────────────────────────
                 let mut byte_stream = resp.bytes_stream();
-                let mut local_pos = seg_offset;
+                let local_pos = seg_offset;
                 let mut segment_data: Vec<u8> = Vec::new();
                 let mut stream_error: Option<String> = None;
 

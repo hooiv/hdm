@@ -356,7 +356,7 @@ impl FeedManager {
     /// Perform a manual refresh for a single feed (same logic as poll iteration)
     pub async fn refresh_feed(&self, app_handle: &tauri::AppHandle, feed_id: &str) -> Result<(), String> {
         // Extract feed info under the lock, then drop it before the async fetch
-        let (feed_url, feed_enabled, feed_id_owned, auto_download_regex) = {
+        let (feed_url, _feed_enabled, feed_id_owned, auto_download_regex) = {
             let feeds_lock = self.feeds.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(feed) = feeds_lock.iter().find(|f| f.id == feed_id) {
                 if !feed.enabled {
@@ -431,7 +431,7 @@ impl FeedManager {
         let feeds_snapshot: Vec<FeedConfig> = {
             self.feeds.lock().unwrap_or_else(|e| e.into_inner()).clone()
         };
-        for mut feed in feeds_snapshot {
+        for feed in feeds_snapshot {
             if !feed.enabled { continue; }
             let due = match feed.last_checked {
                 Some(ts) => now_ts - ts >= (feed.refresh_interval_mins as i64) * 60,
