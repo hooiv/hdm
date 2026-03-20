@@ -107,9 +107,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
     const remainingBytes = task.total - task.downloaded;
     const eta = task.status === 'Downloading' ? formatETA(remainingBytes, task.speed, task.id) : task.status === 'Done' ? 'Complete' : task.status === 'Paused' ? 'Paused' : '';
 
-    // Memoize category calculation
     const category = React.useMemo(() => getFileCategory(safeFilename), [safeFilename]);
-    const discoveredMirrorCount = task.discoveredMirrors?.length ?? 0;
 
     // Helper to check if mountable
     // --- derived state for expanded panel passed via props or contained inside it ---
@@ -129,51 +127,39 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
             animate={{ opacity: 1, y: 0, scale: isSpotlighted ? 1.01 : 1 }}
             exit={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.2 }}
-            className={`relative overflow-hidden mb-3 rounded-xl border transition-all duration-300 ${task.status === 'Downloading'
-                ? 'bg-slate-900/60 backdrop-blur-md border-cyan-500/20 shadow-[0_0_20px_rgba(6,182,212,0.05)]'
+            className={`relative overflow-hidden mb-4 rounded-2xl transition-all duration-500 ${task.status === 'Downloading'
+                ? 'bg-white/[0.04] backdrop-blur-xl border border-cyan-500/10 shadow-[0_20px_40px_rgba(0,0,0,0.3)]'
                 : 'glass-card'
-                } ${isSpotlighted ? 'ring-2 ring-cyan-300/70 border-cyan-300/50 shadow-[0_0_35px_rgba(34,211,238,0.18)]' : ''}`}
+                } ${isSpotlighted ? 'ring-1 ring-cyan-400/40 border-cyan-400/20 shadow-[0_0_40px_rgba(0,242,255,0.1)]' : ''}`}
             onClick={() => setIsExpanded(!isExpanded)}
             data-testid={`download-item-${task.id}`}
             data-spotlighted={isSpotlighted ? 'true' : 'false'}
         >
-            <div className="flex items-center p-4 cursor-pointer">
+            <div className="flex items-center p-5 cursor-pointer">
                 {/* Icon */}
-                <div className={`mr-4 p-3 rounded-xl text-2xl ${category.bgColor} ${category.color} border border-white/5 shadow-inner backdrop-blur-sm`}>
+                <div className={`mr-5 p-3.5 rounded-2xl text-2xl ${category.bgColor} ${category.color} border border-white/5`}>
                     <motion.div
-                        whileHover={{ rotate: [0, -10, 10, 0], scale: 1.1 }}
+                        whileHover={{ rotate: [0, -10, 10, 0], scale: 1.15 }}
                         transition={{ duration: 0.5 }}
                     >
-                        <FileText size={22} className={category.color} strokeWidth={1.5} />
+                        <FileText size={24} className={category.color} strokeWidth={1.5} />
                     </motion.div>
                 </div>
 
                 {/* Info */}
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center mb-1.5 gap-3">
-                        <div className="font-semibold text-slate-100 truncate flex-1 tracking-tight text-sm text-glow" title={task.filename}>
+                        <div className="font-bold text-slate-100 truncate flex-1 tracking-tight text-base" title={task.filename}>
                             {task.filename}
                         </div>
-                        {task.url && task.url.toLowerCase().endsWith('.m3u8') && (
-                            <span className="text-[10px] text-blue-300 bg-blue-800/30 px-1 rounded uppercase ml-2">HLS</span>
-                        )}
-                        {task.mirrorStats && task.mirrorStats.length > 1 && (
-                            <span className="text-[10px] text-emerald-300 bg-emerald-800/30 px-1.5 rounded uppercase ml-1" title={`${task.mirrorStats.filter(m => !m.disabled).length}/${task.mirrorStats.length} mirrors active`}>
-                                ⚡ {task.mirrorStats.filter(m => !m.disabled).length} mirrors
-                            </span>
-                        )}
-                        {discoveredMirrorCount > 0 && task.status !== 'Done' && (
-                            <span className="text-[10px] text-teal-300 bg-teal-800/30 px-1.5 rounded uppercase ml-1" title={`${discoveredMirrorCount} discovered mirror candidate${discoveredMirrorCount === 1 ? '' : 's'} ready for recovery`}>
-                                🪞 {discoveredMirrorCount} ready
-                            </span>
-                        )}
-                        <span className={`text-[9px] uppercase font-bold px-2 py-0.5 rounded-full border border-white/5 ${category.bgColor} ${category.color}`}>
-                            {category.label}
-                        </span>
                         {task.speed > 0 && (
-                            <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded shadow-[0_0_10px_rgba(6,182,212,0.1)]">
-                                {formatSpeed(task.speed)}
-                            </span>
+                            <div className="text-right ml-4">
+                                <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest leading-none mb-0.5">Speed</div>
+                                <div className="text-sm font-bold text-cyan-400 font-mono leading-none">
+                                    {formatSpeed(task.speed).split(' ')[0]}
+                                    <span className="text-[10px] ml-1 uppercase">{formatSpeed(task.speed).split(' ')[1]}</span>
+                                </div>
+                            </div>
                         )}
                         {task.status === 'Downloading' && task.segments && task.segments.length > 0 && (
                             <span className="text-[10px] font-mono text-violet-300 bg-violet-500/10 border border-violet-500/20 px-1.5 py-0.5 rounded" title={`${task.segments.filter(s => s.state === 'Downloading').length} active / ${task.segments.length} total segments`}>
@@ -221,35 +207,44 @@ export const DownloadItem = React.memo<DownloadItemProps>(({ task, onPause, onRe
                         )}
                     </div>
 
-                    {task.errorMessage && (
-                        <div className="text-[10px] text-red-400/80 truncate mb-1 font-mono" title={task.errorMessage}>
-                            {task.errorMessage}
-                        </div>
-                    )}
-
-                    <div className="text-[11px] text-slate-500 truncate mb-3 font-mono opacity-60">
+                    <div className="text-[10px] text-slate-600 truncate mb-4 font-mono uppercase tracking-tighter opacity-80 mt-1">
                         {task.url}
                     </div>
 
-                    <div className="flex items-center gap-3">
-                        <div className="flex-1 h-1.5 bg-black/40 rounded-full overflow-hidden border border-white/5">
+                    <div className="relative pt-1">
+                        <div className="progress-track overflow-hidden bg-white/5">
                             <motion.div
-                                className={`h-full rounded-full relative overflow-hidden ${task.status === 'Error' ? 'bg-red-500' : 'bg-gradient-to-r from-cyan-500 to-blue-600'}`}
+                                className="progress-pulse rounded-full"
                                 initial={{ width: 0 }}
                                 animate={{ width: `${task.progress}%` }}
-                                transition={{ type: "spring", stiffness: 100, damping: 20 }}
+                                transition={{ type: "spring", stiffness: 50, damping: 20 }}
                             >
                                 {task.status === 'Downloading' && <div className="absolute inset-0 animate-shimmer" />}
                             </motion.div>
                         </div>
-                        <div className="text-[10px] font-bold text-slate-400 w-10 text-right">
-                            {task.total > 0 ? `${task.progress.toFixed(1)}%` : '—'}
+                        
+                        <div className="flex justify-between items-end mt-3">
+                            <div className="flex items-center gap-4">
+                                <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                                    {task.total > 0 ? (
+                                        <div className="text-white text-xs font-mono">
+                                            {formatBytes(task.downloaded).split(' ')[0]}
+                                            <span className="text-[10px] text-slate-500 ml-1">{formatBytes(task.downloaded).split(' ')[1]} / {formatBytes(task.total)}</span>
+                                        </div>
+                                    ) : (
+                                        <div className="text-white text-xs font-mono">{formatBytes(task.downloaded)} <span className="text-slate-500 ml-1">UNKNOWN SIZE</span></div>
+                                    )}
+                                </div>
+                                {eta && (
+                                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest pl-4 border-l border-white/5">
+                                        ETA <span className={`ml-1 ${task.status === 'Done' ? 'text-emerald-400' : 'text-cyan-400'}`}>{eta}</span>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="text-[20px] font-black text-white/20 tracking-tighter leading-none italic">
+                                {task.total > 0 ? `${Math.round(task.progress)}%` : '--'}
+                            </div>
                         </div>
-                    </div>
-
-                    <div className="flex justify-between mt-1 text-[10px] text-slate-500 font-medium tracking-wide">
-                        <span>{task.total > 0 ? <>{formatBytes(task.downloaded)} <span className="text-slate-600">/</span> {formatBytes(task.total)}</> : <>{formatBytes(task.downloaded)} <span className="text-slate-600">(unknown size)</span></>}</span>
-                        {eta && <span className={task.status === 'Done' ? 'text-emerald-500/80' : 'text-cyan-600/70'}>{task.status === 'Done' ? '' : 'ETA: '}{eta}</span>}
                     </div>
                 </div>
 

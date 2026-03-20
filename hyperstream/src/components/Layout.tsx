@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle, ArrowDownToLine, History, Activity, ListOrdered, ShieldAlert, Video, Wifi, Film, Globe2 } from 'lucide-react';
+import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle, History, Activity, ListOrdered, ShieldAlert, Video, Wifi, Film, Globe2 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { TitleBar } from './TitleBar';
 import { motion } from 'framer-motion';
@@ -41,8 +41,8 @@ const NavItem: React.FC<{ icon: LucideIcon; label: string; active: boolean; onCl
         className={`
             relative px-4 py-3 cursor-pointer flex items-center gap-3 transition-all duration-300 group rounded-xl mx-2 overflow-hidden w-[calc(100%-1rem)] text-left border-0 bg-transparent
             ${active
-                ? 'bg-cyan-500/10 text-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.1)] border border-cyan-500/20'
-                : 'text-slate-400 hover:text-white hover:bg-white/5 hover:pl-5'
+                ? 'bg-white/5 text-cyan-400 shadow-[0_0_20px_rgba(0,242,255,0.15)] glow-active'
+                : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'
             }
         `}
     >
@@ -50,11 +50,11 @@ const NavItem: React.FC<{ icon: LucideIcon; label: string; active: boolean; onCl
             <motion.div
                 layoutId="activeTabGlow"
                 className="absolute inset-0 bg-cyan-400/5 rounded-xl z-0"
-                transition={{ duration: 0.2 }}
+                transition={{ duration: 0.3 }}
             />
         )}
-        <Icon size={18} className={`transition-all duration-300 z-10 ${active ? 'scale-110 drop-shadow-[0_0_5px_rgba(6,182,212,0.5)]' : 'group-hover:scale-105'}`} />
-        <span className="font-medium text-xs tracking-wide z-10">{label}</span>
+        <Icon size={18} className={`transition-all duration-300 z-10 ${active ? 'scale-110 drop-shadow-[0_0_8px_rgba(0,242,255,0.6)] text-cyan-400' : 'group-hover:scale-105'}`} />
+        <span className={`font-semibold text-[11px] tracking-wider z-10 uppercase ${active ? 'text-cyan-100' : ''}`}>{label}</span>
 
         {badge && (
             <span className="ml-auto text-[10px] font-bold bg-cyan-500/20 text-cyan-300 px-2 py-0.5 rounded-full shadow-sm z-10 border border-cyan-500/20">
@@ -106,26 +106,27 @@ export const Layout: React.FC<LayoutProps> = ({
     };
 
     return (
-        <div className="flex flex-col h-screen bg-[#020617] text-slate-200 font-sans selection:bg-cyan-500/30 overflow-hidden rounded-xl border border-white/5 shadow-2xl aurora-bg">
+        <div className="flex flex-col h-screen bg-[#0b0e14] text-slate-200 font-sans selection:bg-cyan-500/30 overflow-hidden border border-white/5 shadow-2xl aurora-bg">
             <TitleBar />
 
             <div className="flex flex-1 pt-10 overflow-hidden relative">
-                {/* Sidebar */}
-                <div className="w-64 flex flex-col z-10 pt-4 bg-slate-900/20 backdrop-blur-md border-r border-white/5">
+                {/* Sidebar - No-Line Philosophy */}
+                <div className="w-64 flex flex-col z-10 pt-4 bg-black/10 backdrop-blur-md">
 
-                    {/* Sidebar Header */}
+                    {/* Sidebar Header - Kinetic Stats */}
                     <div className="pt-2 pb-6 px-6">
-                        <div className="glass-card rounded-xl p-4 border border-white/5 shadow-inner">
-                            <h2 className="text-[10px] uppercase font-bold text-slate-500 mb-2 tracking-widest">Downloaded</h2>
-                            <div className="text-2xl font-bold text-white tracking-tight text-glow">
-                                {formatBytes(stats.totalBytes)}
+                        <div className="p-2">
+                            <h2 className="text-[10px] uppercase font-bold text-slate-600 mb-1 tracking-widest pl-1">Data Transit</h2>
+                            <div className="display-lg text-white mb-1">
+                                {formatBytes(stats.totalBytes).split(' ')[0]}
+                                <span className="text-xs font-medium text-slate-500 ml-1 uppercase">{formatBytes(stats.totalBytes).split(' ')[1]}</span>
                             </div>
-                            <div className="text-[10px] text-slate-500 mt-1">
-                                {stats.completed} of {stats.total} completed
+                            <div className="text-[10px] font-bold text-cyan-500/80 pl-1">
+                                {stats.completed} / {stats.total} COMPLETED
                             </div>
-                            <div className="w-full bg-black/40 h-1.5 rounded-full mt-3 overflow-hidden">
+                            <div className="w-full bg-white/5 h-[2px] rounded-full mt-4 overflow-hidden">
                                 <motion.div
-                                    className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 relative overflow-hidden shadow-[0_0_10px_rgba(6,182,212,0.5)]"
+                                    className="h-full bg-cyan-400 relative overflow-hidden shadow-[0_0_10px_#00f2ff]"
                                     initial={{ width: 0 }}
                                     animate={{ width: `${stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0}%` }}
                                     transition={{ duration: 1.5, ease: "easeOut" }}
@@ -269,35 +270,41 @@ export const Layout: React.FC<LayoutProps> = ({
 
                 {/* Main Content Area */}
                 <div className="flex-1 flex flex-col min-w-0 bg-transparent relative">
-                    {/* Top Bar */}
-                    <header className="h-16 border-b border-white/5 flex items-center justify-between px-6 bg-slate-900/10 backdrop-blur-sm z-20">
+                    {/* Top Bar - Enhanced Glassmorphism */}
+                    <header className="h-20 flex items-center justify-between px-8 bg-white/[0.02] backdrop-blur-xl z-20">
                         <div className="flex items-center gap-4">
-                            <h1 className="text-lg font-bold text-white tracking-tight drop-shadow-sm">
-                                {activeTab === 'downloads' && 'My Downloads'}
-                                {activeTab === 'torrents' && 'Torrent Manager'}
-                                {activeTab === 'feeds' && 'RSS Feeds'}
-                                {activeTab === 'search' && 'Search & Discover'}
-                                {activeTab === 'plugins' && 'Plugin Editor'}
-                                {activeTab === 'history' && 'Download History'}
-                                {activeTab === 'activity' && 'Activity Log'}
-                                {activeTab === 'queue' && 'Download Queue'}
+                            <h1 className="text-xl font-bold text-white tracking-tight">
+                                {activeTab === 'downloads' && 'Downloads'}
+                                {activeTab === 'torrents' && 'Torrents'}
+                                {activeTab === 'feeds' && 'Feeds'}
+                                {activeTab === 'search' && 'Discover'}
+                                {activeTab === 'plugins' && 'Plugins'}
+                                {activeTab === 'history' && 'History'}
+                                {activeTab === 'activity' && 'Activity'}
+                                {activeTab === 'queue' && 'Queue'}
                             </h1>
                             {activeTab === 'downloads' && (
-                                <span className="bg-white/5 text-slate-300 text-[10px] px-2.5 py-1 rounded-full font-bold border border-white/10 shadow-sm backdrop-blur-md">
-                                    {stats.downloading > 0 ? `${stats.downloading} Downloading` : `${stats.total} Total`}
+                                <span className="bg-cyan-500/10 text-cyan-400 text-[10px] px-3 py-1 rounded-full font-bold border border-cyan-500/20 tracking-widest uppercase">
+                                    {stats.downloading > 0 ? `${stats.downloading} Active` : 'Idle'}
                                 </span>
                             )}
                         </div>
 
                         <div className="flex items-center gap-3">
-                            {/* Live Speed Indicator */}
+                            {/* Live Speed Indicator - Velocity Engine Style */}
                             {(globalSpeed ?? 0) > 0 && (
-                                <div className="flex items-center gap-2 bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-3 py-1.5">
-                                    <ArrowDownToLine size={14} className="text-cyan-400 animate-pulse" />
-                                    <span className="text-xs font-mono font-bold text-cyan-300">{formatSpeed(globalSpeed ?? 0)}</span>
+                                <div className="flex items-center gap-4 mr-4">
+                                    <div className="text-right">
+                                        <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Velocity</div>
+                                        <div className="text-lg font-bold text-white font-mono leading-none">
+                                            {formatSpeed(globalSpeed ?? 0).split(' ')[0]}
+                                            <span className="text-[10px] text-cyan-400 ml-1 uppercase">{formatSpeed(globalSpeed ?? 0).split(' ')[1]}</span>
+                                        </div>
+                                    </div>
+                                    <div className="h-8 w-px bg-white/5" />
                                 </div>
                             )}
-                            <div className="flex items-center bg-black/20 rounded-lg p-1 border border-white/5 hover:border-white/10 transition-colors">
+                            <div className="flex items-center bg-white/5 rounded-xl px-2 py-1 border border-white/5">
                                 <Zap size={14} className="ml-2 text-amber-400" />
                                 <select
                                     aria-label="Speed limit"
@@ -327,9 +334,9 @@ export const Layout: React.FC<LayoutProps> = ({
                                 whileHover={{ scale: 1.05 }}
                                 whileTap={{ scale: 0.95 }}
                                 onClick={onAddClick}
-                                className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 shadow-[0_0_20px_rgba(6,182,212,0.3)] border border-cyan-400/20"
+                                className="bg-cyan-500 text-black px-6 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-tighter transition-all flex items-center gap-2 shadow-[0_0_20px_rgba(0,242,255,0.4)] hover:shadow-[0_0_30px_rgba(0,242,255,0.6)]"
                             >
-                                <Plus size={16} strokeWidth={3} />
+                                <Plus size={16} strokeWidth={4} />
                                 New Task
                             </motion.button>
                         </div>

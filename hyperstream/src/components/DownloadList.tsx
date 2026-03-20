@@ -56,7 +56,7 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
         }
         if (search.trim()) {
             const q = search.toLowerCase();
-            result = result.filter(t => t.filename.toLowerCase().includes(q) || (t.url && t.url.toLowerCase().includes(q)));
+            result = result.filter(t => t.filename.toLowerCase().includes(q) || (t.url?.toLowerCase().includes(q) ?? false));
         }
         if (sortField) {
             const dir = sortDir === 'asc' ? 1 : -1;
@@ -157,17 +157,27 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
     if (tasks.length === 0) {
         return (
             <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="flex flex-col items-center justify-center h-full text-slate-500 opacity-60"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex flex-col items-center justify-center h-full p-8"
             >
-                <div className="p-6 bg-slate-800/30 rounded-full mb-4 border border-slate-700/30">
-                    <Inbox size={48} className="text-slate-400" />
+                <div className="relative mb-8">
+                    <div className="absolute inset-0 bg-cyan-500/20 blur-[60px] rounded-full" />
+                    <div className="relative p-8 bg-white/5 rounded-full border border-white/5 backdrop-blur-3xl shadow-[0_0_50px_rgba(0,0,0,0.5)]">
+                        <Inbox size={64} strokeWidth={1} className="text-cyan-400/60" />
+                    </div>
                 </div>
-                <h3 className="text-lg font-semibold text-slate-300">No Downloads Yet</h3>
-                <p className="text-sm max-w-xs text-center mt-2">
-                    Click the "Add Download" button to start downloading files.
+                <h3 className="display-lg text-white mb-2 scale-75 origin-center text-center opacity-80">STATION IDLE</h3>
+                <p className="text-xs font-bold tracking-[0.2em] text-slate-600 uppercase mb-8 text-center ml-2">
+                    Waiting for data transit directives
                 </p>
+                <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    className="bg-white/5 hover:bg-white/10 text-cyan-400 px-8 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest border border-cyan-500/20 transition-all"
+                >
+                    Add link to begin
+                </motion.button>
             </motion.div>
         );
     }
@@ -177,12 +187,12 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
         return (
             <button
                 onClick={() => toggleSort(field)}
-                className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
-                    active ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
+                    active ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 shadow-[0_0_15px_rgba(0,242,255,0.1)]' : 'text-slate-600 hover:text-slate-400 border border-transparent'
                 }`}
             >
                 {label}
-                {active ? (sortDir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />) : <ArrowUpDown size={11} className="opacity-40" />}
+                {active ? (sortDir === 'asc' ? <ArrowUp size={10} strokeWidth={3} /> : <ArrowDown size={10} strokeWidth={3} />) : <ArrowUpDown size={10} strokeWidth={3} className="opacity-20" />}
             </button>
         );
     };
@@ -190,19 +200,18 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
     const hasFilters = search || statusFilter !== 'all' || sortField;
 
     return (
-        <div className="flex flex-col h-full">
-            {/* Toolbar */}
-            <div className="px-3 pb-2 flex flex-col gap-2 shrink-0">
-                {/* Search + Sort Row */}
-                <div className="flex items-center gap-2">
-                    <div className="relative flex-1 max-w-xs">
-                        <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+        <div className="flex flex-col h-full bg-transparent">
+            {/* Toolbar - Kinetic Design */}
+            <div className="px-6 py-4 flex flex-col gap-4 shrink-0 bg-white/[0.01] backdrop-blur-sm">
+                <div className="flex items-center gap-4">
+                    <div className="relative flex-1">
+                        <Search size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-600" />
                         <input
                             type="text"
                             value={search}
                             onChange={e => setSearch(e.target.value)}
-                            placeholder="Search downloads..."
-                            className="w-full bg-slate-800/50 border border-slate-700/50 rounded-lg pl-8 pr-7 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-cyan-500/40"
+                            placeholder="SEARCH TRANSIT HUB..."
+                            className="w-full bg-white/[0.03] border border-white/5 rounded-xl pl-12 pr-10 py-2.5 text-xs text-slate-200 placeholder:text-slate-700 focus:outline-none focus:border-cyan-500/30 focus:bg-white/[0.05] tracking-widest font-bold transition-all"
                         />
                         {search && (
                             <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300">
@@ -227,27 +236,27 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
                     )}
                 </div>
                 {/* Status Filter Tabs */}
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-2">
                     {(['all', 'Downloading', 'Paused', 'Done', 'Error'] as StatusFilter[]).map(s => {
                         const count = statusCounts[s] || 0;
                         if (s !== 'all' && count === 0) return null;
-                        const labels: Record<StatusFilter, string> = { all: 'All', Downloading: 'Active', Paused: 'Paused', Done: 'Complete', Error: 'Failed' };
+                        const labels: Record<StatusFilter, string> = { all: 'All Hubs', Downloading: 'Active', Paused: 'Suspended', Done: 'Archive', Error: 'Failed' };
                         const colors: Record<StatusFilter, string> = {
-                            all: 'text-slate-300 bg-slate-700/40',
-                            Downloading: 'text-cyan-300 bg-cyan-500/15',
-                            Paused: 'text-amber-300 bg-amber-500/15',
-                            Done: 'text-emerald-300 bg-emerald-500/15',
-                            Error: 'text-red-300 bg-red-500/15',
+                            all: 'text-slate-400 bg-white/5',
+                            Downloading: 'text-cyan-400 bg-cyan-500/10 shadow-[0_0_15px_rgba(0,242,255,0.1)]',
+                            Paused: 'text-amber-400 bg-amber-500/10',
+                            Done: 'text-emerald-400 bg-emerald-500/10',
+                            Error: 'text-red-400 bg-red-500/10',
                         };
                         return (
                             <button
                                 key={s}
                                 onClick={() => setStatusFilter(s)}
-                                className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                                    statusFilter === s ? colors[s] + ' ring-1 ring-current/30' : 'text-slate-500 hover:text-slate-300'
+                                className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
+                                    statusFilter === s ? colors[s] + ' border border-current/20' : 'text-slate-600 hover:text-slate-400 hover:bg-white/5'
                                 }`}
                             >
-                                {labels[s]} {count > 0 && <span className="ml-1 opacity-60">{count}</span>}
+                                {labels[s]} {count > 0 && <span className="ml-1 opacity-40 font-mono">{count}</span>}
                             </button>
                         );
                     })}

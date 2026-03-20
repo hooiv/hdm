@@ -5,21 +5,39 @@
 @tailwind utilities;
 
 :root {
-    font-family: 'Outfit', system-ui, -apple-system, sans-serif;
+    /* Kinetic Precision Palette */
+    --void-bg: #10131a;
+    --void-lowest: #0b0e14;
+    --cyan-glow: #00f2ff;
+    --blue-pulse: #357aff;
+    --violet-pulse: #ad00ff;
+    
+    --surface-low: rgba(29, 32, 38, 0.4);
+    --surface-high: rgba(39, 42, 49, 0.6);
+    --surface-highest: rgba(50, 53, 60, 0.8);
+    
+    --ghost-border: rgba(132, 148, 149, 0.15);
+    --ghost-border-active: rgba(132, 148, 149, 0.4);
+
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
     line-height: 1.6;
-    /* Improved readability */
     font-weight: 400;
     letter-spacing: -0.01em;
-    /* Slight tighter tracking for modern look */
 
-    color-scheme: light dark;
-    color: rgba(255, 255, 255, 0.87);
-    background-color: #242424;
+    color-scheme: dark;
+    color: #e1e2eb;
+    background-color: var(--void-bg);
 
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+}
+
+@layer base {
+    h1, h2, h3 {
+        font-family: 'Outfit', 'Space Grotesk', sans-serif;
+    }
 }
 
 /* Custom Mac-like Scrollbars */
@@ -64,26 +82,46 @@ body {
 
 @layer utilities {
     .aurora-bg {
-        background-color: #020617;
-        /* Slate-950 (Darker) */
+        background-color: var(--void-bg);
         background-image:
-            radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.10) 0px, transparent 50%),
-            radial-gradient(at 100% 0%, rgba(139, 92, 246, 0.10) 0px, transparent 50%),
-            radial-gradient(at 100% 100%, rgba(56, 189, 248, 0.05) 0px, transparent 50%),
-            radial-gradient(at 0% 100%, rgba(139, 92, 246, 0.05) 0px, transparent 50%);
+            radial-gradient(at 0% 0%, rgba(0, 242, 255, 0.08) 0px, transparent 50%),
+            radial-gradient(at 100% 0%, rgba(173, 0, 255, 0.08) 0px, transparent 50%),
+            radial-gradient(at 100% 100%, rgba(53, 122, 255, 0.05) 0px, transparent 50%),
+            radial-gradient(at 0% 100%, rgba(0, 242, 255, 0.05) 0px, transparent 50%);
         background-size: 100% 100%;
-        animation: aurora 20s ease infinite alternate;
-        /* Slower */
+        animation: aurora 15s ease infinite alternate;
+    }
+
+    /* Kinetic Progress Glow */
+    .progress-pulse {
+        height: 2px;
+        background: var(--cyan-glow);
+        box-shadow: 0 0 10px var(--cyan-glow), 0 0 20px rgba(0, 242, 255, 0.3);
+        position: relative;
+    }
+
+    .progress-track {
+        background: rgba(255, 255, 255, 0.05);
+        height: 2px;
+        border-radius: 1px;
     }
 
     /* Shimmer Effect for Progress Bars */
     .animate-shimmer {
         background: linear-gradient(90deg,
                 rgba(255, 255, 255, 0) 0%,
-                rgba(255, 255, 255, 0.1) 50%,
+                rgba(255, 255, 255, 0.15) 50%,
                 rgba(255, 255, 255, 0) 100%);
         background-size: 200% 100%;
-        animation: shimmer 2s infinite linear;
+        animation: shimmer 1.5s infinite linear;
+    }
+    
+    .display-lg {
+        font-size: 3.5rem;
+        line-height: 1;
+        font-family: 'Outfit', sans-serif;
+        font-weight: 700;
+        letter-spacing: -0.04em;
     }
 }
 
@@ -133,18 +171,35 @@ body {
 
 @layer utilities {
     .glass-panel {
-        @apply bg-slate-900/40 backdrop-blur-xl border border-white/10 shadow-2xl;
+        background: var(--surface-low);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid var(--ghost-border);
     }
 
     .glass-card {
-        @apply bg-white/5 backdrop-blur-md border border-white/5 hover:bg-white/10 transition-all duration-300;
+        background: rgba(255, 255, 255, 0.03);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid var(--ghost-border);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    
+    .glass-card:hover {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: var(--ghost-border-active);
+        transform: translateY(-1px);
     }
 
     .text-glow {
-        text-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
+        text-shadow: 0 0 15px rgba(0, 242, 255, 0.4);
     }
 
     .border-glow {
-        box-shadow: 0 0 15px -3px rgba(56, 189, 248, 0.3);
+        box-shadow: 0 0 20px -5px rgba(0, 242, 255, 0.2);
     }
+    
+    .text-cyan { color: var(--cyan-glow); }
+    .text-blue { color: var(--blue-pulse); }
+    .text-violet { color: var(--violet-pulse); }
 }
