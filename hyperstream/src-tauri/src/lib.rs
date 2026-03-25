@@ -4351,7 +4351,14 @@ fn classify_network_requests(
             commands::segment_integrity_cmds::generate_recovery_strategies,
             commands::segment_integrity_cmds::batch_verify_downloads,
             commands::segment_integrity_cmds::get_integrity_summary,
-            commands::segment_integrity_cmds::export_integrity_report
+            commands::segment_integrity_cmds::export_integrity_report,
+            // Mirror Scoring and Failure Prediction Commands
+            commands::mirror_scoring_cmds::get_mirror_score,
+            commands::mirror_scoring_cmds::record_mirror_success,
+            commands::mirror_scoring_cmds::record_mirror_failure,
+            commands::mirror_scoring_cmds::get_ranked_mirrors,
+            commands::mirror_scoring_cmds::predict_segment_failure_risk,
+            commands::mirror_scoring_cmds::get_all_mirror_metrics
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
