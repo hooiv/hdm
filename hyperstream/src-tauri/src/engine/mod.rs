@@ -46,7 +46,7 @@ pub(crate) async fn start_download_routed(
             crate::engine::dash::start_dash_download_impl(app, state, id.clone(), url, path, force, custom_headers).await
         }
         DownloadProtocol::Http => {
-            crate::engine::session::start_download_impl(app, state, id.clone(), url, path, None, custom_headers, force).await
+            crate::engine::session::start_download_impl(app, state, id.clone(), url, path, None, custom_headers, force, None).await
         }
     };
 

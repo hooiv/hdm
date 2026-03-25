@@ -414,7 +414,7 @@ impl FeedManager {
                                 let filename = sanitize_filename(&item_clone.title, &item_clone.link);
                                 let path = format!("{}/{}", settings.download_dir, filename);
                                 let state = ah.state::<crate::core_state::AppState>();
-                                let _ = crate::engine::session::start_download_impl(&ah, &state, format!("feed_{}_{}", feed_id_clone, chrono::Utc::now().timestamp()), item_clone.link.clone(), path, None, None, false).await;
+                                let _ = crate::engine::session::start_download_impl(&ah, &state, format!("feed_{}_{}", feed_id_clone, chrono::Utc::now().timestamp()), item_clone.link.clone(), path, None, None, false, None).await;
                             });
                         }
                     }
@@ -474,7 +474,7 @@ impl FeedManager {
                                         let filename = sanitize_filename(&item_clone.title, &item_clone.link);
                                         let path = format!("{}/{}", settings.download_dir, filename);
                                         let state = ah.state::<crate::core_state::AppState>();
-                                        let _ = crate::engine::session::start_download_impl(&ah, &state, format!("feed_{}_{}", feed_id_clone, chrono::Utc::now().timestamp()), item_clone.link.clone(), path, None, None, false).await;
+                                        let _ = crate::engine::session::start_download_impl(&ah, &state, format!("feed_{}_{}", feed_id_clone, chrono::Utc::now().timestamp()), item_clone.link.clone(), path, None, None, false, None).await;
                                     });
                                 }
                             }

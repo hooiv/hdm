@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle, History, Activity, ListOrdered, ShieldAlert, Video, Wifi, Film, Globe2 } from 'lucide-react';
+import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle, History, Activity, ListOrdered, ShieldAlert, Video, Wifi, Film, Globe2, FolderTree } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { TitleBar } from './TitleBar';
 import { motion } from 'framer-motion';
@@ -26,9 +26,9 @@ interface LayoutProps {
         totalBytes: number;
     };
     onSpeedLimitChange: (limit: number) => void;
-    activeTab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue';
-    onTabChange: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue') => void;
-    onTabIntent?: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue') => void;
+    activeTab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue' | 'groups';
+    onTabChange: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue' | 'groups') => void;
+    onTabIntent?: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue' | 'groups') => void;
     globalSpeed?: number;
 }
 
@@ -196,6 +196,13 @@ export const Layout: React.FC<LayoutProps> = ({
                             active={activeTab === 'queue'}
                             onClick={() => onTabChange('queue')}
                             onIntent={() => onTabIntent?.('queue')}
+                        />
+                        <NavItem
+                            icon={FolderTree}
+                            label="Groups"
+                            active={activeTab === 'groups'}
+                            onClick={() => onTabChange('groups')}
+                            onIntent={() => onTabIntent?.('groups')}
                         />
 
                         <div className="px-4 mt-8 mb-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest pl-4">Tools</div>

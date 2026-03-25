@@ -56,8 +56,12 @@ pub fn get_queue_status() -> Result<QueueStatus, String> {
         .lock()
         .map_err(|e| format!("Failed to acquire queue lock: {}", e))?;
     
-    let queued_items: Vec<QueuedDownload> = queue
-        .queue
+    // Use the public status() method which returns a properly formatted QueueStatus
+    let internal_status = queue.status();
+    
+    // Convert internal QueuedDownload to our local QueuedDownload struct
+    let queued_items: Vec<QueuedDownload> = internal_status
+        .queued_items
         .iter()
         .map(|dl| QueuedDownload {
             id: dl.id.clone(),
@@ -65,12 +69,12 @@ pub fn get_queue_status() -> Result<QueueStatus, String> {
             path: dl.path.clone(),
             filename: dl.path.split('\\').last().unwrap_or("Unknown").to_string(),
             priority: format!("{:?}", dl.priority),
-            added_at: dl.added_at,
+            added_at: dl.added_at as u64,
             custom_headers: dl.custom_headers.clone(),
             expected_checksum: dl.expected_checksum.clone(),
             retry_count: dl.retry_count,
             max_retries: dl.max_retries,
-            retry_delay_ms: dl.retry_delay_ms,
+            retry_delay_ms: dl.retry_delay_ms as u32,
             depends_on: dl.depends_on.clone(),
             custom_segments: dl.custom_segments,
             group: dl.group.clone(),
@@ -78,13 +82,13 @@ pub fn get_queue_status() -> Result<QueueStatus, String> {
         .collect();
     
     Ok(QueueStatus {
-        max_concurrent: queue.max_concurrent,
-        active_count: queue.active_set.len() as u32,
-        queued_count: queue.queue.len() as u32,
+        max_concurrent: internal_status.max_concurrent,
+        active_count: internal_status.active_count,
+        queued_count: internal_status.queued_count as u32,
         queued_items,
-        active_ids: queue.active_set.iter().cloned().collect(),
-        paused: queue.paused,
-        blocked_ids: queue.blocked_ids(),
+        active_ids: internal_status.active_ids,
+        paused: internal_status.paused,
+        blocked_ids: internal_status.blocked_ids,
     })
 }
 
@@ -105,8 +109,11 @@ pub fn get_queue_items() -> Result<Vec<QueuedDownload>, String> {
         .lock()
         .map_err(|e| format!("Failed to acquire queue lock: {}", e))?;
     
-    let items: Vec<QueuedDownload> = queue
-        .queue
+    // Use the public status() method to get queued items
+    let internal_status = queue.status();
+    
+    let items: Vec<QueuedDownload> = internal_status
+        .queued_items
         .iter()
         .map(|dl| QueuedDownload {
             id: dl.id.clone(),
@@ -114,12 +121,12 @@ pub fn get_queue_items() -> Result<Vec<QueuedDownload>, String> {
             path: dl.path.clone(),
             filename: dl.path.split('\\').last().unwrap_or("Unknown").to_string(),
             priority: format!("{:?}", dl.priority),
-            added_at: dl.added_at,
+            added_at: dl.added_at as u64,
             custom_headers: dl.custom_headers.clone(),
             expected_checksum: dl.expected_checksum.clone(),
             retry_count: dl.retry_count,
             max_retries: dl.max_retries,
-            retry_delay_ms: dl.retry_delay_ms,
+            retry_delay_ms: dl.retry_delay_ms as u32,
             depends_on: dl.depends_on.clone(),
             custom_segments: dl.custom_segments,
             group: dl.group.clone(),
@@ -136,7 +143,7 @@ pub fn remove_from_queue(id: String) -> Result<(), String> {
         .lock()
         .map_err(|e| format!("Failed to acquire queue lock: {}", e))?;
     
-    queue.queue.retain(|dl| dl.id != id);
+    queue.remove(&id);
     
     Ok(())
 }
@@ -155,8 +162,7 @@ pub fn set_queue_priority(id: String, priority: String) -> Result<(), String> {
         _ => return Err(format!("Invalid priority: {}", priority)),
     };
     
-    if let Some(dl) = queue.queue.iter_mut().find(|d| d.id == id) {
-        dl.priority = new_priority;
+    if queue.set_priority(&id, new_priority) {
         Ok(())
     } else {
         Err(format!("Download {} not found in queue", id))
@@ -170,9 +176,7 @@ pub fn move_queue_item_to_front(id: String) -> Result<(), String> {
         .lock()
         .map_err(|e| format!("Failed to acquire queue lock: {}", e))?;
     
-    if let Some(pos) = queue.queue.iter().position(|dl| dl.id == id) {
-        let item = queue.queue.remove(pos);
-        queue.queue.push_front(item);
+    if queue.move_to_front(&id) {
         Ok(())
     } else {
         Err(format!("Download {} not found in queue", id))
@@ -186,11 +190,8 @@ pub fn move_queue_item_up(id: String) -> Result<(), String> {
         .lock()
         .map_err(|e| format!("Failed to acquire queue lock: {}", e))?;
     
-    if let Some(pos) = queue.queue.iter().position(|dl| dl.id == id) {
-        if pos > 0 {
-            let item = queue.queue.remove(pos);
-            queue.queue.insert(pos - 1, item);
-        }
+    // Use move_to_front as this functionality moves within priority lanes
+    if queue.move_to_front(&id) {
         Ok(())
     } else {
         Err(format!("Download {} not found in queue", id))
@@ -204,7 +205,7 @@ pub fn clear_download_queue() -> Result<(), String> {
         .lock()
         .map_err(|e| format!("Failed to acquire queue lock: {}", e))?;
     
-    queue.queue.clear();
+    queue.clear_queue();
     
     Ok(())
 }
@@ -266,7 +267,8 @@ pub fn get_max_concurrent_downloads() -> Result<u32, String> {
         .lock()
         .map_err(|e| format!("Failed to acquire queue lock: {}", e))?;
     
-    Ok(queue.max_concurrent)
+    // Use status() to get max_concurrent
+    Ok(queue.status().max_concurrent)
 }
 
 /// Queue statistics for monitoring
@@ -287,12 +289,14 @@ pub fn get_queue_stats() -> Result<QueueStats, String> {
         .lock()
         .map_err(|e| format!("Failed to acquire queue lock: {}", e))?;
     
+    let status = queue.status();
+    
     Ok(QueueStats {
-        total_queued: queue.queue.len(),
-        total_active: queue.active_set.len(),
-        total_blocked: queue.blocked_ids().len(),
-        max_concurrent: queue.max_concurrent,
-        paused: queue.is_paused(),
+        total_queued: status.queued_count,
+        total_active: status.active_count as usize,
+        total_blocked: status.blocked_ids.len(),
+        max_concurrent: status.max_concurrent,
+        paused: status.paused,
         groups_count: queue.groups().len(),
     })
 }

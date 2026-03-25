@@ -743,6 +743,7 @@ pub async fn start_multi_source_download(
                 url: primary_url.clone(),
                 path: path.clone(),
                 file_writer: file_mutex.clone(),
+                group_context: None,
             },
         );
     }

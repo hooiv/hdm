@@ -549,7 +549,7 @@ pub(crate) async fn start_download_impl(
         let scheduler = GLOBAL_GROUP_SCHEDULER.lock()
             .map_err(|e| format!("Failed to lock group scheduler: {}", e))?;
         
-        if !scheduler.groups.contains_key(gid) {
+        if !scheduler.has_group(gid) {
             return Err(format!("Group {} not found", gid));
         }
         
@@ -1594,6 +1594,8 @@ pub(crate) async fn start_download_impl(
                                               id_monitor, mid, gid, e);
                                 }
                             }
+                            // Trigger group engine to start ready downloads and emit events
+                            crate::group_engine::on_download_complete(&window_monitor, &id_monitor);
                         }
                         
                         // Signal save loop and workers to stop

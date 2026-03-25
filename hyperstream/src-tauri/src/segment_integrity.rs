@@ -279,7 +279,7 @@ impl SegmentIntegrityVerifier {
     }
 
     /// Verify a single segment
-    async fn verify_segment(
+    pub async fn verify_segment(
         file_path: &Path,
         segment: &Segment,
         segment_id: usize,

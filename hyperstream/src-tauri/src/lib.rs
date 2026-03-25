@@ -4350,6 +4350,9 @@ fn classify_network_requests(
             event_bus::init_event_bus(&handle);
             app.manage(std::sync::Arc::new(event_sourcing::SharedLog::new(&handle)));
             
+            // Initialize Download Groups engine (restores groups from disk)
+            group_engine::init_group_engine(&handle);
+            
             tauri::async_runtime::spawn(async move {
                 let lan_server = lan_api::LanApiServer::new(8765);
                 if let Err(e) = lan_server.start().await {

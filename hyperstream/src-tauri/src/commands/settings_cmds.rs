@@ -221,14 +221,9 @@ pub fn recover_settings_from_fallback() -> Result<Settings, String> {
     
     if let Some(settings) = fallback {
         // Try to reload from disk first, fallback to last known good settings
-        match load_settings() {
-            Ok(fresh) => Ok(fresh),
-            Err(_) => {
-                // Use last known good settings
-                SETTINGS_CACHE.set_degraded(true);
-                Ok(settings)
-            }
-        }
+        let fresh = load_settings();
+        // load_settings() always returns Settings (not Result), so use it directly
+        Ok(fresh)
     } else {
         Err("No fallback settings available for recovery".to_string())
     }
@@ -247,24 +242,12 @@ pub fn force_cache_refresh() -> Result<Settings, String> {
     // Invalidate cache
     SETTINGS_CACHE.invalidate()?;
     
-    // Reload from disk
-    match crate::settings::load_settings_uncached() {
-        Ok(settings) => {
-            // Re-populate cache
-            SETTINGS_CACHE.put(settings.clone())?;
-            Ok(settings)
-        }
-        Err(e) => {
-            // Try fallback
-            if let Ok(fallback) = SETTINGS_CACHE.get_fallback_settings() {
-                if let Some(settings) = fallback {
-                    SETTINGS_CACHE.set_degraded(true);
-                    return Ok(settings);
-                }
-            }
-            Err(format!("Cache refresh failed and no fallback available: {}", e))
-        }
-    }
+    // Reload from disk - load_settings_uncached returns Settings directly (not Result)
+    let settings = crate::settings::load_settings_uncached();
+    
+    // Re-populate cache
+    SETTINGS_CACHE.put(settings.clone())?;
+    Ok(settings)
 }
 
 /// Health check - verify cache is operational

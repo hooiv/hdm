@@ -2,33 +2,33 @@
 
 use crate::segment_integrity::*;
 use crate::core_state::AppState;
-use crate::downloader::structures::Segment;
-use crate::persistence::SavedDownload;
+use crate::persistence::{SavedDownload, load_downloads};
 use tauri::State;
 use serde_json::json;
+
+/// Helper to find a download from persistence
+fn find_persisted_download(download_id: &str) -> Result<SavedDownload, String> {
+    let downloads = load_downloads()?;
+    downloads
+        .into_iter()
+        .find(|d| d.id == download_id)
+        .ok_or_else(|| format!("Download not found in persistence: {}", download_id))
+}
 
 /// Verify integrity of all segments in a download
 #[tauri::command]
 pub async fn verify_download_integrity(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     download_id: String,
 ) -> Result<IntegrityReport, String> {
-    // Get download from state
-    let downloads = state.downloads.lock().map_err(|e| format!("Lock error: {}", e))?;
-    let download = downloads
-        .get(&download_id)
-        .cloned()
-        .ok_or_else(|| format!("Download not found: {}", download_id))?;
-    drop(downloads);
+    // Get download from persistence (not state - state doesn't have segments)
+    let download = find_persisted_download(&download_id)?;
 
     let verifier = SegmentIntegrityVerifier::new();
 
     // Convert segment structs
-    let segments = if let Some(ref segs) = download.segments {
-        segs.clone()
-    } else {
-        return Err("Download has no segments".to_string());
-    };
+    let segments = download.segments
+        .ok_or_else(|| "Download has no segments".to_string())?;
 
     verifier
         .verify_download(
@@ -43,24 +43,14 @@ pub async fn verify_download_integrity(
 /// Verify specific segments by index
 #[tauri::command]
 pub async fn verify_segments(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     download_id: String,
     segment_indices: Vec<usize>,
 ) -> Result<Vec<SegmentIntegrityInfo>, String> {
-    let downloads = state.downloads.lock().map_err(|e| format!("Lock error: {}", e))?;
-    let download = downloads
-        .get(&download_id)
-        .cloned()
-        .ok_or_else(|| format!("Download not found: {}", download_id))?;
-    drop(downloads);
+    let download = find_persisted_download(&download_id)?;
 
-    let verifier = SegmentIntegrityVerifier::new();
-
-    let segments = if let Some(ref segs) = download.segments {
-        segs.clone()
-    } else {
-        return Err("Download has no segments".to_string());
-    };
+    let segments = download.segments
+        .ok_or_else(|| "Download has no segments".to_string())?;
 
     // Filter to requested segments
     let filtered: Vec<_> = segments
@@ -121,17 +111,14 @@ pub fn generate_recovery_strategies(
 /// Batch verify multiple downloads
 #[tauri::command]
 pub async fn batch_verify_downloads(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     download_ids: Vec<String>,
 ) -> Result<Vec<(String, IntegrityReport)>, String> {
     let verifier = SegmentIntegrityVerifier::new();
     let mut results = Vec::new();
 
     for id in download_ids {
-        let downloads = state.downloads.lock().map_err(|e| format!("Lock error: {}", e))?;
-        if let Some(download) = downloads.get(&id).cloned() {
-            drop(downloads);
-
+        if let Ok(download) = find_persisted_download(&id) {
             if let Some(ref segments) = download.segments {
                 match verifier
                     .verify_download(&id, &download.path, segments, ChecksumAlgorithm::SHA256)

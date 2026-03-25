@@ -49,6 +49,11 @@ impl GroupScheduler {
     pub fn get_group(&self, group_id: &str) -> Option<&DownloadGroup> {
         self.groups.get(group_id)
     }
+    
+    /// Check if a group exists in the scheduler
+    pub fn has_group(&self, group_id: &str) -> bool {
+        self.groups.contains_key(group_id)
+    }
 
     /// Retrieve a mutable reference to a group by ID
     pub fn get_group_mut(&mut self, group_id: &str) -> Option<&mut DownloadGroup> {

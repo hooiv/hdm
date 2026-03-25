@@ -1,0 +1,10 @@
+k={tabLoadingFallback}
+            failureTitle="Queue view unavailable"
+            failureMessage="HyperStream couldn’t load the queue manager. Retry to recover scheduling and priority controls."
+          />
+        ) : (
+          <RecoverableLazy
+            loader={loadSearchTab}
+            resolve={resolveSearchTab}
+            componentProps={{ onStartDownload: startDownload }}
+ 

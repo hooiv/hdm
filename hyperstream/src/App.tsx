@@ -34,6 +34,7 @@ const loadActivityTab = () => import("./components/ActivityTab");
 const loadQueueManager = () => import("./components/QueueManager");
 const loadSearchTab = () => import("./components/SearchTab");
 const loadPluginEditor = () => import("./components/PluginEditor");
+const loadDownloadGroupTree = () => import("./components/DownloadGroupTree");
 
 const resolveAddDownloadModal = (module: Awaited<ReturnType<typeof loadAddDownloadModal>>) => module.AddDownloadModal;
 const resolveSettingsPage = (module: Awaited<ReturnType<typeof loadSettingsPage>>) => module.SettingsPage;
@@ -53,6 +54,7 @@ const resolveActivityTab = (module: Awaited<ReturnType<typeof loadActivityTab>>)
 const resolveQueueManager = (module: Awaited<ReturnType<typeof loadQueueManager>>) => module.QueueManager;
 const resolveSearchTab = (module: Awaited<ReturnType<typeof loadSearchTab>>) => module.SearchTab;
 const resolvePluginEditor = (module: Awaited<ReturnType<typeof loadPluginEditor>>) => module.default;
+const resolveDownloadGroupTree = (module: Awaited<ReturnType<typeof loadDownloadGroupTree>>) => module.DownloadGroupTree;
 
 import { GlobalTelemetry } from './components/GlobalTelemetry';
 
@@ -80,6 +82,7 @@ const tabChunkLoaders = {
   history: loadHistoryTab,
   activity: loadActivityTab,
   queue: loadQueueManager,
+  groups: loadDownloadGroupTree,
 } as const;
 
 type ActiveTab = 'downloads' | keyof typeof tabChunkLoaders;

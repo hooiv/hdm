@@ -4,60 +4,12 @@
 /// Emits events for real-time UI updates.
 /// Handles download completion cascading.
 
-use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use crate::group_scheduler::GLOBAL_GROUP_SCHEDULER;
 use crate::download_groups::GroupState;
 
 /// Check if any group members are ready to start and trigger their downloads
 pub fn trigger_ready_downloads(app: &AppHandle) {
-    let mut scheduler = match GLOBAL_GROUP_SCHEDULER.lock() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[GroupEngine] Failed to acquire scheduler lock: {}", e);
-            return;
-        }
-    };
-
-    // Get all groups
-    let group_ids: Vec<String> = scheduler
-        .get_all_groups()
-        .iter()
-        .map(|g| g.id.clone())
-        .collect();
-
-    for group_id in group_ids {
-        // Check if group is currently running
-        if let Some(group) = scheduler.get_group(&group_id) {
-            if group.state != GroupState::Downloading {
-                continue;
-            }
-
-            // Get ready members (dependencies satisfied, state is Pending)
-            let ready_members = scheduler.get_ready_members(&group_id);
-
-            for member_id in ready_members {
-                if let Some(member) = group.members.get(&member_id) {
-                    let url = member.url.clone();
-                    
-                    // Emit event to frontend to start download
-                    let _ = app.emit("group_member_ready", serde_json::json!({
-                        "group_id": group_id,
-                        "member_id": member_id,
-                        "url": url,
-                    }));
-
-                    // TODO: Automatically invoke start_download here
-                    // For now, the frontend will handle this event
-                }
-            }
-        }
-    }
-}
-
-/// Called when a download completes to check if any group members can now start
-pub fn on_download_complete(app: &AppHandle, download_id: &str) {
-    // Find which group(s) this download belongs to
     let scheduler = match GLOBAL_GROUP_SCHEDULER.lock() {
         Ok(s) => s,
         Err(e) => {
@@ -66,107 +18,184 @@ pub fn on_download_complete(app: &AppHandle, download_id: &str) {
         }
     };
 
+    // Collect data while holding lock, then emit events
+    let mut events_to_emit = Vec::new();
+
+    // Get all groups
     for group in scheduler.get_all_groups() {
-        // Check if this download_id matches any member
-        for (member_id, member) in &group.members {
-            // Match by URL or ID (we'll need to track this mapping)
-            if member_id == download_id {
-                // Found it! Mark as complete
-                drop(scheduler); // Release lock before calling other functions
-                
-                if let Ok(mut scheduler) = GLOBAL_GROUP_SCHEDULER.lock() {
-                    let _ = scheduler.complete_member(&group.id, member_id);
-                    
-                    // Check if group is complete
-                    if let Some(group) = scheduler.get_group(&group.id) {
-                        if group.is_complete() {
-                            let _ = app.emit("group_completed", serde_json::json!({
-                                "group_id": group.id,
-                                "name": group.name,
-                            }));
-                        }
-                    }
-                    
-                    // Persist changes
-                    if let Some(group) = scheduler.get_group(&group.id) {
-                        let _ = crate::group_persistence::upsert_group(group);
-                    }
-                }
-                
-                // Trigger ready downloads
-                trigger_ready_downloads(app);
-                return;
+        if group.state != GroupState::Downloading {
+            continue;
+        }
+
+        // Get ready members (dependencies satisfied, state is Pending)
+        let ready_members = scheduler.get_ready_members(&group.id);
+
+        for member_id in ready_members {
+            if let Some(member) = group.members.get(&member_id) {
+                events_to_emit.push((group.id.clone(), member_id.clone(), member.url.clone()));
             }
         }
     }
+    
+    // Drop the lock before emitting events
+    drop(scheduler);
+
+    // Now emit all events without holding the lock
+    for (group_id, member_id, url) in events_to_emit {
+        let _ = app.emit("group_member_ready", serde_json::json!({
+            "group_id": group_id,
+            "member_id": member_id,
+            "url": url,
+        }));
+    }
+}
+
+/// Called when a download completes to check if any group members can now start
+pub fn on_download_complete(app: &AppHandle, download_id: &str) {
+    // First, find which group this download belongs to (hold lock briefly)
+    let (group_id, member_id) = {
+        let scheduler = match GLOBAL_GROUP_SCHEDULER.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[GroupEngine] Failed to acquire scheduler lock: {}", e);
+                return;
+            }
+        };
+
+        let mut found = None;
+        for group in scheduler.get_all_groups() {
+            if group.members.contains_key(download_id) {
+                found = Some((group.id.clone(), download_id.to_string()));
+                break;
+            }
+        }
+        
+        match found {
+            Some(f) => f,
+            None => return, // Download not part of any group
+        }
+    };
+
+    // Now update the group (re-acquire lock)
+    {
+        let mut scheduler = match GLOBAL_GROUP_SCHEDULER.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        
+        let _ = scheduler.complete_member(&group_id, &member_id);
+        
+        // Check if group is complete and gather info for events
+        let is_complete = scheduler.get_group(&group_id)
+            .map(|g| g.is_complete())
+            .unwrap_or(false);
+        
+        let group_name = scheduler.get_group(&group_id)
+            .map(|g| g.name.clone())
+            .unwrap_or_default();
+        
+        // Persist changes
+        if let Some(group) = scheduler.get_group(&group_id) {
+            let _ = crate::group_persistence::upsert_group(group);
+        }
+        
+        // Drop lock before emitting
+        drop(scheduler);
+        
+        if is_complete {
+            let _ = app.emit("group_completed", serde_json::json!({
+                "group_id": group_id,
+                "name": group_name,
+            }));
+        }
+    }
+    
+    // Trigger ready downloads
+    trigger_ready_downloads(app);
 }
 
 /// Update member progress when download makes progress
 pub fn update_member_progress(app: &AppHandle, download_id: &str, progress: f64) {
-    let mut scheduler = match GLOBAL_GROUP_SCHEDULER.lock() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+    // Find the group this download belongs to (hold lock briefly)
+    let group_id = {
+        let scheduler = match GLOBAL_GROUP_SCHEDULER.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
 
-    for group in scheduler.get_all_groups() {
-        for (member_id, _member) in &group.members {
-            if member_id == download_id {
-                let group_id = group.id.clone();
-                drop(scheduler); // Release lock
-                
-                // Update progress
-                let _ = crate::commands::download_groups_cmds::update_member_progress(
-                    group_id.clone(),
-                    download_id.to_string(),
-                    progress,
-                );
-                
-                // Emit progress event
-                let _ = app.emit("group_progress", serde_json::json!({
-                    "group_id": group_id,
-                    "member_id": download_id,
-                    "progress": progress,
-                }));
-                
-                return;
+        let mut found_group_id = None;
+        for group in scheduler.get_all_groups() {
+            if group.members.contains_key(download_id) {
+                found_group_id = Some(group.id.clone());
+                break;
             }
         }
-    }
+        
+        match found_group_id {
+            Some(id) => id,
+            None => return, // Not part of any group
+        }
+    };
+    
+    // Update progress (lock released)
+    let _ = crate::commands::download_groups_cmds::update_member_progress(
+        group_id.clone(),
+        download_id.to_string(),
+        progress,
+    );
+    
+    // Emit progress event
+    let _ = app.emit("group_progress", serde_json::json!({
+        "group_id": group_id,
+        "member_id": download_id,
+        "progress": progress,
+    }));
 }
 
 /// Handle download failure
 pub fn on_download_failure(app: &AppHandle, download_id: &str, error_msg: &str) {
-    let mut scheduler = match GLOBAL_GROUP_SCHEDULER.lock() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+    // Find the group this download belongs to (hold lock briefly)
+    let group_id = {
+        let scheduler = match GLOBAL_GROUP_SCHEDULER.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
 
-    for group in scheduler.get_all_groups() {
-        for (member_id, _) in &group.members {
-            if member_id == download_id {
-                let group_id = group.id.clone();
-                drop(scheduler); // Release lock
-                
-                if let Ok(mut scheduler) = GLOBAL_GROUP_SCHEDULER.lock() {
-                    let _ = scheduler.fail_member(&group_id, member_id, error_msg);
-                    
-                    // Emit failure event
-                    let _ = app.emit("group_member_failed", serde_json::json!({
-                        "group_id": group_id,
-                        "member_id": member_id,
-                        "error": error_msg,
-                    }));
-                    
-                    // Persist changes
-                    if let Some(group) = scheduler.get_group(&group_id) {
-                        let _ = crate::group_persistence::upsert_group(group);
-                    }
-                }
-                
-                return;
+        let mut found_group_id = None;
+        for group in scheduler.get_all_groups() {
+            if group.members.contains_key(download_id) {
+                found_group_id = Some(group.id.clone());
+                break;
             }
         }
+        
+        match found_group_id {
+            Some(id) => id,
+            None => return, // Not part of any group
+        }
+    };
+    
+    // Update failure state (re-acquire lock)
+    {
+        let mut scheduler = match GLOBAL_GROUP_SCHEDULER.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        
+        let _ = scheduler.fail_member(&group_id, download_id, error_msg);
+        
+        // Persist changes
+        if let Some(group) = scheduler.get_group(&group_id) {
+            let _ = crate::group_persistence::upsert_group(group);
+        }
     }
+    
+    // Emit failure event (lock released)
+    let _ = app.emit("group_member_failed", serde_json::json!({
+        "group_id": group_id,
+        "member_id": download_id,
+        "error": error_msg,
+    }));
 }
 
 /// Initialize group engine on app startup

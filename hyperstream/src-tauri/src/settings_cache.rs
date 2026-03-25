@@ -195,16 +195,14 @@ impl SettingsCache {
                 Ok(None)
             }
             Err(poisoned) => {
-                // Recovery from poisoned lock: try to read from recovered inner mutex
+                // Recovery from poisoned lock: extract the inner value using into_inner
                 self.metrics.write().ok().map(|mut m| m.poisoned_lock_recoveries += 1);
-                let cache_guard = poisoned.get_ref().read();
-                if let Ok(cache) = cache_guard {
-                    if let Some(entry) = &*cache {
-                        let age = entry.cached_at.elapsed();
-                        if age < self.ttl {
-                            self.record_hit(start);
-                            return Ok(Some(entry.settings.clone()));
-                        }
+                let cache = poisoned.into_inner();
+                if let Some(entry) = &*cache {
+                    let age = entry.cached_at.elapsed();
+                    if age < self.ttl {
+                        self.record_hit(start);
+                        return Ok(Some(entry.settings.clone()));
                     }
                 }
                 self.record_miss(start);
@@ -242,18 +240,14 @@ impl SettingsCache {
                 Ok(())
             }
             Err(poisoned) => {
-                // Attempt recovery by clearing the poisoned mutex
-                let _ = poisoned.clear_poison();
-                if let Ok(mut cache) = poisoned.get_mut().write() {
-                    *cache = Some(entry);
-                    if let Ok(mut metrics) = self.metrics.write() {
-                        metrics.poisoned_lock_recoveries += 1;
-                        metrics.saves += 1;
-                    }
-                    Ok(())
-                } else {
-                    Err("Failed to recover from poisoned cache lock".to_string())
+                // Recover from poisoned lock by extracting the inner guard
+                let mut cache = poisoned.into_inner();
+                *cache = Some(entry);
+                if let Ok(mut metrics) = self.metrics.write() {
+                    metrics.poisoned_lock_recoveries += 1;
+                    metrics.saves += 1;
                 }
+                Ok(())
             }
         }
     }
@@ -269,13 +263,10 @@ impl SettingsCache {
                 Ok(())
             }
             Err(poisoned) => {
-                let _ = poisoned.clear_poison();
-                if let Ok(mut cache) = poisoned.get_mut().write() {
-                    *cache = None;
-                    Ok(())
-                } else {
-                    Err("Failed to invalidate poisoned cache".to_string())
-                }
+                // Recover from poisoned lock by extracting the inner guard
+                let mut cache = poisoned.into_inner();
+                *cache = None;
+                Ok(())
             }
         }
     }
