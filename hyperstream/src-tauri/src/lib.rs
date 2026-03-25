@@ -98,6 +98,7 @@ mod video_detector;
 mod bandwidth_history;
 pub mod session_state;
 pub mod session_recovery;
+pub mod segment_integrity;
 
 use persistence::SavedDownload;
 
@@ -4339,7 +4340,16 @@ fn classify_network_requests(
             commands::state_management_cmds::get_all_download_states,
             commands::state_management_cmds::validate_resume_safety,
             commands::state_management_cmds::get_download_diagnostics,
-            commands::state_management_cmds::get_downloads_health_summary
+            commands::state_management_cmds::get_downloads_health_summary,
+            // Segment Integrity Verification Commands
+            commands::segment_integrity_cmds::verify_download_integrity,
+            commands::segment_integrity_cmds::verify_segments,
+            commands::segment_integrity_cmds::get_cached_integrity_report,
+            commands::segment_integrity_cmds::get_integrity_monitoring_metrics,
+            commands::segment_integrity_cmds::generate_recovery_strategies,
+            commands::segment_integrity_cmds::batch_verify_downloads,
+            commands::segment_integrity_cmds::get_integrity_summary,
+            commands::segment_integrity_cmds::export_integrity_report
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
