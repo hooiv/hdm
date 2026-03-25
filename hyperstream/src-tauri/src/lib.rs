@@ -96,6 +96,8 @@ mod event_bus;
 mod event_sourcing;
 mod video_detector;
 mod bandwidth_history;
+pub mod session_state;
+pub mod session_recovery;
 
 use persistence::SavedDownload;
 
