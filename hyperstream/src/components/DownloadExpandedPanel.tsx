@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { DiscoveredMirror, DownloadTask, Segment } from "../types";
 import { useDownloadActions } from "../hooks/useDownloadActions";
+import { useFileActions } from "../hooks/useFileActions";
+import { useMediaActions } from "../hooks/useMediaActions";
+import { useNetworkActions } from "../hooks/useNetworkActions";
 import { useToast } from "../contexts/ToastContext";
 import { ThreadVisualizer } from "./ThreadVisualizer";
 import { invoke } from "@tauri-apps/api/core";
@@ -91,7 +94,10 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
   onShowPreview,
   onShowP2PShare,
 }) => {
-  const actions = useDownloadActions(task, filePath, { onDiscoveredMirrors });
+  const downloadActions = useDownloadActions(task);
+  const fileActions = useFileActions(filePath);
+  const mediaActions = useMediaActions(filePath);
+  const networkActions = useNetworkActions(task, { onDiscoveredMirrors });
   const toast = useToast();
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -257,7 +263,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {/* Metadata Scrub */}
           <button
             disabled={isBusy}
-            onClick={withBusy('scrub', () => actions.handleScrubMetadata())}
+            onClick={withBusy('scrub', () => fileActions.handleScrubMetadata())}
             className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 disabled:opacity-50"
           >
             <UserX size={14} /> {busyAction === 'scrub' ? 'Scrubbing...' : 'Scrub Metadata'}
@@ -267,7 +273,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           <button
             disabled={isBusy}
             onClick={withBusy('share', async () => {
-              const url = await actions.handleEphemeralShare();
+              const url = await fileActions.handleEphemeralShare();
               if (url) setShareUrl(url);
             })}
             className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 pointer-events-auto disabled:opacity-50"
@@ -278,7 +284,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {/* AI Upscale */}
           <button
             disabled={isBusy}
-            onClick={withBusy('upscale', () => actions.handleAiUpscale())}
+            onClick={withBusy('upscale', () => mediaActions.handleAiUpscale())}
             className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50"
           >
             <Film size={14} /> {busyAction === 'upscale' ? 'Upscaling...' : 'AI Upscale'}
@@ -298,7 +304,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {/* Sandbox */}
           <button
             disabled={isBusy}
-            onClick={withBusy('sandbox', () => actions.handleSandbox())}
+            onClick={withBusy('sandbox', () => fileActions.handleSandbox())}
             className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 disabled:opacity-50"
           >
             <Bug size={14} /> {busyAction === 'sandbox' ? 'Launching...' : 'Run in Sandbox'}
@@ -307,7 +313,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {/* Notarize */}
           <button
             disabled={isBusy}
-            onClick={withBusy('notarize', () => actions.handleNotarize())}
+            onClick={withBusy('notarize', () => fileActions.handleNotarize())}
             className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-teal-500/10 text-teal-400 border border-teal-500/20 hover:bg-teal-500/20 disabled:opacity-50"
           >
             <Shield size={14} /> {busyAction === 'notarize' ? 'Notarizing...' : 'Notarize (TSA)'}
@@ -316,7 +322,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {/* Find Mirrors */}
           <button
             disabled={isBusy}
-            onClick={withBusy('mirrors', () => actions.handleFindMirrors())}
+            onClick={withBusy('mirrors', () => networkActions.handleFindMirrors())}
             className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50"
           >
             <Search size={14} /> {busyAction === 'mirrors' ? 'Searching...' : 'Find Mirrors'}
@@ -326,7 +332,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {task.filename.toLowerCase().endsWith(".iso") && (
             <button
               disabled={isBusy}
-              onClick={withBusy('flash', () => actions.handleFlashToUsb())}
+              onClick={withBusy('flash', () => fileActions.handleFlashToUsb())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20 disabled:opacity-50"
             >
               <Zap size={14} /> {busyAction === 'flash' ? 'Flashing...' : 'Flash to USB'}
@@ -337,7 +343,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {isImageFile && (
             <button
               disabled={isBusy}
-              onClick={withBusy('c2pa', () => actions.handleValidateC2pa())}
+              onClick={withBusy('c2pa', () => fileActions.handleValidateC2pa())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 disabled:opacity-50"
             >
               <Shield size={14} /> {busyAction === 'c2pa' ? 'Validating...' : 'Validate C2PA'}
@@ -349,14 +355,14 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
             <>
               <button
                 disabled={isBusy}
-                onClick={withBusy('stegoHide', () => actions.handleStegoHide())}
+                onClick={withBusy('stegoHide', () => fileActions.handleStegoHide())}
                 className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-violet-500/10 text-violet-400 border border-violet-500/20 hover:bg-violet-500/20 disabled:opacity-50"
               >
                 <Camera size={14} /> {busyAction === 'stegoHide' ? 'Hiding...' : 'Stego Hide'}
               </button>
               <button
                 disabled={isBusy}
-                onClick={withBusy('stegoExtract', () => actions.handleStegoExtract())}
+                onClick={withBusy('stegoExtract', () => fileActions.handleStegoExtract())}
                 className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-violet-500/10 text-violet-400 border border-violet-500/20 hover:bg-violet-500/20 disabled:opacity-50"
               >
                 <Search size={14} /> {busyAction === 'stegoExtract' ? 'Extracting...' : 'Stego Extract'}
@@ -368,7 +374,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {isArchive && (
             <button
               disabled={isBusy}
-              onClick={withBusy('extract', () => actions.handleAutoExtract())}
+              onClick={withBusy('extract', () => fileActions.handleAutoExtract())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-lime-500/10 text-lime-400 border border-lime-500/20 hover:bg-lime-500/20 disabled:opacity-50"
             >
               <Archive size={14} /> {busyAction === 'extract' ? 'Extracting...' : 'Extract'}
@@ -379,7 +385,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {task.status === 'Done' && (
             <button
               disabled={isBusy}
-              onClick={withBusy('checksum', () => actions.handleVerifyChecksum())}
+              onClick={withBusy('checksum', () => fileActions.handleVerifyChecksum())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 disabled:opacity-50"
             >
               <ShieldCheck size={14} /> {busyAction === 'checksum' ? 'Verifying...' : 'Verify Checksum'}
@@ -390,7 +396,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {isDataFile && (
             <button
               disabled={isBusy}
-              onClick={withBusy('sql', () => actions.handleSqlQuery())}
+              onClick={withBusy('sql', () => fileActions.handleSqlQuery())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-sky-500/10 text-sky-400 border border-sky-500/20 hover:bg-sky-500/20 disabled:opacity-50"
             >
               <FileText size={14} /> {busyAction === 'sql' ? 'Querying...' : 'SQL Query'}
@@ -401,7 +407,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {isMediaFile && (
             <button
               disabled={isBusy}
-              onClick={withBusy('dlna', () => actions.handleDlnaCast())}
+              onClick={withBusy('dlna', () => mediaActions.handleDlnaCast())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20 disabled:opacity-50"
             >
               <Play size={14} /> {busyAction === 'dlna' ? 'Discovering...' : 'Cast to TV'}
@@ -412,7 +418,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {isVideoFile && (
             <button
               disabled={isBusy}
-              onClick={withBusy('subtitles', () => actions.handleGenerateSubtitles())}
+              onClick={withBusy('subtitles', () => mediaActions.handleGenerateSubtitles())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-pink-500/10 text-pink-400 border border-pink-500/20 hover:bg-pink-500/20 disabled:opacity-50"
             >
               <Film size={14} /> {busyAction === 'subtitles' ? 'Generating...' : 'Subtitles'}
@@ -423,7 +429,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {task.status !== "Done" && (
           <button
             disabled={isBusy}
-            onClick={withBusy('priority', () => actions.handleSetPriority())}
+            onClick={withBusy('priority', () => downloadActions.handleSetPriority())}
             className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 disabled:opacity-50"
           >
             <ArrowUp size={14} /> Priority
@@ -433,7 +439,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {/* Mod Optimizer */}
           <button
             disabled={isBusy}
-            onClick={withBusy('mods', () => actions.handleOptimizeMods())}
+            onClick={withBusy('mods', () => mediaActions.handleOptimizeMods())}
             className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-yellow-500/10 text-yellow-500 border border-yellow-500/20 hover:bg-yellow-500/20 disabled:opacity-50"
           >
             <Zap size={14} /> {busyAction === 'mods' ? 'Optimizing...' : 'Mod Optimizer'}
@@ -443,7 +449,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {task.url && (
             <button
               disabled={isBusy}
-              onClick={withBusy('fuzz', () => actions.handleApiFuzz())}
+              onClick={withBusy('fuzz', () => networkActions.handleApiFuzz())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20 disabled:opacity-50"
             >
               <Search size={14} /> {busyAction === 'fuzz' ? 'Fuzzing...' : 'Fuzz URL'}
@@ -454,7 +460,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {task.url && (
             <button
               disabled={isBusy}
-              onClick={withBusy('replay', () => actions.handleApiReplay())}
+              onClick={withBusy('replay', () => networkActions.handleApiReplay())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-teal-500/10 text-teal-400 border border-teal-500/20 hover:bg-teal-500/20 disabled:opacity-50"
             >
               <RotateCcw size={14} /> {busyAction === 'replay' ? 'Replaying...' : 'HTTP Replay'}
@@ -505,7 +511,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
 
           <button
             disabled={isBusy}
-            onClick={withBusy('refresh', () => actions.handleRefreshUrl())}
+            onClick={withBusy('refresh', () => downloadActions.handleRefreshUrl())}
             className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20 disabled:opacity-50"
           >
             <RefreshCw size={14} /> Refresh Address
@@ -514,7 +520,7 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
           {task.status === "Error" && (
             <button
               disabled={isBusy}
-              onClick={withBusy('wayback', () => actions.handleWaybackCheck())}
+              onClick={withBusy('wayback', () => downloadActions.handleWaybackCheck())}
               className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-colors bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20 disabled:opacity-50"
             >
               <Globe size={14} />{" "}
@@ -543,6 +549,24 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
         </div>
         <div>
           Server: <span className="text-slate-300 ml-1">{task.mirrorStats && task.mirrorStats.length > 1 ? 'Multi-Source' : 'Multi-Threaded'}</span>
+        </div>
+        <div className="col-span-3">
+          URL:{" "}
+          <span className="text-slate-300 font-mono ml-1 break-all">
+            {task.url}
+          </span>
+        </div>
+        <div className="col-span-3">
+          Save Path:{" "}
+          <span className="text-slate-300 font-mono ml-1 break-all">
+            {filePath}
+          </span>
+        </div>
+        <div>
+          Date Added:{" "}
+          <span className="text-slate-300 font-mono ml-1">
+            {new Date(task.dateAdded).toLocaleString()}
+          </span>
         </div>
       </div>
 

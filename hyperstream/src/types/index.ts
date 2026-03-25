@@ -380,6 +380,7 @@ export interface DownloadTask {
     errorMessage?: string;
     integrityStatus?: 'verified' | 'failed' | 'pending';
     virusScanStatus?: 'clean' | 'infected' | 'scanning';
+    dateAdded: number; // timestamp
     // used by overlays/trackers for internal timing, not persisted
     lastUpdate?: number;
 }

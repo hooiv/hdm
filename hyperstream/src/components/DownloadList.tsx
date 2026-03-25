@@ -1,22 +1,19 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef } from 'react';
 import { DownloadItem } from './DownloadItem';
 import type { DiscoveredMirror, DownloadTask } from '../types';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { Inbox, Search, ArrowUpDown, ArrowUp, ArrowDown, X } from 'lucide-react';
 import { motion } from 'framer-motion';
-
-type SortField = 'name' | 'size' | 'speed' | 'progress' | 'status';
-type SortDir = 'asc' | 'desc';
-type StatusFilter = 'all' | 'Downloading' | 'Paused' | 'Done' | 'Error';
-
-const STATUS_ORDER: Record<string, number> = { Downloading: 0, Paused: 1, Error: 2, Done: 3 };
+import { useSort, type SortField } from '../hooks/useSort';
+import { useFilter, type StatusFilter } from '../hooks/useFilter';
+import { useSpotlight } from '../hooks/useSpotlight';
 
 interface DownloadListProps {
     tasks: DownloadTask[];
     onPause: (id: string) => void;
     onResume: (id: string) => void;
     onDiscoveredMirrors?: (id: string, mirrors: DiscoveredMirror[]) => void;
-    onDelete?: (id: string) => void;
+    onDelete: (id: string) => void;
     onMoveUp?: (id: string) => void;
     onMoveDown?: (id: string) => void;
     downloadDir: string;
@@ -24,117 +21,21 @@ interface DownloadListProps {
         taskId: string;
         token: number;
     } | null;
+    onClearCompleted: () => void;
+    onAddDownload: () => void;
 }
 
-const DOWNLOAD_SPOTLIGHT_MS = 2500;
-
-export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir, spotlightRequest }) => {
-    const [search, setSearch] = useState('');
-    const [sortField, setSortField] = useState<SortField | null>(null);
-    const [sortDir, setSortDir] = useState<SortDir>('asc');
-    const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-    const [spotlightedTaskId, setSpotlightedTaskId] = useState<string | null>(null);
+export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onResume, onDiscoveredMirrors, onDelete, onMoveUp, onMoveDown, downloadDir, spotlightRequest, onClearCompleted, onAddDownload }) => {
+    const { sortField, sortDir, toggleSort, sortedTasks } = useSort(tasks);
+    const { search, setSearch, statusFilter, setStatusFilter, filteredTasks } = useFilter(sortedTasks);
     const virtuosoRef = useRef<VirtuosoHandle | null>(null);
-    const spotlightTimerRef = useRef<number | null>(null);
-    const lastActivatedSpotlightTokenRef = useRef<number | null>(null);
-    const lastScrolledSpotlightTokenRef = useRef<number | null>(null);
-
-    const toggleSort = (field: SortField) => {
-        if (sortField === field) {
-            if (sortDir === 'asc') setSortDir('desc');
-            else { setSortField(null); setSortDir('asc'); }
-        } else {
-            setSortField(field);
-            setSortDir(field === 'speed' || field === 'size' ? 'desc' : 'asc');
-        }
-    };
-
-    const filtered = useMemo(() => {
-        let result = tasks;
-        if (statusFilter !== 'all') {
-            result = result.filter(t => t.status === statusFilter);
-        }
-        if (search.trim()) {
-            const q = search.toLowerCase();
-            result = result.filter(t => t.filename.toLowerCase().includes(q) || (t.url?.toLowerCase().includes(q) ?? false));
-        }
-        if (sortField) {
-            const dir = sortDir === 'asc' ? 1 : -1;
-            result = [...result].sort((a, b) => {
-                switch (sortField) {
-                    case 'name': return dir * a.filename.localeCompare(b.filename);
-                    case 'size': return dir * ((a.total || 0) - (b.total || 0));
-                    case 'speed': return dir * ((a.speed || 0) - (b.speed || 0));
-                    case 'progress': return dir * ((a.progress || 0) - (b.progress || 0));
-                    case 'status': return dir * ((STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9));
-                    default: return 0;
-                }
-            });
-        }
-        return result;
-    }, [tasks, statusFilter, search, sortField, sortDir]);
+    const spotlightedTaskId = useSpotlight(tasks, spotlightRequest, search, setSearch, statusFilter, setStatusFilter, filteredTasks, virtuosoRef);
 
     const statusCounts = useMemo(() => {
         const counts: Record<string, number> = { all: tasks.length, Downloading: 0, Paused: 0, Done: 0, Error: 0 };
         tasks.forEach(t => { counts[t.status] = (counts[t.status] || 0) + 1; });
         return counts;
     }, [tasks]);
-
-    useEffect(() => {
-        if (!spotlightRequest) return;
-
-        const task = tasks.find((candidate) => candidate.id === spotlightRequest.taskId);
-        if (!task) return;
-
-        const searchQuery = search.trim().toLowerCase();
-        const matchesSearch = !searchQuery
-            || task.filename.toLowerCase().includes(searchQuery)
-            || Boolean(task.url?.toLowerCase().includes(searchQuery));
-
-        if (searchQuery && !matchesSearch) {
-            setSearch('');
-        }
-
-        if (statusFilter !== 'all' && task.status !== statusFilter) {
-            setStatusFilter('all');
-        }
-
-        if (lastActivatedSpotlightTokenRef.current === spotlightRequest.token) {
-            return;
-        }
-
-        lastActivatedSpotlightTokenRef.current = spotlightRequest.token;
-        setSpotlightedTaskId(spotlightRequest.taskId);
-
-        if (spotlightTimerRef.current) {
-            window.clearTimeout(spotlightTimerRef.current);
-        }
-
-        spotlightTimerRef.current = window.setTimeout(() => {
-            setSpotlightedTaskId((current) => current === spotlightRequest.taskId ? null : current);
-        }, DOWNLOAD_SPOTLIGHT_MS);
-    }, [search, spotlightRequest, statusFilter, tasks]);
-
-    useEffect(() => () => {
-        if (spotlightTimerRef.current) {
-            window.clearTimeout(spotlightTimerRef.current);
-        }
-    }, []);
-
-    useEffect(() => {
-        if (!spotlightRequest) return;
-
-        const spotlightIndex = filtered.findIndex((task) => task.id === spotlightRequest.taskId);
-        if (spotlightIndex < 0 || lastScrolledSpotlightTokenRef.current === spotlightRequest.token) {
-            return;
-        }
-
-        const listHandle = virtuosoRef.current;
-        if (!listHandle) return;
-
-        lastScrolledSpotlightTokenRef.current = spotlightRequest.token;
-        listHandle.scrollToIndex({ index: spotlightIndex, align: 'center' });
-    }, [filtered, spotlightRequest]);
 
     const itemContent = useCallback((_index: number, task: DownloadTask) => {
         return (
@@ -174,6 +75,7 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
                 <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
+                    onClick={onAddDownload}
                     className="bg-white/5 hover:bg-white/10 text-cyan-400 px-8 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest border border-cyan-500/20 transition-all"
                 >
                     Add link to begin
@@ -228,7 +130,7 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
                     </div>
                     {hasFilters && (
                         <button
-                            onClick={() => { setSearch(''); setSortField(null); setSortDir('asc'); setStatusFilter('all'); }}
+                            onClick={() => { setSearch(''); toggleSort(sortField!); setStatusFilter('all'); }}
                             className="text-xs text-slate-500 hover:text-red-400 transition-colors ml-1"
                         >
                             Clear
@@ -260,19 +162,27 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
                             </button>
                         );
                     })}
-                    {filtered.length !== tasks.length && (
+                    {statusCounts.Done > 0 && (
+                        <button
+                            onClick={onClearCompleted}
+                            className="text-xs text-slate-500 hover:text-red-400 transition-colors ml-auto"
+                        >
+                            Clear Completed
+                        </button>
+                    )}
+                    {filteredTasks.length !== tasks.length && (
                         <span className="text-xs text-slate-500 ml-auto">
-                            {filtered.length} of {tasks.length}
+                            {filteredTasks.length} of {tasks.length}
                         </span>
                     )}
                 </div>
             </div>
             {/* List */}
-            {filtered.length > 0 ? (
+            {filteredTasks.length > 0 ? (
                 <Virtuoso
                     ref={virtuosoRef}
                     style={{ height: '100%', width: '100%' }}
-                    data={filtered}
+                    data={filteredTasks}
                     itemContent={itemContent}
                     computeItemKey={(_, task) => task.id}
                     alignToBottom={false}
@@ -282,7 +192,7 @@ export const DownloadList: React.FC<DownloadListProps> = ({ tasks, onPause, onRe
                 <div className="flex-1 flex flex-col items-center justify-center text-slate-500 opacity-60">
                     <p className="text-sm">No downloads match your filters.</p>
                     <button
-                        onClick={() => { setSearch(''); setStatusFilter('all'); setSortField(null); }}
+                        onClick={() => { setSearch(''); setStatusFilter('all'); toggleSort(sortField!); }}
                         className="text-xs text-cyan-400 hover:text-cyan-300 mt-2"
                     >
                         Reset filters

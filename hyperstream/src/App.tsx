@@ -272,6 +272,7 @@ function App() {
             speed: 0,
             status: total > 0 && downloaded >= total ? 'Done' : 'Downloading',
             segments,
+            dateAdded: Date.now(),
           };
           return [...prevTasks, newTask];
         }
@@ -385,6 +386,7 @@ function App() {
             speed: 0,
             status: toTaskStatus(d.status),
             integrityStatus: d.expected_checksum ? 'pending' : undefined,
+            dateAdded: Date.now(),
           }));
           setTasks(loadedTasks);
         }
@@ -651,6 +653,7 @@ function App() {
       speed: 0,
       status: 'Downloading',
       integrityStatus: normalizedChecksum ? 'pending' : undefined,
+      dateAdded: Date.now(),
     };
 
     lastUpdate.current.delete(downloadId);
@@ -922,6 +925,18 @@ function App() {
   pauseAllRef.current = pauseAll;
   resumeAllRef.current = resumeAll;
 
+  const handleClearCompleted = () => {
+    const completedTasks = tasks.filter(t => t.status === 'Done');
+    completedTasks.forEach(t => {
+      invoke("remove_download_entry", { id: t.id }).catch(() => {});
+      lastUpdate.current.delete(t.id);
+      completedIds.current.delete(t.id);
+      const timer = autoRemoveTimers.current.get(t.id);
+      if (timer) { clearTimeout(timer); autoRemoveTimers.current.delete(t.id); }
+    });
+    setTasks(prev => prev.filter(t => t.status !== 'Done'));
+  };
+
   const handleClipboardDownload = (url: string, filename: string) => {
     startDownload(url, filename);
     setClipboardData(null);
@@ -994,61 +1009,19 @@ function App() {
         {activeTab === 'downloads' ? (
           <div className="flex flex-col h-full">
             <GlobalTelemetry tasks={tasks} />
-            {tasks.length > 0 && (
-              <div className="px-4 pb-2 flex flex-col sm:flex-row sm:items-center sm:gap-4">
-                {stats.completed > 0 && (
-                  <button
-                    onClick={() => {
-                      const completedTasks = tasks.filter(t => t.status === 'Done');
-                      completedTasks.forEach(t => {
-                        invoke("remove_download_entry", { id: t.id }).catch(() => {});
-                        lastUpdate.current.delete(t.id);
-                        completedIds.current.delete(t.id);
-                        const timer = autoRemoveTimers.current.get(t.id);
-                        if (timer) { clearTimeout(timer); autoRemoveTimers.current.delete(t.id); }
-                      });
-                      setTasks(prev => prev.filter(t => t.status !== 'Done'));
-                    }}
-                    className="text-xs text-red-400 hover:text-red-200 underline"
-                  >
-                    Clear completed ({stats.completed})
-                  </button>
-                )}
-                <div className="flex gap-2 mt-2 sm:mt-0">
-                  <button
-                    onClick={pauseAll}
-                    disabled={stats.downloading === 0}
-                    className="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed rounded text-white transition-colors"
-                  >Pause All</button>
-                  <button
-                    onClick={resumeAll}
-                    disabled={tasks.filter(t => t.status === 'Paused' || t.status === 'Error').length === 0}
-                    className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed rounded text-white transition-colors"
-                  >Resume All</button>
-                </div>
-              </div>
-            )}
-            {tasks.length > 0 ? (
-              <DownloadList
-                tasks={tasks}
-                onPause={pauseDownloadMemo}
-                onResume={resumeDownloadMemo}
-                onDiscoveredMirrors={updateTaskDiscoveredMirrorsMemo}
-                onDelete={deleteDownloadMemo}
-                onMoveUp={moveUpMemo}
-                onMoveDown={moveDownMemo}
-                downloadDir={downloadDir}
-                spotlightRequest={downloadSpotlight}
-              />
-            ) : (
-              <div className="flex-1 flex flex-col items-center justify-center text-slate-500 opacity-60">
-                <div className="w-24 h-24 mb-6 rounded-full bg-white/5 flex items-center justify-center shadow-inner">
-                  <span className="text-4xl">📥</span>
-                </div>
-                <h3 className="text-lg font-semibold text-slate-300">No Active Downloads</h3>
-                <p className="text-sm">Add a URL or use the browser extension to start.</p>
-              </div>
-            )}
+            <DownloadList
+              tasks={tasks}
+              onPause={pauseDownloadMemo}
+              onResume={resumeDownloadMemo}
+              onDiscoveredMirrors={updateTaskDiscoveredMirrorsMemo}
+              onDelete={deleteDownloadMemo}
+              onMoveUp={moveUpMemo}
+              onMoveDown={moveDownMemo}
+              downloadDir={downloadDir}
+              spotlightRequest={downloadSpotlight}
+              onClearCompleted={handleClearCompleted}
+              onAddDownload={() => setIsModalOpen(true)}
+            />
           </div>
         ) : activeTab === 'torrents' ? (
           <RecoverableLazy
