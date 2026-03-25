@@ -54,6 +54,8 @@ pub mod resilience_integration;
 pub mod resilience_analytics;
 pub mod mirror_scoring;
 pub mod failure_prediction;
+pub mod download_groups;
+pub mod group_scheduler;
 
 // mod virtual_drive;
 mod cloud_bridge;
@@ -1629,47 +1631,6 @@ fn enqueue_download(
 }
 
 #[tauri::command]
-fn get_queue_status() -> queue_manager::QueueStatus {
-    let queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    queue.status()
-}
-
-#[tauri::command]
-fn remove_from_queue(id: String) -> Result<bool, String> {
-    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    let removed = queue.remove(&id);
-    drop(queue);
-    queue_manager::persist_queue();
-    Ok(removed)
-}
-
-#[tauri::command]
-fn set_queue_priority(id: String, priority: String) -> Result<bool, String> {
-    let prio = queue_manager::DownloadPriority::from_str(&priority);
-    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    let changed = queue.set_priority(&id, prio);
-    drop(queue);
-    queue_manager::persist_queue();
-    Ok(changed)
-}
-
-#[tauri::command]
-fn move_queue_item_to_front(id: String) -> Result<bool, String> {
-    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    let moved = queue.move_to_front(&id);
-    drop(queue);
-    queue_manager::persist_queue();
-    Ok(moved)
-}
-
-#[tauri::command]
-fn set_max_concurrent_downloads(max: u32) -> Result<(), String> {
-    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    queue.set_max_concurrent(max);
-    Ok(())
-}
-
-#[tauri::command]
 async fn update_download_url(
     id: String,
     new_url: String,
@@ -1735,17 +1696,8 @@ async fn update_download_url(
     
     Ok(())
 }
-
-#[tauri::command]
-fn clear_download_queue() -> Result<(), String> {
-    let mut queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    queue.clear_queue();
-    drop(queue);
-    queue_manager::persist_queue();
-    Ok(())
-}
-
-// ─── Queue Pause / Resume / Dependencies / Per-Download Overrides ─────────
+    
+    // ─── Queue Pause / Resume / Dependencies / Per-Download Overrides ─────────
 
 #[tauri::command]
 fn pause_download_queue() -> Result<(), String> {
@@ -1862,12 +1814,6 @@ fn set_download_segments(download_id: String, segments: u32) -> Result<(), Strin
     let entry = overrides.entry(download_id).or_insert_with(queue_manager::DownloadOverrides::default);
     entry.custom_segments = Some(segments);
     Ok(())
-}
-
-#[tauri::command]
-fn get_queue_groups() -> Vec<String> {
-    let queue = queue_manager::DOWNLOAD_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    queue.groups()
 }
 
 // ─── Bandwidth History Commands ──────────────────────────────────────────
@@ -4274,21 +4220,14 @@ fn classify_network_requests(
             upscale_image,
             set_app_firewall_rule,
             fetch_with_ja3,
-            // Queue Management
+            // Queue Management - Legacy (many were moved to queue_manager_cmds below)
             enqueue_download,
-            get_queue_status,
-            remove_from_queue,
-            set_queue_priority,
-            move_queue_item_to_front,
-            set_max_concurrent_downloads,
-            clear_download_queue,
             pause_download_queue,
             resume_download_queue,
             add_download_dependency,
             remove_download_dependency,
             enqueue_download_chain,
             set_download_segments,
-            get_queue_groups,
             // Bandwidth History
             get_bandwidth_history,
             get_bandwidth_samples,
@@ -4358,7 +4297,18 @@ fn classify_network_requests(
             commands::mirror_scoring_cmds::record_mirror_failure,
             commands::mirror_scoring_cmds::get_ranked_mirrors,
             commands::mirror_scoring_cmds::predict_segment_failure_risk,
-            commands::mirror_scoring_cmds::get_all_mirror_metrics
+            commands::mirror_scoring_cmds::get_all_mirror_metrics,
+            // Download Groups Commands
+            commands::download_groups_cmds::create_download_group,
+            commands::download_groups_cmds::add_member_to_group,
+            commands::download_groups_cmds::add_group_dependency,
+            commands::download_groups_cmds::get_group_details,
+            commands::download_groups_cmds::start_group_download,
+            commands::download_groups_cmds::pause_group_download,
+            commands::download_groups_cmds::get_next_group_member,
+            commands::download_groups_cmds::update_member_progress,
+            commands::download_groups_cmds::complete_group_member,
+            commands::download_groups_cmds::list_all_groups
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
