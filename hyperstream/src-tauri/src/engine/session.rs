@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use crate::core_state::*;
 use crate::*;
+use crate::mirror_scoring::GLOBAL_MIRROR_SCORER;
 
 /// After a download failure or stall: try queue retry; if not retrying, release queue slot,
 /// deregister bandwidth, and remove session from AppState. Call once per failed download.
@@ -1578,6 +1579,7 @@ pub(crate) async fn start_download_impl(
             let mut current_pos = start;
             let mut retry_state = crate::downloader::network::RetryState::from_config(&retry_config);
             let mut bytes_since_cursor_update: u64 = 0;
+            let segment_start_time = std::time::Instant::now();
             const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024; // Update cursor every 256KB
 
             loop {
@@ -1604,6 +1606,10 @@ pub(crate) async fn start_download_impl(
                 }
 
                 if current_pos >= end {
+                    // Calculate latency and record success
+                    let elapsed_ms = segment_start_time.elapsed().as_millis() as f64;
+                    GLOBAL_MIRROR_SCORER.record_success(&url_clone, elapsed_ms);
+                    
                     // Work-stealing: mark this segment complete and try to take work from a slower segment
                     let stolen = {
                         let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
@@ -1662,6 +1668,7 @@ pub(crate) async fn start_download_impl(
                         match strategy {
                             crate::downloader::network::RetryStrategy::Fatal(msg) => {
                                 eprintln!("[seg {}] Fatal error: {}", seg_id, msg);
+                                GLOBAL_MIRROR_SCORER.record_failure(&url_clone);
                                 {
                                     let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
                                     let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
@@ -1677,6 +1684,7 @@ pub(crate) async fn start_download_impl(
                                 retry_state.immediate_attempts += 1;
                                 if retry_state.immediate_attempts > retry_config.max_immediate_retries {
                                     eprintln!("[seg {}] Exceeded immediate retries ({})", seg_id, retry_config.max_immediate_retries);
+                                    GLOBAL_MIRROR_SCORER.record_failure(&url_clone);
                                     {
                                         let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
                                         let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
@@ -1694,6 +1702,7 @@ pub(crate) async fn start_download_impl(
                                 retry_state.delayed_attempts += 1;
                                 if retry_state.delayed_attempts > retry_config.max_delayed_retries {
                                     eprintln!("[seg {}] Exceeded delayed retries ({})", seg_id, retry_config.max_delayed_retries);
+                                    GLOBAL_MIRROR_SCORER.record_failure(&url_clone);
                                     {
                                         let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
                                         let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
@@ -1804,6 +1813,7 @@ pub(crate) async fn start_download_impl(
                      retry_state.delayed_attempts += 1;
                      if retry_state.delayed_attempts > retry_config.max_delayed_retries {
                          eprintln!("[seg {}] Rate-limited too many times ({}), giving up", seg_id, retry_config.max_delayed_retries);
+                         GLOBAL_MIRROR_SCORER.record_failure(&url_clone);
                          {
                              let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
                              let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
@@ -1892,6 +1902,7 @@ pub(crate) async fn start_download_impl(
                                     retry_state.delayed_attempts += 1;
                                     retry_state.last_error = Some(format!("Stream error: {}", stream_err));
                                     if retry_state.delayed_attempts > retry_config.max_delayed_retries {
+                                        GLOBAL_MIRROR_SCORER.record_failure(&url_clone);
                                         let m = manager_clone.lock().unwrap_or_else(|e| e.into_inner());
                                         let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
                                         if let Some(seg) = segs.iter_mut().find(|s| s.id == seg_id) {
