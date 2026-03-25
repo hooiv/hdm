@@ -46,6 +46,11 @@ mod lan_api;
 mod system_monitor;
 mod feeds;
 mod search;
+pub mod resilience;
+pub mod network_diagnostics;
+pub mod auto_recovery;
+pub mod resilience_integration;
+pub mod resilience_analytics;
 
 // mod virtual_drive;
 mod cloud_bridge;
