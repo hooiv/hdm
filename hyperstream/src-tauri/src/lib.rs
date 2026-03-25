@@ -4333,7 +4333,13 @@ fn classify_network_requests(
             commands::queue_manager_cmds::is_queue_paused,
             commands::queue_manager_cmds::set_max_concurrent_downloads,
             commands::queue_manager_cmds::get_max_concurrent_downloads,
-            commands::queue_manager_cmds::get_queue_stats
+            commands::queue_manager_cmds::get_queue_stats,
+            // Download State Management Commands
+            commands::state_management_cmds::get_download_state,
+            commands::state_management_cmds::get_all_download_states,
+            commands::state_management_cmds::validate_resume_safety,
+            commands::state_management_cmds::get_download_diagnostics,
+            commands::state_management_cmds::get_downloads_health_summary
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

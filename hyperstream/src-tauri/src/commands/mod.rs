@@ -5,5 +5,6 @@
 pub mod settings_cmds;
 pub mod queue_manager_cmds;
 pub mod resilience_cmds;
+pub mod state_management_cmds;
 
 
