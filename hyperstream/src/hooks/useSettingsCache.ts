@@ -207,6 +207,69 @@ export function useSettingsCache() {
     refreshCacheStats();
   }, [refreshCacheStats]);
 
+  // ============ PRODUCTION-GRADE METHODS ============
+
+  // Get cache performance metrics
+  const getCacheMetrics = useCallback(async () => {
+    try {
+      return await invoke<any>('get_cache_metrics');
+    } catch (err) {
+      console.error('Failed to get cache metrics:', err);
+      return null;
+    }
+  }, []);
+
+  // Recover settings from fallback
+  const recoverFromFallback = useCallback(async (): Promise<any> => {
+    try {
+      setIsLoading(true);
+      const recovered = await invoke<any>('recover_settings_from_fallback');
+      await refreshCacheStats();
+      return recovered;
+    } catch (err) {
+      console.error('Fallback recovery failed:', err);
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [refreshCacheStats]);
+
+  // Set degraded mode
+  const setCacheDegradedMode = useCallback(async (degraded: boolean) => {
+    try {
+      await invoke('set_cache_degraded_mode', { degraded });
+    } catch (err) {
+      console.error('Failed to set degraded mode:', err);
+      throw err;
+    }
+  }, []);
+
+  // Force cache refresh
+  const forceCacheRefresh = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      const refreshed = await invoke<any>('force_cache_refresh');
+      await refreshCacheStats();
+      return refreshed;
+    } catch (err) {
+      console.error('Force refresh failed:', err);
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [refreshCacheStats]);
+
+  // Check cache health
+  const checkCacheHealth = useCallback(async () => {
+    try {
+      const health = await invoke<any>('check_cache_health');
+      return health;
+    } catch (err) {
+      console.error('Health check failed:', err);
+      return null;
+    }
+  }, []);
+
   return {
     // State
     cacheStats,
@@ -224,6 +287,13 @@ export function useSettingsCache() {
     validateField,
     invalidateCache,
     getCacheGeneration,
+    
+    // New production methods
+    getCacheMetrics,
+    recoverFromFallback,
+    setCacheDegradedMode,
+    forceCacheRefresh,
+    checkCacheHealth,
     
     // Derived state
     cacheAgeSeconds: cacheAgeMs / 1000,

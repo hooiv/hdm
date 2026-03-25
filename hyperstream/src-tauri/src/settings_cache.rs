@@ -4,15 +4,84 @@
 //! - In-memory caching with TTL to avoid repeated disk I/O
 //! - Atomic validation layer with comprehensive rules
 //! - Settings change event broadcasting  
-//! - Thread-safe concurrent access with RwLock
+//! - Thread-safe concurrent access with RwLock + poisoned lock recovery
 //! - Automatic stale cache invalidation
 //! - Settings rollback on validation failure
+//! - Schema migration framework
+//! - Comprehensive metrics and telemetry
+//! - Fallback mechanisms for fault tolerance
 
-use std::time::{Instant, Duration};
-use std::sync::{Arc, RwLock};
+use std::time::{Instant, Duration, SystemTime};
+use std::sync::{Arc, RwLock, atomic::{AtomicU64, AtomicBool, Ordering}};
+use std::collections::HashMap;
 use crate::settings::Settings;
+use serde::{Deserialize, Serialize};
 
-/// Cache entry with timestamp for TTL management
+// ============ METRICS & TELEMETRY ============
+
+/// Cache performance metrics for production monitoring
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheMetrics {
+    pub hits: u64,
+    pub misses: u64,
+    pub invalidations: u64,
+    pub saves: u64,
+    pub validation_errors: u64,
+    pub lock_contentions: u64,
+    pub poisoned_lock_recoveries: u64,
+    pub avg_read_time_ms: f64,
+    pub avg_write_time_ms: f64,
+    pub last_save_duration_ms: u64,
+}
+
+impl CacheMetrics {
+    pub fn hit_ratio(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 { 0.0 } else { (self.hits as f64) / (total as f64) }
+    }
+}
+
+// ============ SCHEMA MIGRATION ============
+
+/// Settings schema version for forward/backward compatibility
+const SETTINGS_SCHEMA_VERSION: u32 = 2;
+
+/// Migration function type
+type MigrationFn = fn(&mut serde_json::Value) -> Result<(), String>;
+
+/// Schema migration registry
+struct SchemaMigrations;
+
+impl SchemaMigrations {
+    /// Apply all pending migrations from source to target version
+    pub fn migrate(value: &mut serde_json::Value, from_version: u32) -> Result<(), String> {
+        let mut current_version = from_version;
+        
+        while current_version < SETTINGS_SCHEMA_VERSION {
+            let migration_fn = match current_version {
+                1 => Self::migrate_v1_to_v2,
+                _ => return Err(format!("No migration path from version {}", current_version)),
+            };
+            
+            migration_fn(value)?;
+            current_version += 1;
+        }
+        
+        Ok(())
+    }
+
+    /// Migration from v1 to v2: Add new fields with defaults
+    fn migrate_v1_to_v2(value: &mut serde_json::Value) -> Result<(), String> {
+        // Add any new fields introduced in v2 with sensible defaults
+        if let Some(obj) = value.as_object_mut() {
+            obj.entry("cache_version".to_string()).or_insert(serde_json::json!(2));
+            // Example: obj.entry("new_field".to_string()).or_insert(serde_json::json!(default_value));
+        }
+        Ok(())
+    }
+}
+
+// ============ CACHE ENTRY ============
 #[derive(Clone)]
 struct CacheEntry {
     settings: Settings,
@@ -67,11 +136,72 @@ impl ValidationResult {
     }
 }
 
-/// Thread-safe settings cache with TTL and validation
+// ============ CACHE ENTRY ============
+#[derive(Clone)]
+struct CacheEntry {
+    settings: Settings,
+    cached_at: Instant,
+    generation: u64, // Incremented on each save, used to detect stale reads
+    schema_version: u32, // Track schema version for migrations
+}
+
+/// Settings validation result with detailed error reporting
+#[derive(Debug, Clone)]
+pub struct ValidationResult {
+    pub valid: bool,
+    pub errors: Vec<ValidationError>,
+    pub warnings: Vec<String>,
+}
+
+/// Detailed validation error with context
+#[derive(Debug, Clone)]
+pub struct ValidationError {
+    pub field: String,
+    pub message: String,
+    pub severity: ErrorSeverity,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErrorSeverity {
+    Critical,    // Must fix, prevents save
+    Warning,     // Should fix, but allow with warning
+}
+
+impl ValidationResult {
+    pub fn valid() -> Self {
+        Self {
+            valid: true,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn add_critical(mut self, field: &str, msg: &str) -> Self {
+        self.valid = false;
+        self.errors.push(ValidationError {
+            field: field.to_string(),
+            message: msg.to_string(),
+            severity: ErrorSeverity::Critical,
+        });
+        self
+    }
+
+    pub fn add_warning(mut self, field: &str, msg: &str) -> Self {
+        self.warnings.push(format!("{}: {}", field, msg));
+        self
+    }
+}
+
+// ============ ENHANCED SETTINGS CACHE ============
+
+/// Thread-safe settings cache with TTL, metrics, poisoned lock recovery, and migrations
 pub struct SettingsCache {
     cache: Arc<RwLock<Option<CacheEntry>>>,
     ttl: Duration,
-    generation: Arc<std::sync::atomic::AtomicU64>,
+    generation: Arc<AtomicU64>,
+    metrics: Arc<RwLock<CacheMetrics>>,
+    last_fallback_settings: Arc<RwLock<Option<Settings>>>,
+    is_degraded: Arc<AtomicBool>, // Set to true if operational but with degraded functionality
 }
 
 impl SettingsCache {
@@ -85,63 +215,202 @@ impl SettingsCache {
         Self {
             cache: Arc::new(RwLock::new(None)),
             ttl,
-            generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            generation: Arc::new(AtomicU64::new(0)),
+            metrics: Arc::new(RwLock::new(CacheMetrics {
+                hits: 0,
+                misses: 0,
+                invalidations: 0,
+                saves: 0,
+                validation_errors: 0,
+                lock_contentions: 0,
+                poisoned_lock_recoveries: 0,
+                avg_read_time_ms: 0.0,
+                avg_write_time_ms: 0.0,
+                last_save_duration_ms: 0,
+            })),
+            last_fallback_settings: Arc::new(RwLock::new(None)),
+            is_degraded: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Get cached settings if valid, otherwise None
+    /// Get cached settings if valid, otherwise None (with metrics)
     pub fn get(&self) -> Result<Option<Settings>, String> {
-        let cache = self.cache.read().map_err(|e| e.to_string())?;
+        let start = Instant::now();
         
-        if let Some(entry) = &*cache {
-            let age = entry.cached_at.elapsed();
-            if age < self.ttl {
-                return Ok(Some(entry.settings.clone()));
+        match self.cache.read() {
+            Ok(cache) => {
+                if let Some(entry) = &*cache {
+                    let age = entry.cached_at.elapsed();
+                    if age < self.ttl {
+                        self.record_hit(start);
+                        return Ok(Some(entry.settings.clone()));
+                    }
+                }
+                self.record_miss(start);
+                Ok(None)
+            }
+            Err(poisoned) => {
+                // Recovery from poisoned lock: try to read from recovered inner mutex
+                self.metrics.write().ok().map(|mut m| m.poisoned_lock_recoveries += 1);
+                let cache_guard = poisoned.get_ref().read();
+                if let Ok(cache) = cache_guard {
+                    if let Some(entry) = &*cache {
+                        let age = entry.cached_at.elapsed();
+                        if age < self.ttl {
+                            self.record_hit(start);
+                            return Ok(Some(entry.settings.clone()));
+                        }
+                    }
+                }
+                self.record_miss(start);
+                Ok(None)
             }
         }
-        Ok(None)
     }
 
-    /// Update cache with fresh settings
+    /// Update cache with fresh settings and metrics
     pub fn put(&self, settings: Settings) -> Result<(), String> {
-        let gen = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let start = Instant::now();
+        let gen = self.generation.fetch_add(1, Ordering::Relaxed);
         let entry = CacheEntry {
-            settings,
+            settings: settings.clone(),
             cached_at: Instant::now(),
             generation: gen,
+            schema_version: SETTINGS_SCHEMA_VERSION,
         };
         
-        let mut cache = self.cache.write().map_err(|e| e.to_string())?;
-        *cache = Some(entry);
-        Ok(())
+        match self.cache.write() {
+            Ok(mut cache) => {
+                *cache = Some(entry);
+                
+                // Update fallback for disaster recovery
+                if let Ok(mut fallback) = self.last_fallback_settings.write() {
+                    *fallback = Some(settings);
+                }
+                
+                let duration = start.elapsed().as_millis() as u64;
+                if let Ok(mut metrics) = self.metrics.write() {
+                    metrics.saves += 1;
+                    metrics.last_save_duration_ms = duration;
+                }
+                
+                Ok(())
+            }
+            Err(poisoned) => {
+                // Attempt recovery by clearing the poisoned mutex
+                let _ = poisoned.clear_poison();
+                if let Ok(mut cache) = poisoned.get_mut().write() {
+                    *cache = Some(entry);
+                    if let Ok(mut metrics) = self.metrics.write() {
+                        metrics.poisoned_lock_recoveries += 1;
+                        metrics.saves += 1;
+                    }
+                    Ok(())
+                } else {
+                    Err("Failed to recover from poisoned cache lock".to_string())
+                }
+            }
+        }
     }
 
     /// Invalidate cache (force reload on next access)
     pub fn invalidate(&self) -> Result<(), String> {
-        let mut cache = self.cache.write().map_err(|e| e.to_string())?;
-        *cache = None;
-        Ok(())
+        match self.cache.write() {
+            Ok(mut cache) => {
+                *cache = None;
+                if let Ok(mut metrics) = self.metrics.write() {
+                    metrics.invalidations += 1;
+                }
+                Ok(())
+            }
+            Err(poisoned) => {
+                let _ = poisoned.clear_poison();
+                if let Ok(mut cache) = poisoned.get_mut().write() {
+                    *cache = None;
+                    Ok(())
+                } else {
+                    Err("Failed to invalidate poisoned cache".to_string())
+                }
+            }
+        }
     }
 
     /// Get cache age in seconds (None if empty)
     pub fn age_secs(&self) -> Result<Option<u64>, String> {
-        let cache = self.cache.read().map_err(|e| e.to_string())?;
-        Ok(cache.as_ref().map(|e| e.cached_at.elapsed().as_secs()))
+        match self.cache.read() {
+            Ok(cache) => Ok(cache.as_ref().map(|e| e.cached_at.elapsed().as_secs())),
+            Err(poisoned) => {
+                self.metrics.write().ok().map(|mut m| m.poisoned_lock_recoveries += 1);
+                Ok(poisoned.get_ref().read().ok()
+                    .and_then(|c| c.as_ref().map(|e| e.cached_at.elapsed().as_secs())))
+            }
+        }
     }
 
     /// Check if cache is fresh (within TTL)
     pub fn is_fresh(&self) -> Result<bool, String> {
-        let cache = self.cache.read().map_err(|e| e.to_string())?;
-        if let Some(entry) = &*cache {
-            Ok(entry.cached_at.elapsed() < self.ttl)
-        } else {
-            Ok(false)
+        match self.cache.read() {
+            Ok(cache) => {
+                if let Some(entry) = &*cache {
+                    Ok(entry.cached_at.elapsed() < self.ttl)
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(poisoned) => {
+                self.metrics.write().ok().map(|mut m| m.poisoned_lock_recoveries += 1);
+                Ok(poisoned.get_ref().read().ok()
+                    .map(|c| c.as_ref().map_or(false, |e| e.cached_at.elapsed() < self.ttl))
+                    .unwrap_or(false))
+            }
         }
     }
 
     /// Get current generation number
     pub fn generation(&self) -> u64 {
-        self.generation.load(std::sync::atomic::Ordering::Relaxed)
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Get cache metrics for monitoring
+    pub fn metrics(&self) -> Result<CacheMetrics, String> {
+        self.metrics.read()
+            .map(|m| m.clone())
+            .map_err(|e| format!("Failed to read metrics: {}", e))
+    }
+
+    /// Get fallback settings for disaster recovery
+    pub fn get_fallback_settings(&self) -> Result<Option<Settings>, String> {
+        self.last_fallback_settings.read()
+            .map(|s| s.clone())
+            .map_err(|e| format!("Failed to read fallback settings: {}", e))
+    }
+
+    /// Mark cache as degraded (operational but with reduced capability)
+    pub fn set_degraded(&self, degraded: bool) {
+        self.is_degraded.store(degraded, Ordering::Relaxed);
+    }
+
+    /// Check if cache is in degraded mode
+    pub fn is_degraded(&self) -> bool {
+        self.is_degraded.load(Ordering::Relaxed)
+    }
+
+    // ---- Helper methods for metrics recording ----
+    
+    fn record_hit(&self, start: Instant) {
+        if let Ok(mut metrics) = self.metrics.write() {
+            metrics.hits += 1;
+            let dur = start.elapsed().as_millis() as f64;
+            metrics.avg_read_time_ms = (metrics.avg_read_time_ms * 0.9) + (dur * 0.1);
+        }
+    }
+
+    fn record_miss(&self, start: Instant) {
+        if let Ok(mut metrics) = self.metrics.write() {
+            metrics.misses += 1;
+            let dur = start.elapsed().as_millis() as f64;
+            metrics.avg_read_time_ms = (metrics.avg_read_time_ms * 0.9) + (dur * 0.1);
+        }
     }
 }
 

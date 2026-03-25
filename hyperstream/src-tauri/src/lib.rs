@@ -22,6 +22,7 @@ mod commands;
 use crate::http_server::StreamingSource;
 mod settings;
 pub mod settings_cache;
+mod settings_utils;
 mod speed_limiter;
 mod speed_profiles;
 mod download_history;
@@ -4305,6 +4306,12 @@ fn classify_network_requests(
             commands::settings_cmds::get_settings_with_stats,
             commands::settings_cmds::save_settings_with_validation,
             commands::settings_cmds::get_field_validation_errors,
+            // Production-grade Cache Commands
+            commands::settings_cmds::get_cache_metrics,
+            commands::settings_cmds::recover_settings_from_fallback,
+            commands::settings_cmds::set_cache_degraded_mode,
+            commands::settings_cmds::force_cache_refresh,
+            commands::settings_cmds::check_cache_health,
             // Crash Recovery Commands (already defined in lib.rs)
             scan_crashed_downloads,
             get_interrupted_downloads,

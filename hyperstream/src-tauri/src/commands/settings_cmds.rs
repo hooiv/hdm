@@ -175,7 +175,137 @@ pub fn get_field_validation_errors(settings: Settings, field: String) -> Result<
     Ok(errors)
 }
 
-#[cfg(test)]
+// ============ NEW PRODUCTION-GRADE COMMANDS ============
+
+/// Cache metrics for monitoring and diagnostics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheMetricsReport {
+    pub hits: u64,
+    pub misses: u64,
+    pub hit_ratio: f64,
+    pub invalidations: u64,
+    pub saves: u64,
+    pub validation_errors: u64,
+    pub poisoned_lock_recoveries: u64,
+    pub avg_read_time_ms: f64,
+    pub avg_write_time_ms: f64,
+    pub last_save_duration_ms: u64,
+    pub is_degraded: bool,
+}
+
+/// Get cache performance metrics for monitoring
+#[tauri::command]
+pub fn get_cache_metrics() -> Result<CacheMetricsReport, String> {
+    let metrics = SETTINGS_CACHE.metrics()?;
+    let is_degraded = SETTINGS_CACHE.is_degraded();
+    
+    Ok(CacheMetricsReport {
+        hits: metrics.hits,
+        misses: metrics.misses,
+        hit_ratio: metrics.hit_ratio(),
+        invalidations: metrics.invalidations,
+        saves: metrics.saves,
+        validation_errors: metrics.validation_errors,
+        poisoned_lock_recoveries: metrics.poisoned_lock_recoveries,
+        avg_read_time_ms: metrics.avg_read_time_ms,
+        avg_write_time_ms: metrics.avg_write_time_ms,
+        last_save_duration_ms: metrics.last_save_duration_ms,
+        is_degraded,
+    })
+}
+
+/// Recover settings from fallback cache (disaster recovery)
+#[tauri::command]
+pub fn recover_settings_from_fallback() -> Result<Settings, String> {
+    let fallback = SETTINGS_CACHE.get_fallback_settings()?;
+    
+    if let Some(settings) = fallback {
+        // Try to reload from disk first, fallback to last known good settings
+        match load_settings() {
+            Ok(fresh) => Ok(fresh),
+            Err(_) => {
+                // Use last known good settings
+                SETTINGS_CACHE.set_degraded(true);
+                Ok(settings)
+            }
+        }
+    } else {
+        Err("No fallback settings available for recovery".to_string())
+    }
+}
+
+/// Set cache degraded mode (for when things are wrong but we keep running)
+#[tauri::command]
+pub fn set_cache_degraded_mode(degraded: bool) -> Result<(), String> {
+    SETTINGS_CACHE.set_degraded(degraded);
+    Ok(())
+}
+
+/// Force full cache refresh and rebuild
+#[tauri::command]
+pub fn force_cache_refresh() -> Result<Settings, String> {
+    // Invalidate cache
+    SETTINGS_CACHE.invalidate()?;
+    
+    // Reload from disk
+    match crate::settings::load_settings_uncached() {
+        Ok(settings) => {
+            // Re-populate cache
+            SETTINGS_CACHE.put(settings.clone())?;
+            Ok(settings)
+        }
+        Err(e) => {
+            // Try fallback
+            if let Ok(fallback) = SETTINGS_CACHE.get_fallback_settings() {
+                if let Some(settings) = fallback {
+                    SETTINGS_CACHE.set_degraded(true);
+                    return Ok(settings);
+                }
+            }
+            Err(format!("Cache refresh failed and no fallback available: {}", e))
+        }
+    }
+}
+
+/// Health check - verify cache is operational
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheHealthStatus {
+    pub is_healthy: bool,
+    pub is_degraded: bool,
+    pub is_fresh: bool,
+    pub age_seconds: Option<u64>,
+    pub can_read: bool,
+    pub can_write: bool,
+    pub last_error: Option<String>,
+}
+
+#[tauri::command]
+pub fn check_cache_health() -> CacheHealthStatus {
+    let is_fresh = SETTINGS_CACHE.is_fresh().unwrap_or(false);
+    let age_seconds = SETTINGS_CACHE.age_secs().unwrap_or(None);
+    let is_degraded = SETTINGS_CACHE.is_degraded();
+    
+    // Test read capability
+    let can_read = SETTINGS_CACHE.get().is_ok();
+    
+    // Test write capability with a dummy write
+    let test_settings = crate::settings::load_settings();
+    let can_write = SETTINGS_CACHE.put(test_settings).is_ok();
+    
+    let is_healthy = can_read && can_write && !is_degraded && is_fresh;
+    
+    CacheHealthStatus {
+        is_healthy,
+        is_degraded,
+        is_fresh,
+        age_seconds,
+        can_read,
+        can_write,
+        last_error: None,
+    }
+}
+
+
 mod tests {
     use super::*;
 
