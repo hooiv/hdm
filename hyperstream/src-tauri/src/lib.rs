@@ -53,6 +53,7 @@ pub mod auto_recovery;
 pub mod resilience_integration;
 pub mod resilience_analytics;
 pub mod mirror_scoring;
+pub mod failure_prediction;
 
 // mod virtual_drive;
 mod cloud_bridge;
