@@ -4,6 +4,8 @@ use tokio::sync::broadcast;
 use crate::core_state::*;
 use crate::*;
 use crate::mirror_scoring::GLOBAL_MIRROR_SCORER;
+use crate::group_scheduler::GLOBAL_GROUP_SCHEDULER;
+use crate::download_groups::GroupState;
 
 /// After a download failure or stall: try queue retry; if not retrying, release queue slot,
 /// deregister bandwidth, and remove session from AppState. Call once per failed download.
@@ -525,6 +527,7 @@ pub(crate) async fn start_download_impl(
     _resume_override: Option<u64>,
     custom_headers: Option<std::collections::HashMap<String, String>>,
     force: bool,
+    group_id: Option<String>,
 ) -> Result<(), String> {
     println!("DEBUG: Starting download ID: {}", id);
     
@@ -540,6 +543,37 @@ pub(crate) async fn start_download_impl(
         settings.segment_retry_max_delay_secs as u64,
         settings.segment_retry_jitter,
     );
+    
+    // INTEGRATION POINT 1: Check group dependencies before proceeding
+    let member_id = if let Some(ref gid) = group_id {
+        let scheduler = GLOBAL_GROUP_SCHEDULER.lock()
+            .map_err(|e| format!("Failed to lock group scheduler: {}", e))?;
+        
+        if !scheduler.groups.contains_key(gid) {
+            return Err(format!("Group {} not found", gid));
+        }
+        
+        if let Some(group) = scheduler.get_group(gid) {
+            // Try to find a pending member with satisfied dependencies
+            let ready_members = scheduler.get_ready_members(gid);
+            if ready_members.is_empty() {
+                return Err(format!("No ready members in group {} (all have unsatisfied dependencies or are already started)", gid));
+            }
+            
+            // Use the first ready member
+            ready_members[0].clone()
+        } else {
+            return Err(format!("Group {} not found", gid));
+        }
+    } else {
+        String::new()
+    };
+    
+    let group_context = if let Some(ref gid) = group_id {
+        Some((gid.clone(), member_id.clone()))
+    } else {
+        None
+    };
     
     // VPN Auto-Connect (Tier 1)
     {
@@ -853,6 +887,7 @@ pub(crate) async fn start_download_impl(
             url: url.clone(),
             path: path.clone(),
             file_writer: file_mutex.clone(),
+            group_context: group_context.clone(),
         });
     }
 
@@ -912,6 +947,7 @@ pub(crate) async fn start_download_impl(
     let path_monitor = path.clone();
     let etag_monitor = etag.clone();
     let md5_monitor = md5.clone();
+    let group_context_monitor = group_context.clone();
     let mut stop_rx_monitor = stop_tx.subscribe();
     let stop_tx_monitor = stop_tx.clone();
     let chatops_monitor = state.chatops_manager.clone();
@@ -953,6 +989,16 @@ pub(crate) async fn start_download_impl(
                             "error": "Disk write error — the download has been stopped to prevent data corruption."
                         }));
                         let _ = stop_tx_monitor.send(());
+                        
+                        // INTEGRATION POINT 4b: Mark group member as failed on disk error
+                        if let Some((gid, mid)) = &group_context_monitor {
+                            if let Ok(mut scheduler) = GLOBAL_GROUP_SCHEDULER.lock() {
+                                if let Err(e) = scheduler.fail_member(gid, mid, "Disk write error") {
+                                    eprintln!("[{}] Failed to mark member {} failed in group {}: {}", 
+                                              id_monitor, mid, gid, e);
+                                }
+                            }
+                        }
                         // Record in download history
                         let elapsed = monitor_start.elapsed();
                         let _ = crate::download_history::record(crate::download_history::HistoryEntry {
@@ -1046,6 +1092,16 @@ pub(crate) async fn start_download_impl(
                             }));
                             crate::media::sounds::play_error();
                             let _ = stop_tx_monitor.send(());
+
+                            // INTEGRATION POINT 4: Mark group member as failed
+                            if let Some((gid, mid)) = &group_context_monitor {
+                                if let Ok(mut scheduler) = GLOBAL_GROUP_SCHEDULER.lock() {
+                                    if let Err(e) = scheduler.fail_member(gid, mid, &error_msg) {
+                                        eprintln!("[{}] Failed to mark member {} failed in group {}: {}", 
+                                                  id_monitor, mid, gid, e);
+                                    }
+                                }
+                            }
 
                             // Persist as Error with segment state for future resume
                             let segs_snap = segments.clone();
@@ -1471,6 +1527,18 @@ pub(crate) async fn start_download_impl(
                     let _ = window_monitor.emit("download_progress", payload.clone());
                     let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
 
+                    // INTEGRATION POINT 2: Update group member progress
+                    if let Some((gid, mid)) = &group_context_monitor {
+                        let progress = if total_size > 0 {
+                            ((d as f64 / total_size as f64) * 100.0).clamp(0.0, 100.0)
+                        } else {
+                            0.0
+                        };
+                        if let Ok(mut scheduler) = GLOBAL_GROUP_SCHEDULER.lock() {
+                            scheduler.update_member_progress(gid, mid, progress);
+                        }
+                    }
+
                     if total_size > 0 && d >= total_size {
                         let seg_count = manager_monitor.lock().unwrap_or_else(|e| e.into_inner())
                             .segments.read().unwrap_or_else(|e| e.into_inner()).len() as u32;
@@ -1478,6 +1546,17 @@ pub(crate) async fn start_download_impl(
                         if let Err(integrity_error) = verify_queued_integrity(&window_monitor, &id_monitor, &path_monitor).await {
                             mark_retry_for_fresh_restart(&id_monitor);
                             let _ = stop_tx_monitor.send(());
+                            
+                            // INTEGRATION POINT 4c: Mark group member as failed on integrity failure
+                            if let Some((gid, mid)) = &group_context_monitor {
+                                if let Ok(mut scheduler) = GLOBAL_GROUP_SCHEDULER.lock() {
+                                    if let Err(e) = scheduler.fail_member(gid, mid, &integrity_error) {
+                                        eprintln!("[{}] Failed to mark member {} failed in group {}: {}", 
+                                                  id_monitor, mid, gid, e);
+                                    }
+                                }
+                            }
+                            
                             record_integrity_failure(
                                 &window_monitor,
                                 &id_monitor,
@@ -1506,6 +1585,17 @@ pub(crate) async fn start_download_impl(
                             etag_monitor.clone(),
                             chatops_monitor.clone(),
                         );
+                        
+                        // INTEGRATION POINT 3: Mark group member as complete
+                        if let Some((gid, mid)) = &group_context_monitor {
+                            if let Ok(mut scheduler) = GLOBAL_GROUP_SCHEDULER.lock() {
+                                if let Err(e) = scheduler.complete_member(gid, mid) {
+                                    eprintln!("[{}] Failed to mark member {} complete in group {}: {}", 
+                                              id_monitor, mid, gid, e);
+                                }
+                            }
+                        }
+                        
                         // Signal save loop and workers to stop
                         let _ = stop_tx_monitor.send(());
                         // Notify queue manager that a slot opened up (success path resolves deps)

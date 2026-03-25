@@ -66,7 +66,7 @@ pub fn get_mirror_score(url: String) -> Result<MirrorScoreResponse, String> {
 #[tauri::command]
 pub fn record_mirror_success(
     url: String,
-    bytes_transferred: u32,
+    _bytes_transferred: u32,
     latency_ms: u32,
 ) -> Result<(), String> {
     let latency_f64 = latency_ms as f64;

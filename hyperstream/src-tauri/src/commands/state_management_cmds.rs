@@ -203,8 +203,6 @@ impl From<ResumeValidityReport> for ResumeValidityReportResponse {
         }.to_string();
 
         Self {
-            download_id: report.download_id,
-            level,
             can_resume: report.can_resume(),
             requires_confirmation: report.requires_confirmation(),
             cannot_resume: report.cannot_resume(),
@@ -215,6 +213,8 @@ impl From<ResumeValidityReport> for ResumeValidityReportResponse {
             suggested_retry_delay_secs: report.suggested_retry_delay_secs,
             should_restart_from_scratch: report.should_restart_from_scratch,
             summary: report.summary,
+            download_id: report.download_id,
+            level,
         }
     }
 }

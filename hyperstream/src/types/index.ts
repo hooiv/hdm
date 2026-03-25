@@ -400,3 +400,45 @@ export interface FailurePrediction {
     failure_risk_percent: number;
     recommendation: string;
 }
+
+// ---- Download Groups (Feature #2) ----------------------------------------
+
+/** Type for download group state */
+export type GroupState = 'Pending' | 'Downloading' | 'Paused' | 'Completed' | 'Error';
+
+/** Type for execution strategy */
+export type ExecutionStrategy = 'Sequential' | 'Parallel' | 'Hybrid';
+
+/** Response DTO for a group member from backend */
+export interface MemberResponse {
+    id: string;
+    url: string;
+    progress_percent: number;
+    state: string;
+    dependencies_count: number;
+    dependencies: string[];
+}
+
+/** Response DTO for a group from backend */
+export interface GroupResponse {
+    id: string;
+    name: string;
+    state: string;
+    strategy: string;
+    members: MemberResponse[];
+    overall_progress: number;
+    completed_count: number;
+    total_count: number;
+    created_at_ms: number;
+    completed_at_ms: number;
+}
+
+/** Frontend-friendly download group type */
+export interface DownloadGroup extends GroupResponse {
+    // Extends backend response with frontend-specific properties
+}
+
+/** Frontend-friendly group member type */
+export interface GroupMember extends MemberResponse {
+    // Extends backend response with frontend-specific properties
+}

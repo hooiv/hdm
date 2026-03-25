@@ -87,61 +87,6 @@ struct CacheEntry {
     settings: Settings,
     cached_at: Instant,
     generation: u64, // Incremented on each save, used to detect stale reads
-}
-
-/// Settings validation result with detailed error reporting
-#[derive(Debug, Clone)]
-pub struct ValidationResult {
-    pub valid: bool,
-    pub errors: Vec<ValidationError>,
-    pub warnings: Vec<String>,
-}
-
-/// Detailed validation error with context
-#[derive(Debug, Clone)]
-pub struct ValidationError {
-    pub field: String,
-    pub message: String,
-    pub severity: ErrorSeverity,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ErrorSeverity {
-    Critical,    // Must fix, prevents save
-    Warning,     // Should fix, but allow with warning
-}
-
-impl ValidationResult {
-    pub fn valid() -> Self {
-        Self {
-            valid: true,
-            errors: Vec::new(),
-            warnings: Vec::new(),
-        }
-    }
-
-    pub fn add_critical(mut self, field: &str, msg: &str) -> Self {
-        self.valid = false;
-        self.errors.push(ValidationError {
-            field: field.to_string(),
-            message: msg.to_string(),
-            severity: ErrorSeverity::Critical,
-        });
-        self
-    }
-
-    pub fn add_warning(mut self, field: &str, msg: &str) -> Self {
-        self.warnings.push(format!("{}: {}", field, msg));
-        self
-    }
-}
-
-// ============ CACHE ENTRY ============
-#[derive(Clone)]
-struct CacheEntry {
-    settings: Settings,
-    cached_at: Instant,
-    generation: u64, // Incremented on each save, used to detect stale reads
     schema_version: u32, // Track schema version for migrations
 }
 
@@ -340,9 +285,10 @@ impl SettingsCache {
         match self.cache.read() {
             Ok(cache) => Ok(cache.as_ref().map(|e| e.cached_at.elapsed().as_secs())),
             Err(poisoned) => {
+                // Try to recover from poisoned lock
                 self.metrics.write().ok().map(|mut m| m.poisoned_lock_recoveries += 1);
-                Ok(poisoned.get_ref().read().ok()
-                    .and_then(|c| c.as_ref().map(|e| e.cached_at.elapsed().as_secs())))
+                let inner = poisoned.get_ref();
+                Ok(inner.as_ref().map(|e| e.cached_at.elapsed().as_secs()))
             }
         }
     }
@@ -358,10 +304,10 @@ impl SettingsCache {
                 }
             }
             Err(poisoned) => {
+                // Try to recover from poisoned lock
                 self.metrics.write().ok().map(|mut m| m.poisoned_lock_recoveries += 1);
-                Ok(poisoned.get_ref().read().ok()
-                    .map(|c| c.as_ref().map_or(false, |e| e.cached_at.elapsed() < self.ttl))
-                    .unwrap_or(false))
+                let inner = poisoned.get_ref();
+                Ok(inner.as_ref().map_or(false, |e| e.cached_at.elapsed() < self.ttl))
             }
         }
     }
@@ -420,6 +366,9 @@ impl Clone for SettingsCache {
             cache: Arc::clone(&self.cache),
             ttl: self.ttl,
             generation: Arc::clone(&self.generation),
+            metrics: Arc::clone(&self.metrics),
+            last_fallback_settings: Arc::clone(&self.last_fallback_settings),
+            is_degraded: Arc::clone(&self.is_degraded),
         }
     }
 }

@@ -90,7 +90,7 @@ impl AutoRecoveryEngine {
         download_id: &str,
         error: &ClassifiedError,
         file_size: u64,
-        total_size: u64,
+        _total_size: u64,
     ) -> RecoveryPlan {
         let mut actions = Vec::new();
 
@@ -206,12 +206,13 @@ impl AutoRecoveryEngine {
             ));
         }
 
+        let actions_count = actions.len() as u32;
         let plan = RecoveryPlan {
             plan_id: format!("plan-{}-{}", download_id, current_timestamp_ms()),
             download_id: download_id.to_string(),
             error_category: format!("{:?}", error.category),
             actions: actions.into_iter().map(|mut a| {
-                a.priority = actions.len() as u32;
+                a.priority = actions_count;
                 a
             }).collect(),
             current_step: 0,

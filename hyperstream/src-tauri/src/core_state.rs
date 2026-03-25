@@ -47,6 +47,8 @@ pub struct DownloadSession {
     pub path: String,
     #[allow(dead_code)]
     pub file_writer: Arc<Mutex<std::fs::File>>,
+    /// Optional group context: (group_id, member_id)
+    pub group_context: Option<(String, String)>,
 }
 
 pub struct AppState {

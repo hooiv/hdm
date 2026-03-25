@@ -1,0 +1,882 @@
+   Compiling hyperstream v0.1.0 (D:\hdm\hyperstream\src-tauri)
+error[E0433]: failed to resolve: use of undeclared type `Mutex`
+   --> src\engine\hls.rs:996:24
+    |
+996 |             downloads: Mutex::new(HashMap::new()),
+    |                        ^^^^^ use of undeclared type `Mutex`
+    |
+    = note: struct `crate::audio_events::tests::Mutex` exists but is inaccessible
+help: consider importing one of these structs
+    |
+984 +     use crate::Mutex;
+    |
+984 +     use std::sync::Mutex;
+    |
+984 +     use std::sync::nonpoison::Mutex;
+    |
+984 +     use futures::lock::Mutex;
+    |
+    = and 3 other candidates
+
+error[E0433]: failed to resolve: use of undeclared type `Mutex`
+   --> src\engine\hls.rs:997:27
+    |
+997 |             hls_sessions: Mutex::new(HashMap::new()),
+    |                           ^^^^^ use of undeclared type `Mutex`
+    |
+    = note: struct `crate::audio_events::tests::Mutex` exists but is inaccessible
+help: consider importing one of these structs
+    |
+984 +     use crate::Mutex;
+    |
+984 +     use std::sync::Mutex;
+    |
+984 +     use std::sync::nonpoison::Mutex;
+    |
+984 +     use futures::lock::Mutex;
+    |
+    = and 3 other candidates
+
+error[E0433]: failed to resolve: use of undeclared type `Mutex`
+   --> src\engine\hls.rs:998:28
+    |
+998 |             dash_sessions: Mutex::new(HashMap::new()),
+    |                            ^^^^^ use of undeclared type `Mutex`
+    |
+    = note: struct `crate::audio_events::tests::Mutex` exists but is inaccessible
+help: consider importing one of these structs
+    |
+984 +     use crate::Mutex;
+    |
+984 +     use std::sync::Mutex;
+    |
+984 +     use std::sync::nonpoison::Mutex;
+    |
+984 +     use futures::lock::Mutex;
+    |
+    = and 3 other candidates
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `network`
+   --> src\engine\hls.rs:999:32
+    |
+999 |             p2p_node: Arc::new(network::p2p::P2PNode::new()),
+    |                                ^^^^^^^ use of unresolved module or unlinked crate `network`
+    |
+    = help: if you wanted to use a crate named `network`, use `cargo add network` to add it to your `Cargo.toml`
+help: consider importing this struct
+    |
+984 +     use crate::network::p2p::P2PNode;
+    |
+help: if you import `P2PNode`, refer to it directly
+    |
+999 -             p2p_node: Arc::new(network::p2p::P2PNode::new()),
+999 +             p2p_node: Arc::new(P2PNode::new()),
+    |
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `network`
+    --> src\engine\hls.rs:1003:39
+     |
+1003 |             chatops_manager: Arc::new(network::chatops::ChatOpsManager::new()),
+     |                                       ^^^^^^^ use of unresolved module or unlinked crate `network`
+     |
+     = help: if you wanted to use a crate named `network`, use `cargo add network` to add it to your `Cargo.toml`
+help: consider importing this struct
+     |
+ 984 +     use crate::network::chatops::ChatOpsManager;
+     |
+help: if you import `ChatOpsManager`, refer to it directly
+     |
+1003 -             chatops_manager: Arc::new(network::chatops::ChatOpsManager::new()),
+1003 +             chatops_manager: Arc::new(ChatOpsManager::new()),
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `Client`
+    --> src\engine\hls.rs:1009:22
+     |
+1009 |         let client = Client::new();
+     |                      ^^^^^^ use of undeclared type `Client`
+     |
+     = note: these structs exist but are inaccessible:
+             crate::downloader::http_client::tests::Client
+             crate::mirror_hunter::tests::Client
+help: consider importing one of these structs
+     |
+ 984 +     use reqwest::Client;
+     |
+ 984 +     use rquest::Client;
+     |
+ 984 +     use rumqttc::Client;
+     |
+ 984 +     use rumqttc::v5::Client;
+     |
+
+warning: unused import: `tokio::runtime::Runtime`
+   --> src\engine\hls.rs:985:9
+    |
+985 |     use tokio::runtime::Runtime;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `self`
+  --> src\commands\queue_manager_cmds.rs:19:28
+   |
+19 | use crate::queue_manager::{self, DOWNLOAD_QUEUE, DownloadPriority};
+   |                            ^^^^
+
+warning: unused import: `tauri::State`
+  --> src\commands\state_management_cmds.rs:13:5
+   |
+13 | use tauri::State;
+   |     ^^^^^^^^^^^^
+
+warning: unused import: `crate::downloader::structures::Segment`
+ --> src\commands\segment_integrity_cmds.rs:5:5
+  |
+5 | use crate::downloader::structures::Segment;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::persistence::SavedDownload`
+ --> src\commands\segment_integrity_cmds.rs:6:5
+  |
+6 | use crate::persistence::SavedDownload;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused doc comment
+  --> src\commands\download_groups_cmds.rs:62:1
+   |
+62 | /// Global group scheduler instance
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ExecutionStrategy` and `GroupState`
+  --> src\commands\download_groups_cmds.rs:22:58
+   |
+22 | use crate::download_groups::{DownloadGroup, GroupMember, GroupState, ExecutionStrategy};
+   |                                                          ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ExecutionState`
+  --> src\commands\download_groups_cmds.rs:23:46
+   |
+23 | use crate::group_scheduler::{GroupScheduler, ExecutionState};
+   |                                              ^^^^^^^^^^^^^^
+
+warning: unused import: `SystemTime`
+  --> src\settings_cache.rs:14:36
+   |
+14 | use std::time::{Instant, Duration, SystemTime};
+   |                                    ^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src\settings_cache.rs:16:5
+   |
+16 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src\resilience.rs:14:17
+   |
+14 | use std::time::{Duration, SystemTime, UNIX_EPOCH};
+   |                 ^^^^^^^^
+
+warning: unused import: `Duration`
+ --> src\network_diagnostics.rs:6:17
+  |
+6 | use std::time::{Duration, SystemTime, UNIX_EPOCH};
+  |                 ^^^^^^^^
+
+warning: unused imports: `DownloadHealth` and `HealthStatus`
+ --> src\auto_recovery.rs:6:75
+  |
+6 | use crate::resilience::{ClassifiedError, ErrorCategory, ResilienceEngine, DownloadHealth, HealthStatus};
+  |                                                                           ^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `ClassifiedError`
+ --> src\resilience_integration.rs:5:58
+  |
+5 | use crate::resilience::{ResilienceEngine, ErrorCategory, ClassifiedError};
+  |                                                          ^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> src\resilience_integration.rs:137:22
+    |
+137 |         let jitter = (jitter_range / 2); // ┬▒50% of jitter range
+    |                      ^                ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+137 -         let jitter = (jitter_range / 2); // ┬▒50% of jitter range
+137 +         let jitter = jitter_range / 2; // ┬▒50% of jitter range
+    |
+
+warning: unused import: `std::time::Duration`
+   --> src\mirror_scoring.rs:205:9
+    |
+205 |     use std::time::Duration;
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src\session_state.rs:17:17
+   |
+17 | use std::time::{Duration, SystemTime, UNIX_EPOCH};
+   |                 ^^^^^^^^
+
+warning: unused import: `std::path::Path`
+  --> src\session_recovery.rs:14:5
+   |
+14 | use std::path::Path;
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `SegmentState`
+  --> src\segment_integrity.rs:10:46
+   |
+10 | use crate::downloader::structures::{Segment, SegmentState};
+   |                                              ^^^^^^^^^^^^
+
+warning: unused imports: `AtomicU64` and `Ordering`
+  --> src\segment_integrity.rs:15:25
+   |
+15 | use std::sync::atomic::{AtomicU64, Ordering};
+   |                         ^^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `lazy_static::lazy_static`
+  --> src\segment_integrity.rs:21:5
+   |
+21 | use lazy_static::lazy_static;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `core_state::DownloadSession: Clone` is not satisfied
+    --> src\commands\segment_integrity_cmds.rs:20:10
+     |
+  20 |         .cloned()
+     |          ^^^^^^ the trait `Clone` is not implemented for `core_state::DownloadSession`
+     |
+note: required by a bound in `std::option::Option::<&T>::cloned`
+    --> C:\Users\aditya\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:2074:12
+     |
+2072 |     pub fn cloned(self) -> Option<T>
+     |            ------ required by a bound in this associated function
+2073 |     where
+2074 |         T: Clone,
+     |            ^^^^^ required by this bound in `Option::<&T>::cloned`
+help: consider annotating `core_state::DownloadSession` with `#[derive(Clone)]`
+    -->  src\core_state.rs:40:1
+     |
+  40 + #[derive(Clone)]
+  41 | pub struct DownloadSession {
+     |
+
+error[E0609]: no field `segments` on type `core_state::DownloadSession`
+  --> src\commands\segment_integrity_cmds.rs:27:53
+   |
+27 |     let segments = if let Some(ref segs) = download.segments {
+   |                                                     ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `manager`, `stop_tx`, `url`, `path`, `file_writer`
+
+error[E0282]: type annotations needed
+  --> src\commands\segment_integrity_cmds.rs:28:14
+   |
+28 |         segs.clone()
+   |              ^^^^^ cannot infer type
+
+error[E0277]: the trait bound `core_state::DownloadSession: Clone` is not satisfied
+    --> src\commands\segment_integrity_cmds.rs:53:10
+     |
+  53 |         .cloned()
+     |          ^^^^^^ the trait `Clone` is not implemented for `core_state::DownloadSession`
+     |
+note: required by a bound in `std::option::Option::<&T>::cloned`
+    --> C:\Users\aditya\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:2074:12
+     |
+2072 |     pub fn cloned(self) -> Option<T>
+     |            ------ required by a bound in this associated function
+2073 |     where
+2074 |         T: Clone,
+     |            ^^^^^ required by this bound in `Option::<&T>::cloned`
+help: consider annotating `core_state::DownloadSession` with `#[derive(Clone)]`
+    -->  src\core_state.rs:40:1
+     |
+  40 + #[derive(Clone)]
+  41 | pub struct DownloadSession {
+     |
+
+error[E0609]: no field `segments` on type `core_state::DownloadSession`
+  --> src\commands\segment_integrity_cmds.rs:59:53
+   |
+59 |     let segments = if let Some(ref segs) = download.segments {
+   |                                                     ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `manager`, `stop_tx`, `url`, `path`, `file_writer`
+
+error[E0282]: type annotations needed
+  --> src\commands\segment_integrity_cmds.rs:60:14
+   |
+60 |         segs.clone()
+   |              ^^^^^ cannot infer type
+
+error[E0624]: associated function `verify_segment` is private
+   --> src\commands\segment_integrity_cmds.rs:81:46
+    |
+ 81 |           let info = SegmentIntegrityVerifier::verify_segment(
+    |                                                ^^^^^^^^^^^^^^ private associated function
+    |
+   ::: src\segment_integrity.rs:282:5
+    |
+282 | /     async fn verify_segment(
+283 | |         file_path: &Path,
+284 | |         segment: &Segment,
+285 | |         segment_id: usize,
+286 | |         checksum_algo: ChecksumAlgorithm,
+287 | |     ) -> Result<SegmentIntegrityInfo, String> {
+    | |_____________________________________________- private associated function defined here
+
+error[E0277]: the trait bound `core_state::DownloadSession: Clone` is not satisfied
+    --> src\commands\segment_integrity_cmds.rs:132:52
+     |
+ 132 |         if let Some(download) = downloads.get(&id).cloned() {
+     |                                                    ^^^^^^ the trait `Clone` is not implemented for `core_state::DownloadSession`
+     |
+note: required by a bound in `std::option::Option::<&T>::cloned`
+    --> C:\Users\aditya\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:2074:12
+     |
+2072 |     pub fn cloned(self) -> Option<T>
+     |            ------ required by a bound in this associated function
+2073 |     where
+2074 |         T: Clone,
+     |            ^^^^^ required by this bound in `Option::<&T>::cloned`
+help: consider annotating `core_state::DownloadSession` with `#[derive(Clone)]`
+    -->  src\core_state.rs:40:1
+     |
+  40 + #[derive(Clone)]
+  41 | pub struct DownloadSession {
+     |
+
+error[E0609]: no field `segments` on type `core_state::DownloadSession`
+   --> src\commands\segment_integrity_cmds.rs:135:50
+    |
+135 |             if let Some(ref segments) = download.segments {
+    |                                                  ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `manager`, `stop_tx`, `url`, `path`, `file_writer`
+
+error[E0277]: the size for values of type `[Segment]` cannot be known at compilation time
+   --> src\commands\segment_integrity_cmds.rs:135:20
+    |
+135 |             if let Some(ref segments) = download.segments {
+    |                    ^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `[Segment]`
+note: required by a bound in `std::prelude::v1::Some`
+   --> C:\Users\aditya\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:594:17
+    |
+594 | pub enum Option<T> {
+    |                 ^ required by this bound in `std::prelude::v1::Some`
+...
+602 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     ---- required by a bound in this tuple variant
+
+error[E0061]: this function takes 1 argument but 0 arguments were supplied
+   --> src\core_state.rs:134:32
+    |
+134 |             p2p_node: Arc::new(network::p2p::P2PNode::new()),
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^-- argument #1 of type `u16` is missing
+    |
+note: associated function defined here
+   --> src\network\p2p.rs:102:18
+    |
+102 |     pub async fn new(ws_port: u16) -> Result<Self, String> {
+    |                  ^^^ ------------
+help: provide the argument
+    |
+134 |             p2p_node: Arc::new(network::p2p::P2PNode::new(/* u16 */)),
+    |                                                           +++++++++
+
+error[E0308]: mismatched types
+   --> src\core_state.rs:134:32
+    |
+134 |             p2p_node: Arc::new(network::p2p::P2PNode::new()),
+    |                       -------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `P2PNode`, found future
+    |                       |
+    |                       arguments to this function are incorrect
+    |
+note: associated function defined here
+   --> C:\Users\aditya\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\sync.rs:406:12
+    |
+406 |     pub fn new(data: T) -> Arc<T> {
+    |            ^^^
+
+error[E0061]: this function takes 1 argument but 0 arguments were supplied
+    --> src\engine\hls.rs:1000:27
+     |
+1000 |             p2p_file_map: http_server::FileMap::new(),
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^-- argument #1 of type `std::sync::Mutex<std::collections::HashMap<std::string::String, http_server::StreamingSource>>` is missing
+     |
+note: associated function defined here
+    --> C:\Users\aditya\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\sync.rs:406:12
+     |
+ 406 |     pub fn new(data: T) -> Arc<T> {
+     |            ^^^
+help: provide the argument
+     |
+1000 |             p2p_file_map: http_server::FileMap::new(/* std::sync::Mutex<std::collections::HashMap<std::string::String, http_server::StreamingSource>> */),
+     |                                                     ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0308]: mismatched types
+    --> src\engine\hls.rs:1017:30
+     |
+1017 |             target_duration: 5.0,
+     |                              ^^^ expected `u64`, found floating-point number
+
+error[E0560]: struct `MediaSegment` has no field named `unknown`
+    --> src\engine\hls.rs:1025:21
+     |
+1025 |                     unknown: Vec::new(),
+     |                     ^^^^^^^ `MediaSegment` does not have this field
+     |
+     = note: available fields are: `title`, `map`, `program_date_time`, `daterange`, `unknown_tags`
+
+error[E0560]: struct `MediaSegment` has no field named `unknown`
+    --> src\engine\hls.rs:1033:21
+     |
+1033 |                     unknown: Vec::new(),
+     |                     ^^^^^^^ `MediaSegment` does not have this field
+     |
+     = note: available fields are: `title`, `map`, `program_date_time`, `daterange`, `unknown_tags`
+
+error[E0599]: no function or associated item named `default` found for struct `AppHandle<R>` in the current scope
+    --> src\engine\hls.rs:1056:37
+     |
+1056 |         let app = tauri::AppHandle::default(); // dummy handle, not used
+     |                                     ^^^^^^^ function or associated item not found in `AppHandle<_>`
+
+error[E0308]: mismatched types
+   --> src\commands\settings_cmds.rs:225:13
+    |
+224 |         match load_settings() {
+    |               --------------- this expression has type `settings::Settings`
+225 |             Ok(fresh) => Ok(fresh),
+    |             ^^^^^^^^^ expected `Settings`, found `Result<_, _>`
+    |
+    = note: expected struct `settings::Settings`
+                 found enum `Result<_, _>`
+
+error[E0308]: mismatched types
+   --> src\commands\settings_cmds.rs:226:13
+    |
+224 |         match load_settings() {
+    |               --------------- this expression has type `settings::Settings`
+225 |             Ok(fresh) => Ok(fresh),
+226 |             Err(_) => {
+    |             ^^^^^^ expected `Settings`, found `Result<_, _>`
+    |
+    = note: expected struct `settings::Settings`
+                 found enum `Result<_, _>`
+
+error[E0308]: mismatched types
+   --> src\commands\settings_cmds.rs:252:9
+    |
+251 |     match crate::settings::load_settings_uncached() {
+    |           ----------------------------------------- this expression has type `settings::Settings`
+252 |         Ok(settings) => {
+    |         ^^^^^^^^^^^^ expected `Settings`, found `Result<_, _>`
+    |
+    = note: expected struct `settings::Settings`
+                 found enum `Result<_, _>`
+
+error[E0308]: mismatched types
+   --> src\commands\settings_cmds.rs:257:9
+    |
+251 |     match crate::settings::load_settings_uncached() {
+    |           ----------------------------------------- this expression has type `settings::Settings`
+...
+257 |         Err(e) => {
+    |         ^^^^^^ expected `Settings`, found `Result<_, _>`
+    |
+    = note: expected struct `settings::Settings`
+                 found enum `Result<_, _>`
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+  --> src\commands\queue_manager_cmds.rs:60:10
+   |
+60 |         .queue
+   |          ^^^^^ unknown field
+
+error[E0616]: field `max_concurrent` of struct `queue_manager::DownloadQueue` is private
+  --> src\commands\queue_manager_cmds.rs:81:31
+   |
+81 |         max_concurrent: queue.max_concurrent,
+   |                               ^^^^^^^^^^^^^^ private field
+
+error[E0609]: no field `active_set` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+  --> src\commands\queue_manager_cmds.rs:82:29
+   |
+82 |         active_count: queue.active_set.len() as u32,
+   |                             ^^^^^^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+  --> src\commands\queue_manager_cmds.rs:83:29
+   |
+83 |         queued_count: queue.queue.len() as u32,
+   |                             ^^^^^ unknown field
+
+error[E0609]: no field `active_set` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+  --> src\commands\queue_manager_cmds.rs:85:27
+   |
+85 |         active_ids: queue.active_set.iter().cloned().collect(),
+   |                           ^^^^^^^^^^ unknown field
+
+error[E0616]: field `paused` of struct `queue_manager::DownloadQueue` is private
+  --> src\commands\queue_manager_cmds.rs:86:23
+   |
+86 |         paused: queue.paused,
+   |                       ^^^^^^ private field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:109:10
+    |
+109 |         .queue
+    |          ^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:139:11
+    |
+139 |     queue.queue.retain(|dl| dl.id != id);
+    |           ^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:158:29
+    |
+158 |     if let Some(dl) = queue.queue.iter_mut().find(|d| d.id == id) {
+    |                             ^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:173:30
+    |
+173 |     if let Some(pos) = queue.queue.iter().position(|dl| dl.id == id) {
+    |                              ^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:174:26
+    |
+174 |         let item = queue.queue.remove(pos);
+    |                          ^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:175:15
+    |
+175 |         queue.queue.push_front(item);
+    |               ^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:189:30
+    |
+189 |     if let Some(pos) = queue.queue.iter().position(|dl| dl.id == id) {
+    |                              ^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:191:30
+    |
+191 |             let item = queue.queue.remove(pos);
+    |                              ^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:192:19
+    |
+192 |             queue.queue.insert(pos - 1, item);
+    |                   ^^^^^ unknown field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:207:11
+    |
+207 |     queue.queue.clear();
+    |           ^^^^^ unknown field
+
+error[E0616]: field `max_concurrent` of struct `queue_manager::DownloadQueue` is private
+   --> src\commands\queue_manager_cmds.rs:269:14
+    |
+269 |     Ok(queue.max_concurrent)
+    |              ^^^^^^^^^^^^^^ private field
+
+error[E0609]: no field `queue` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:291:29
+    |
+291 |         total_queued: queue.queue.len(),
+    |                             ^^^^^ unknown field
+
+error[E0609]: no field `active_set` on type `std::sync::MutexGuard<'_, queue_manager::DownloadQueue>`
+   --> src\commands\queue_manager_cmds.rs:292:29
+    |
+292 |         total_active: queue.active_set.len(),
+    |                             ^^^^^^^^^^ unknown field
+
+error[E0616]: field `max_concurrent` of struct `queue_manager::DownloadQueue` is private
+   --> src\commands\queue_manager_cmds.rs:294:31
+    |
+294 |         max_concurrent: queue.max_concurrent,
+    |                               ^^^^^^^^^^^^^^ private field
+
+error[E0599]: no method named `read` found for reference `&std::sync::RwLockReadGuard<'_, std::option::Option<CacheEntry>>` in the current scope
+   --> src\settings_cache.rs:200:54
+    |
+200 |                 let cache_guard = poisoned.get_ref().read();
+    |                                                      ^^^^ method not found in `&std::sync::RwLockReadGuard<'_, std::option::Option<CacheEntry>>`
+
+error[E0599]: no method named `clear_poison` found for struct `PoisonError<T>` in the current scope
+   --> src\settings_cache.rs:246:34
+    |
+246 |                 let _ = poisoned.clear_poison();
+    |                                  ^^^^^^^^^^^^ method not found in `PoisonError<std::sync::RwLockWriteGuard<'_, std::option::Option<CacheEntry>>>`
+
+error[E0599]: no method named `write` found for mutable reference `&mut std::sync::RwLockWriteGuard<'_, std::option::Option<CacheEntry>>` in the current scope
+   --> src\settings_cache.rs:247:59
+    |
+247 |                 if let Ok(mut cache) = poisoned.get_mut().write() {
+    |                                                           ^^^^^ method not found in `&mut std::sync::RwLockWriteGuard<'_, std::option::Option<CacheEntry>>`
+
+error[E0599]: no method named `clear_poison` found for struct `PoisonError<T>` in the current scope
+   --> src\settings_cache.rs:272:34
+    |
+272 |                 let _ = poisoned.clear_poison();
+    |                                  ^^^^^^^^^^^^ method not found in `PoisonError<std::sync::RwLockWriteGuard<'_, std::option::Option<CacheEntry>>>`
+
+error[E0599]: no method named `write` found for mutable reference `&mut std::sync::RwLockWriteGuard<'_, std::option::Option<CacheEntry>>` in the current scope
+   --> src\settings_cache.rs:273:59
+    |
+273 |                 if let Ok(mut cache) = poisoned.get_mut().write() {
+    |                                                           ^^^^^ method not found in `&mut std::sync::RwLockWriteGuard<'_, std::option::Option<CacheEntry>>`
+
+error[E0308]: mismatched types
+   --> src\media\hls_parser.rs:226:30
+    |
+226 |             target_duration: 5.0,
+    |                              ^^^ expected `u64`, found floating-point number
+
+error[E0560]: struct `MediaSegment` has no field named `unknown`
+   --> src\media\hls_parser.rs:234:21
+    |
+234 |                     unknown: Vec::new(),
+    |                     ^^^^^^^ `MediaSegment` does not have this field
+    |
+    = note: available fields are: `title`, `map`, `program_date_time`, `daterange`, `unknown_tags`
+
+error[E0560]: struct `MediaSegment` has no field named `unknown`
+   --> src\media\hls_parser.rs:242:21
+    |
+242 |                     unknown: Vec::new(),
+    |                     ^^^^^^^ `MediaSegment` does not have this field
+    |
+    = note: available fields are: `title`, `map`, `program_date_time`, `daterange`, `unknown_tags`
+
+error[E0308]: mismatched types
+   --> src\media\hls_parser.rs:259:30
+    |
+259 |             target_duration: 4.0,
+    |                              ^^^ expected `u64`, found floating-point number
+
+error[E0560]: struct `MediaSegment` has no field named `unknown`
+   --> src\media\hls_parser.rs:267:21
+    |
+267 |                     unknown: Vec::new(),
+    |                     ^^^^^^^ `MediaSegment` does not have this field
+    |
+    = note: available fields are: `title`, `map`, `program_date_time`, `daterange`, `unknown_tags`
+
+error[E0308]: mismatched types
+   --> src\media\hls_parser.rs:281:21
+    |
+281 |             method: "AES-128".to_string(),
+    |                     ^^^^^^^^^^^^^^^^^^^^^ expected `KeyMethod`, found `String`
+    |
+help: try wrapping the expression in `m3u8_rs::KeyMethod::Other`
+    |
+281 |             method: m3u8_rs::KeyMethod::Other("AES-128".to_string()),
+    |                     ++++++++++++++++++++++++++                     +
+
+error[E0308]: mismatched types
+   --> src\media\hls_parser.rs:290:30
+    |
+290 |             target_duration: 6.0,
+    |                              ^^^ expected `u64`, found floating-point number
+
+error[E0560]: struct `MediaSegment` has no field named `unknown`
+   --> src\media\hls_parser.rs:298:21
+    |
+298 |                     unknown: Vec::new(),
+    |                     ^^^^^^^ `MediaSegment` does not have this field
+    |
+    = note: available fields are: `title`, `map`, `program_date_time`, `daterange`, `unknown_tags`
+
+error[E0560]: struct `MediaSegment` has no field named `unknown`
+   --> src\media\hls_parser.rs:306:21
+    |
+306 |                     unknown: Vec::new(),
+    |                     ^^^^^^^ `MediaSegment` does not have this field
+    |
+    = note: available fields are: `title`, `map`, `program_date_time`, `daterange`, `unknown_tags`
+
+error[E0308]: mismatched types
+   --> src\media\hls_parser.rs:328:21
+    |
+328 |             method: "AES-128".to_string(),
+    |                     ^^^^^^^^^^^^^^^^^^^^^ expected `KeyMethod`, found `String`
+    |
+help: try wrapping the expression in `m3u8_rs::KeyMethod::Other`
+    |
+328 |             method: m3u8_rs::KeyMethod::Other("AES-128".to_string()),
+    |                     ++++++++++++++++++++++++++                     +
+
+error[E0308]: mismatched types
+   --> src\media\hls_parser.rs:335:21
+    |
+335 |             method: "NONE".to_string(),
+    |                     ^^^^^^^^^^^^^^^^^^ expected `KeyMethod`, found `String`
+    |
+help: try wrapping the expression in `m3u8_rs::KeyMethod::Other`
+    |
+335 |             method: m3u8_rs::KeyMethod::Other("NONE".to_string()),
+    |                     ++++++++++++++++++++++++++                  +
+
+error[E0308]: mismatched types
+   --> src\media\hls_parser.rs:344:30
+    |
+344 |             target_duration: 6.0,
+    |                              ^^^ expected `u64`, found floating-point number
+
+error[E0560]: struct `MediaSegment` has no field named `unknown`
+   --> src\media\hls_parser.rs:352:21
+    |
+352 |                     unknown: Vec::new(),
+    |                     ^^^^^^^ `MediaSegment` does not have this field
+    |
+    = note: available fields are: `title`, `map`, `program_date_time`, `daterange`, `unknown_tags`
+
+error[E0560]: struct `MediaSegment` has no field named `unknown`
+   --> src\media\hls_parser.rs:360:21
+    |
+360 |                     unknown: Vec::new(),
+    |                     ^^^^^^^ `MediaSegment` does not have this field
+    |
+    = note: available fields are: `title`, `map`, `program_date_time`, `daterange`, `unknown_tags`
+
+error[E0560]: struct `VariantStream` has no field named `unknown`
+   --> src\media\hls_parser.rs:396:21
+    |
+396 |                     unknown: Vec::new(),
+    |                     ^^^^^^^ `VariantStream` does not have this field
+    |
+    = note: available fields are: `hdcp_level`, `other_attributes`
+
+error[E0560]: struct `VariantStream` has no field named `unknown`
+   --> src\media\hls_parser.rs:410:21
+    |
+410 |                     unknown: Vec::new(),
+    |                     ^^^^^^^ `VariantStream` does not have this field
+    |
+    = note: available fields are: `hdcp_level`, `other_attributes`
+
+error[E0560]: struct `m3u8_rs::MasterPlaylist` has no field named `unknown`
+   --> src\media\hls_parser.rs:418:13
+    |
+418 |             unknown: Vec::new(),
+    |             ^^^^^^^ `m3u8_rs::MasterPlaylist` does not have this field
+    |
+    = note: available fields are: `alternatives`, `unknown_tags`
+
+error[E0308]: mismatched types
+   --> src\resilience_analytics.rs:383:61
+    |
+383 |             analytics.record_metric("dl1", 100 * i, 50 * i, 10 + i, 5_000);
+    |                       -------------                         ^^^^^^ expected `u32`, found `u64`
+    |                       |
+    |                       arguments to this method are incorrect
+    |
+note: method defined here
+   --> src\resilience_analytics.rs:99:12
+    |
+ 99 |     pub fn record_metric(
+    |            ^^^^^^^^^^^^^
+...
+104 |         retries: u32,
+    |         ------------
+help: you can convert a `u64` to a `u32` and panic if the converted value doesn't fit
+    |
+383 |             analytics.record_metric("dl1", 100 * i, 50 * i, (10 + i).try_into().unwrap(), 5_000);
+    |                                                             +      +++++++++++++++++++++
+
+error[E0277]: can't compare `&std::string::String` with `std::string::String`
+   --> src\group_scheduler.rs:720:62
+    |
+720 |         let group2_id = scheduler.groups.keys().find(|id| id != &group1_id).unwrap().clone();
+    |                                                              ^^ no implementation for `&std::string::String == std::string::String`
+    |
+    = help: the trait `PartialEq<std::string::String>` is not implemented for `&std::string::String`
+    = note: required for `&&std::string::String` to implement `PartialEq<&std::string::String>`
+help: consider dereferencing here
+    |
+720 |         let group2_id = scheduler.groups.keys().find(|id| *id != &group1_id).unwrap().clone();
+    |                                                           +
+
+error[E0061]: this function takes 1 argument but 0 arguments were supplied
+    --> src\lib.rs:5084:32
+     |
+5084 |             p2p_node: Arc::new(network::p2p::P2PNode::new()),
+     |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^-- argument #1 of type `u16` is missing
+     |
+note: associated function defined here
+    --> src\network\p2p.rs:102:18
+     |
+ 102 |     pub async fn new(ws_port: u16) -> Result<Self, String> {
+     |                  ^^^ ------------
+help: provide the argument
+     |
+5084 |             p2p_node: Arc::new(network::p2p::P2PNode::new(/* u16 */)),
+     |                                                           +++++++++
+
+error[E0308]: mismatched types
+    --> src\lib.rs:5084:32
+     |
+5084 |             p2p_node: Arc::new(network::p2p::P2PNode::new()),
+     |                       -------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `P2PNode`, found future
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> C:\Users\aditya\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\sync.rs:406:12
+     |
+ 406 |     pub fn new(data: T) -> Arc<T> {
+     |            ^^^
+
+error[E0063]: missing field `speed_bps` in initializer of `core_state::HlsSession`
+    --> src\lib.rs:5131:13
+     |
+5131 |             HlsSession {
+     |             ^^^^^^^^^^ missing `speed_bps`
+
+warning: unused import: `sha2::Digest`
+ --> src\mirror_hunter.rs:6:5
+  |
+6 | use sha2::Digest as _;
+  |     ^^^^^^^^^^^^
+
+warning: unused import: `AsyncSeekExt`
+  --> src\segment_integrity.rs:19:31
+   |
+19 | use tokio::io::{AsyncReadExt, AsyncSeekExt};
+   |                               ^^^^^^^^^^^^
+
+warning: unused variable: `plan`
+   --> src\auto_recovery.rs:396:13
+    |
+396 |         let plan = recovery.generate_plan("dl1", &error, 50, 500);
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_plan`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0061, E0063, E0277, E0282, E0308, E0433, E0560, E0599, E0609...
+For more information about an error, try `rustc --explain E0061`.
+warning: `hyperstream` (lib test) generated 24 warnings
+error: could not compile `hyperstream` (lib test) due to 74 previous errors; 24 warnings emitted

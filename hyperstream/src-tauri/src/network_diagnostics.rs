@@ -141,6 +141,7 @@ impl NetworkDiagnostics {
     ) -> DiagnosticReport {
         let pattern = self.detect_network_pattern();
         let recommendations = self.generate_recommendations(&pattern, error_type);
+        let root_cause = self.hypothesize_root_cause(&pattern, error_type);
 
         let report = DiagnosticReport {
             issue_id: format!("diag-{}", current_timestamp_ms()),
@@ -150,7 +151,7 @@ impl NetworkDiagnostics {
             diagnostic_tests: tests,
             network_pattern: pattern,
             recommendations,
-            root_cause_hypothesis: self.hypothesize_root_cause(&pattern, error_type),
+            root_cause_hypothesis: root_cause,
         };
 
         self.diagnostic_reports.write().unwrap().push(report.clone());

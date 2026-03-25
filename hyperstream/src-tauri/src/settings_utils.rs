@@ -87,17 +87,20 @@ where
 pub fn acquire_lock_safe<'a, T>(
     lock: &'a std::sync::RwLock<T>,
     operation: &str,
-    timeout_ms: u64,
+    _timeout_ms: u64,
 ) -> Result<std::sync::RwLockReadGuard<'a, T>, String> {
     // Note: RwLock::try_read doesn't have timeout in std,
     // so we do a simple non-blocking attempt
     match lock.try_read() {
         Ok(guard) => Ok(guard),
         Err(e) => {
-            if e.is_poisoned() {
-                Err(format!("[{}] Lock poisoned, cache in degraded state", operation))
-            } else {
-                Err(format!("[{}] Failed to acquire read lock: {}", operation, e))
+            match e {
+                std::sync::TryLockError::Poisoned(_) => {
+                    Err(format!("[{}] Lock poisoned, cache in degraded state", operation))
+                }
+                std::sync::TryLockError::WouldBlock => {
+                    Err(format!("[{}] Failed to acquire read lock: lock would block", operation))
+                }
             }
         }
     }
