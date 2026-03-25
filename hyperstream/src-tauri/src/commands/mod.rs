@@ -7,5 +7,6 @@ pub mod queue_manager_cmds;
 pub mod resilience_cmds;
 pub mod state_management_cmds;
 pub mod segment_integrity_cmds;
+pub mod mirror_scoring_cmds;
 
 
