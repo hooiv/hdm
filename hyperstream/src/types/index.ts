@@ -384,3 +384,19 @@ export interface DownloadTask {
     // used by overlays/trackers for internal timing, not persisted
     lastUpdate?: number;
 }
+
+/** Mirror scoring and reliability metrics */
+export interface MirrorScore {
+    url: string;
+    reliability_score: number;
+    speed_score: number;
+    uptime_percentage: number;
+    risk_level: 'healthy' | 'caution' | 'warning' | 'critical';
+}
+
+/** Failure prediction for a mirror */
+export interface FailurePrediction {
+    url: string;
+    failure_risk_percent: number;
+    recommendation: string;
+}
