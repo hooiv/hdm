@@ -56,6 +56,8 @@ pub mod mirror_scoring;
 pub mod failure_prediction;
 pub mod download_groups;
 pub mod group_scheduler;
+pub mod group_persistence;
+pub mod group_engine;
 
 // mod virtual_drive;
 mod cloud_bridge;
@@ -4248,6 +4250,20 @@ fn classify_network_requests(
             commands::settings_cmds::get_cache_generation,
             commands::settings_cmds::invalidate_settings_cache,
             commands::settings_cmds::get_settings_with_stats,
+            // Download Groups Commands
+            commands::download_groups_cmds::create_download_group,
+            commands::download_groups_cmds::add_member_to_group,
+            commands::download_groups_cmds::add_group_dependency,
+            commands::download_groups_cmds::get_group_details,
+            commands::download_groups_cmds::start_group_download,
+            commands::download_groups_cmds::pause_group_download,
+            commands::download_groups_cmds::get_next_group_member,
+            commands::download_groups_cmds::update_member_progress,
+            commands::download_groups_cmds::complete_group_member,
+            commands::download_groups_cmds::list_all_groups,
+            commands::download_groups_cmds::delete_download_group,
+            commands::download_groups_cmds::restore_groups_from_disk,
+            commands::download_groups_cmds::save_groups_to_disk,
             commands::settings_cmds::save_settings_with_validation,
             commands::settings_cmds::get_field_validation_errors,
             // Production-grade Cache Commands

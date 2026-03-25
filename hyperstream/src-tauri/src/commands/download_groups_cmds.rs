@@ -109,8 +109,12 @@ pub fn create_download_group(name: String) -> Result<GroupResponse, String> {
         .map_err(|e| format!("Failed to acquire scheduler lock: {}", e))?;
 
     scheduler
-        .schedule_group(group)
+        .schedule_group(group.clone())
         .map_err(|e| format!("Failed to schedule group: {}", e))?;
+
+    // Persist to disk
+    crate::group_persistence::upsert_group(&group)
+        .map_err(|e| format!("Failed to persist group: {}", e))?;
 
     Ok(group_response)
 }
@@ -131,6 +135,10 @@ pub fn add_member_to_group(
         .ok_or_else(|| format!("Group {} not found", group_id))?;
 
     let member_id = group.add_member(&url, dependencies);
+
+    // Persist changes
+    crate::group_persistence::upsert_group(group)
+        .map_err(|e| format!("Failed to persist group: {}", e))?;
 
     Ok(member_id)
 }
@@ -166,6 +174,10 @@ pub fn add_group_dependency(
     }
 
     group.add_dependency(dependent_id, prerequisite_id);
+
+    // Persist changes
+    crate::group_persistence::upsert_group(group)
+        .map_err(|e| format!("Failed to persist group: {}", e))?;
 
     Ok(())
 }
@@ -254,6 +266,12 @@ pub fn update_member_progress(
     let clamped_progress = progress_percent.clamp(0.0, 100.0);
     group.update_member_progress(&member_id, clamped_progress);
 
+    // Persist progress updates periodically (every 10%)
+    if clamped_progress % 10.0 < 1.0 || clamped_progress >= 100.0 {
+        crate::group_persistence::upsert_group(group)
+            .map_err(|e| format!("Failed to persist group: {}", e))?;
+    }
+
     Ok(())
 }
 
@@ -287,6 +305,64 @@ pub fn list_all_groups() -> Result<Vec<GroupResponse>, String> {
         .collect();
 
     Ok(groups)
+}
+
+/// Delete a download group
+#[command]
+pub fn delete_download_group(group_id: String) -> Result<(), String> {
+    let mut scheduler = GLOBAL_GROUP_SCHEDULER
+        .lock()
+        .map_err(|e| format!("Failed to acquire scheduler lock: {}", e))?;
+
+    // Remove from scheduler
+    scheduler.remove_group(&group_id)?;
+
+    // Remove from persistence
+    crate::group_persistence::remove_group(&group_id)
+        .map_err(|e| format!("Failed to remove group from disk: {}", e))?;
+
+    Ok(())
+}
+
+/// Load groups from disk on startup
+#[command]
+pub fn restore_groups_from_disk() -> Result<usize, String> {
+    let persisted = crate::group_persistence::load_groups()
+        .map_err(|e| format!("Failed to load groups: {}", e))?;
+
+    let mut scheduler = GLOBAL_GROUP_SCHEDULER
+        .lock()
+        .map_err(|e| format!("Failed to acquire scheduler lock: {}", e))?;
+
+    let mut count = 0;
+    for (_id, group) in persisted.groups {
+        if let Ok(()) = scheduler.schedule_group(group) {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Save current groups to disk (manual save)
+#[command]
+pub fn save_groups_to_disk() -> Result<usize, String> {
+    let scheduler = GLOBAL_GROUP_SCHEDULER
+        .lock()
+        .map_err(|e| format!("Failed to acquire scheduler lock: {}", e))?;
+
+    let groups: std::collections::HashMap<String, DownloadGroup> = scheduler
+        .get_all_groups()
+        .iter()
+        .map(|g| (g.id.clone(), (*g).clone()))
+        .collect();
+
+    let count = groups.len();
+
+    crate::group_persistence::save_groups(&groups)
+        .map_err(|e| format!("Failed to save groups: {}", e))?;
+
+    Ok(count)
 }
 
 #[cfg(test)]

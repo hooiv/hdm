@@ -289,6 +289,17 @@ impl GroupScheduler {
         self.execution_states.get(group_id).cloned()
     }
 
+    /// Remove a group from the scheduler
+    pub fn remove_group(&mut self, group_id: &str) -> Result<(), String> {
+        if !self.groups.contains_key(group_id) {
+            return Err(format!("Group {} not found", group_id));
+        }
+
+        self.groups.remove(group_id);
+        self.execution_states.remove(group_id);
+        Ok(())
+    }
+
     /// Get all groups currently in the scheduler
     pub fn get_all_groups(&self) -> Vec<&DownloadGroup> {
         self.groups.values().collect()
