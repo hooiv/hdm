@@ -18,8 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod downloader;
 mod persistence;
 mod http_server;
+mod commands;
 use crate::http_server::StreamingSource;
 mod settings;
+pub mod settings_cache;
 mod speed_limiter;
 mod speed_profiles;
 mod download_history;
@@ -4288,7 +4290,36 @@ fn classify_network_requests(
             // Video Stream Detection
             probe_video_url,
             scan_page_for_streams,
-            classify_network_requests
+            classify_network_requests,
+            // Settings Cache Commands
+            commands::settings_cmds::get_settings_cache_stats,
+            commands::settings_cmds::validate_settings,
+            commands::settings_cmds::reload_settings_from_disk,
+            commands::settings_cmds::get_cache_generation,
+            commands::settings_cmds::invalidate_settings_cache,
+            commands::settings_cmds::get_settings_with_stats,
+            commands::settings_cmds::save_settings_with_validation,
+            commands::settings_cmds::get_field_validation_errors,
+            // Crash Recovery Commands (already defined in lib.rs)
+            scan_crashed_downloads,
+            get_interrupted_downloads,
+            resume_interrupted_download,
+            resume_all_interrupted,
+            // Queue Manager Commands
+            commands::queue_manager_cmds::get_queue_status,
+            commands::queue_manager_cmds::get_queue_groups,
+            commands::queue_manager_cmds::get_queue_items,
+            commands::queue_manager_cmds::remove_from_queue,
+            commands::queue_manager_cmds::set_queue_priority,
+            commands::queue_manager_cmds::move_queue_item_to_front,
+            commands::queue_manager_cmds::move_queue_item_up,
+            commands::queue_manager_cmds::clear_download_queue,
+            commands::queue_manager_cmds::pause_queue,
+            commands::queue_manager_cmds::resume_queue,
+            commands::queue_manager_cmds::is_queue_paused,
+            commands::queue_manager_cmds::set_max_concurrent_downloads,
+            commands::queue_manager_cmds::get_max_concurrent_downloads,
+            commands::queue_manager_cmds::get_queue_stats
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

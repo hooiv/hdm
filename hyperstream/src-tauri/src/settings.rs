@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::collections::{HashMap, HashSet};
+use crate::settings_cache::{SETTINGS_CACHE, SettingsValidator};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryRule {
@@ -452,6 +453,12 @@ fn get_settings_path() -> PathBuf {
 }
 
 pub fn load_settings() -> Settings {
+    // Try cache first
+    if let Ok(Some(cached)) = SETTINGS_CACHE.get() {
+        eprintln!("[settings] Using cached settings");
+        return cached;
+    }
+
     let path = get_settings_path();
     
     let mut settings = match fs::read_to_string(&path) {
@@ -469,6 +476,41 @@ pub fn load_settings() -> Settings {
         }
     };
 
+    // Apply defensive clamping and normalization
+    normalize_settings(&mut settings);
+
+    // Attempt to cache (non-fatal if cache fails)
+    let _ = SETTINGS_CACHE.put(settings.clone());
+
+    settings
+}
+
+/// Load settings without using cache (force disk read)
+#[allow(dead_code)]
+pub fn load_settings_uncached() -> Settings {
+    let path = get_settings_path();
+    
+    let mut settings = match fs::read_to_string(&path) {
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("WARNING: Settings file corrupted, using defaults: {}", e);
+                Settings::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+        Err(e) => {
+            eprintln!("WARNING: Could not read settings file, using defaults: {}", e);
+            Settings::default()
+        }
+    };
+
+    normalize_settings(&mut settings);
+    settings
+}
+
+/// Normalize and validate settings in-place
+fn normalize_settings(settings: &mut Settings) {
     // Defensive clamping: protect against manually edited settings with invalid values
     if settings.segments == 0 || settings.segments > 64 {
         settings.segments = 8;
@@ -510,6 +552,8 @@ pub fn load_settings() -> Settings {
     if settings.stall_timeout_secs == 0 || settings.stall_timeout_secs > 86400 {
         settings.stall_timeout_secs = default_stall_timeout_secs();
     }
+    
+    // Normalize torrent priorities
     let mut normalized_priorities = HashMap::new();
     for (hash, priority) in std::mem::take(&mut settings.torrent_priority_overrides) {
         if !is_valid_info_hash(&hash) {
@@ -525,6 +569,7 @@ pub fn load_settings() -> Settings {
     }
     settings.torrent_priority_overrides = normalized_priorities;
 
+    // Normalize torrent pins
     let mut normalized_pins = HashSet::new();
     for hash in std::mem::take(&mut settings.torrent_pinned_hashes) {
         if !is_valid_info_hash(&hash) {
@@ -533,69 +578,23 @@ pub fn load_settings() -> Settings {
         normalized_pins.insert(hash.to_ascii_lowercase());
     }
     settings.torrent_pinned_hashes = normalized_pins;
-
-    settings
 }
 
 pub fn save_settings(settings: &Settings) -> Result<(), String> {
-    // Validate critical numeric settings
-    if settings.segments == 0 || settings.segments > 64 {
-        return Err("Segments must be between 1 and 64".to_string());
-    }
-    if settings.min_threads > 0 && settings.max_threads > 0 && settings.min_threads > settings.max_threads {
-        return Err("min_threads cannot exceed max_threads".to_string());
-    }
-    if settings.torrent_max_active_downloads > 64 {
-        return Err("torrent_max_active_downloads must be between 0 and 64".to_string());
-    }
-    if !settings.torrent_seed_ratio_limit.is_finite()
-        || settings.torrent_seed_ratio_limit < 0.0
-        || settings.torrent_seed_ratio_limit > 20.0
-    {
-        return Err("torrent_seed_ratio_limit must be between 0.0 and 20.0".to_string());
-    }
-    if settings.torrent_seed_time_limit_mins > 10_080 {
-        return Err("torrent_seed_time_limit_mins must be between 0 and 10080".to_string());
-    }
-    for (hash, priority) in &settings.torrent_priority_overrides {
-        if !is_valid_info_hash(hash) {
-            return Err(format!("Invalid torrent info hash key: {}", hash));
+    // Comprehensive validation using the new validator
+    let validation = SettingsValidator::validate(settings);
+    
+    if !validation.valid {
+        let mut error_msg = "Settings validation failed:\n".to_string();
+        for err in &validation.errors {
+            error_msg.push_str(&format!("  - {}: {}\n", err.field, err.message));
         }
-        if normalize_torrent_priority_label(priority).is_none() {
-            return Err(format!("Invalid torrent priority '{}' for {}", priority, hash));
-        }
+        return Err(error_msg);
     }
-    for hash in &settings.torrent_pinned_hashes {
-        if !is_valid_info_hash(hash) {
-            return Err(format!("Invalid pinned torrent info hash: {}", hash));
-        }
-    }
-    if settings.segment_retry_max_immediate > 20 {
-        return Err("segment_retry_max_immediate must be 0–20".to_string());
-    }
-    if settings.segment_retry_max_delayed > 30 {
-        return Err("segment_retry_max_delayed must be 0–30".to_string());
-    }
-    if !(0.0..=1.0).contains(&settings.segment_retry_jitter) {
-        return Err("segment_retry_jitter must be between 0.0 and 1.0".to_string());
-    }
-    if settings.queue_retry_max_retries > 50 {
-        return Err("queue_retry_max_retries must be 0–50".to_string());
-    }
-    if settings.queue_retry_base_delay_secs > settings.queue_retry_max_delay_secs {
-        return Err("queue_retry_base_delay_secs cannot exceed queue_retry_max_delay_secs".to_string());
-    }
-    if settings.max_connections_per_host == 0 || settings.max_connections_per_host > 64 {
-        return Err("max_connections_per_host must be between 1 and 64".to_string());
-    }
-    if settings.stall_timeout_secs == 0 || settings.stall_timeout_secs > 86400 {
-        return Err("stall_timeout_secs must be between 1 and 86400".to_string());
-    }
-    // Validate category rule regexes
-    for rule in &settings.category_rules {
-        if let Err(e) = regex::Regex::new(&rule.pattern) {
-            return Err(format!("Invalid regex in category rule '{}': {}", rule.name, e));
-        }
+    
+    // Log warnings but don't fail
+    for warning in &validation.warnings {
+        eprintln!("[SETTINGS WARNING] {}", warning);
     }
 
     let path = get_settings_path();
@@ -617,6 +616,9 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
         let _ = fs::remove_file(&tmp_path);
     }
     
-    eprintln!("[settings] Saved to {:?}", path);
+    // Invalidate cache so next load_settings() reads fresh from disk
+    let _ = SETTINGS_CACHE.invalidate();
+    
+    eprintln!("[settings] Saved to {:?} (cache invalidated)", path);
     Ok(())
 }
