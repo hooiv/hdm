@@ -60,7 +60,10 @@ pub mod parallel_mirror_retry;
 pub mod parallel_mirror_commands;
 pub mod mirror_analytics;
 pub mod mirror_analytics_commands;
+pub mod speed_acceleration;
+pub mod speed_acceleration_commands;
 pub mod failure_prediction;
+pub mod failure_prediction_commands;
 pub mod download_groups;
 pub mod group_scheduler;
 pub mod group_persistence;
@@ -4375,6 +4378,21 @@ fn classify_network_requests(
             mirror_analytics_commands::get_mirror_recommendation,
             mirror_analytics_commands::health_check_mirrors,
             mirror_analytics_commands::calculate_percentiles,
+            // Speed Acceleration Commands
+            speed_acceleration_commands::get_acceleration_stats,
+            speed_acceleration_commands::record_bandwidth_measurement,
+            speed_acceleration_commands::estimate_download_time,
+            speed_acceleration_commands::get_optimal_segment_strategy,
+            speed_acceleration_commands::predict_network_changes,
+            speed_acceleration_commands::get_bandwidth_history,
+            // Failure Prediction Commands
+            failure_prediction_commands::record_download_metrics,
+            failure_prediction_commands::analyze_failure_risk,
+            failure_prediction_commands::record_prediction_accuracy,
+            failure_prediction_commands::record_missed_failure,
+            failure_prediction_commands::get_prediction_accuracy_stats,
+            failure_prediction_commands::get_current_failure_prediction,
+            failure_prediction_commands::reset_failure_prediction,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -4553,6 +4571,11 @@ fn classify_network_requests(
                  connection_manager: network::connection_manager::ConnectionManager::new(conn_limit),
                  chatops_manager: chatops_manager.clone(),
                  recovery_manager: crate::download_recovery::DownloadRecoveryManager::new(),
+                 failure_prediction_engine: Arc::new(Mutex::new(
+                     crate::failure_prediction::FailurePredictionEngine::new(
+                         crate::failure_prediction::PredictionConfig::default(),
+                     ),
+                 )),
             });
 
             // Spawn HTTP server (after AppState is managed)
@@ -5159,6 +5182,11 @@ mod active_download_status_tests {
                 crate::settings::load_settings(),
             )))),
             recovery_manager: crate::download_recovery::DownloadRecoveryManager::new(),
+            failure_prediction_engine: Arc::new(Mutex::new(
+                crate::failure_prediction::FailurePredictionEngine::new(
+                    crate::failure_prediction::PredictionConfig::default(),
+                ),
+            )),
         }
     }
 

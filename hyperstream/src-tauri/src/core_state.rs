@@ -64,6 +64,7 @@ pub struct AppState {
     pub connection_manager: network::connection_manager::ConnectionManager,
     pub chatops_manager: Arc<network::chatops::ChatOpsManager>,
     pub recovery_manager: crate::download_recovery::DownloadRecoveryManager,
+    pub failure_prediction_engine: Arc<Mutex<crate::failure_prediction::FailurePredictionEngine>>,
 }
 
 impl AppState {
@@ -142,6 +143,11 @@ mod tests {
                 crate::settings::load_settings(),
             )))),
             recovery_manager: crate::download_recovery::DownloadRecoveryManager::new(),
+            failure_prediction_engine: Arc::new(Mutex::new(
+                crate::failure_prediction::FailurePredictionEngine::new(
+                    crate::failure_prediction::PredictionConfig::default(),
+                ),
+            )),
         }
     }
 
