@@ -1,0 +1,70 @@
+{
+  "folders": [
+    {
+      "path": "hyperstream",
+      "name": "HyperStream"
+    }
+  ],
+  "settings": {
+    // Rust Analyzer will auto-discover workspace via root Cargo.toml
+    // No linkedProjects needed anymore
+    "rust-analyzer.cargo.buildScripts.enable": true,
+    "rust-analyzer.cargo.allFeatures": false,
+    "rust-analyzer.semanticHighlighting.strings.enable": true,
+    
+    // Tauri-specific settings
+    "rust-analyzer.server.extraEnv": {
+      "CMAKE_GENERATOR": "Ninja"
+    },
+    
+    // File exclusions to speed up indexing
+    "files.exclude": {
+      "**/.git": true,
+      "**/node_modules": true,
+      "hyperstream/src-tauri/target": true,
+      "hyperstream/dist": true
+    },
+    "search.exclude": {
+      "hyperstream/src-tauri/target": true,
+      "hyperstream/node_modules": true,
+      "**/.git": true
+    },
+    
+    // TypeScript/React settings
+    "typescript.tsdk": "hyperstream/node_modules/typescript/lib",
+    "typescript.enablePromptUseWorkspaceTsdk": true,
+    "[typescript]": {
+      "editor.defaultFormatter": "esbenp.prettier-vscode",
+      "editor.formatOnSave": true
+    },
+    "[typescriptreact]": {
+      "editor.defaultFormatter": "esbenp.prettier-vscode",
+      "editor.formatOnSave": true
+    },
+    
+    // Rust settings
+    "[rust]": {
+      "editor.defaultFormatter": "rust-lang.rust-analyzer",
+      "editor.formatOnSave": true,
+      "editor.codeActionsOnSave": {
+        "source.fixAll": "explicit"
+      }
+    },
+    
+    // General editor settings
+    "editor.rulers": [100, 120],
+    "editor.wordWrap": "on",
+    "editor.formatOnPaste": true,
+    "files.trimTrailingWhitespace": true,
+    "files.trimFinalNewlines": true
+  },
+  "extensions": {
+    "recommendations": [
+      "rust-lang.rust-analyzer",
+      "tauri-apps.tauri-vscode",
+      "esbenp.prettier-vscode",
+      "dbaeumer.vscode-eslint",
+      "ms-vscode.makefile-tools"
+    ]
+  }
+}
