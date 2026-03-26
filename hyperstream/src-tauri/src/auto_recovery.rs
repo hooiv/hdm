@@ -3,7 +3,7 @@
 // Implements intelligent recovery procedures, automatic retry strategies,
 // and self-healing mechanisms for download failures
 
-use crate::resilience::{ClassifiedError, ErrorCategory, ResilienceEngine, DownloadHealth, HealthStatus};
+use crate::resilience::{ClassifiedError, ErrorCategory, ResilienceEngine};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -393,7 +393,7 @@ mod tests {
         let recovery = AutoRecoveryEngine::new(resilience);
 
         let error = ClassifiedError::new(ErrorCategory::NetworkUnreachable, "Timeout");
-        let plan = recovery.generate_plan("dl1", &error, 50, 500);
+        let _plan = recovery.generate_plan("dl1", &error, 50, 500);
 
         let first_action = recovery.get_next_action("dl1").unwrap();
         assert_eq!(first_action.status, RecoveryActionStatus::Pending);

@@ -1,8 +1,8 @@
 import { useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
+import type { UpscaleResult } from '../types';
 import type {
-    UpscaleResult,
     SubtitleResult,
     ModOptimizerResult,
     DlnaDevice,
@@ -20,8 +20,7 @@ export function useMediaActions(filePath: string) {
                 toastRef.current.error('No DLNA devices found on your network.');
                 return;
             }
-            const list = devices.map((d, i) => `${i + 1}. ${d.name}`).join('
-');
+            const list = devices.map((d, i) => `${i + 1}. ${d.name}`).join('\n');
             const choice = prompt(`📺 Select device:
 
 ${list}
@@ -42,9 +41,7 @@ Enter number:`);
             toastRef.current.success(`🎬 Subtitles ${result.status}!
 Method: ${result.method}
 SRT: ${result.srt_path}
-Segments: ${result.subtitle_lines}${result.note ? '
-
-Note: ' + result.note : ''}`);
+Segments: ${result.subtitle_lines}${result.note ? `\n\nNote: ${result.note}` : ''}`);
         } catch (err) { toastRef.current.error('Subtitle generation failed: ' + err); }
     }, [filePath]);
 

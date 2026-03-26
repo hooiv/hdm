@@ -76,8 +76,11 @@ pub enum TrendDirection {
 /// Analytics and monitoring engine
 pub struct ResilienceAnalytics {
     metrics: Arc<RwLock<HashMap<String, DownloadMetrics>>>,
+    #[allow(dead_code)]
     predictions: Arc<RwLock<Vec<FailurePrediction>>>,
+    #[allow(dead_code)]
     recommendations: Arc<RwLock<Vec<OptimizationRecommendation>>>,
+    #[allow(dead_code)]
     trends: Arc<RwLock<HashMap<String, PerformanceTrend>>>,
     speed_history: Arc<RwLock<HashMap<String, VecDeque<(u64, u64)>>>>, // (timestamp, speed)
     max_samples: usize,
@@ -380,7 +383,7 @@ mod tests {
 
         // High failure rate
         for i in 0..5 {
-            analytics.record_metric("dl1", 100 * i, 50 * i, 10 + i, 5_000);
+            analytics.record_metric("dl1", 100 * i, 50 * i, (10 + i) as u32, 5_000);
         }
 
         if let Some(pred) = analytics.predict_failure("dl1") {

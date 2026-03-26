@@ -219,7 +219,7 @@ pub fn get_cache_metrics() -> Result<CacheMetricsReport, String> {
 pub fn recover_settings_from_fallback() -> Result<Settings, String> {
     let fallback = SETTINGS_CACHE.get_fallback_settings()?;
     
-    if let Some(settings) = fallback {
+    if let Some(_settings) = fallback {
         // Try to reload from disk first, fallback to last known good settings
         let fresh = load_settings();
         // load_settings() always returns Settings (not Result), so use it directly
@@ -289,21 +289,20 @@ pub fn check_cache_health() -> CacheHealthStatus {
 }
 
 
+#[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_cache_stats() {
-        let stats = get_settings_cache_stats().unwrap();
+        let stats = super::get_settings_cache_stats().unwrap();
         assert_eq!(stats.ttl_secs, 300);
     }
 
     #[test]
     fn test_validation_report() {
-        let mut settings = Settings::default();
+        let mut settings = crate::settings::Settings::default();
         settings.segments = 0; // Invalid
         
-        let report = validate_settings(settings).unwrap();
+        let report = super::validate_settings(settings).unwrap();
         assert!(!report.valid);
         assert!(!report.errors.is_empty());
     }

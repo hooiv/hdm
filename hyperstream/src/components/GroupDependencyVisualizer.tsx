@@ -11,11 +11,7 @@
 import React, { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
-    ChevronDown,
     AlertCircle,
-    CheckCircle2,
-    Clock,
-    Zap,
 } from 'lucide-react';
 
 interface Member {
@@ -116,23 +112,6 @@ const DependencyNode: React.FC<{
     onSelect: () => void;
 }> = ({ member, position, onSelect }) => {
     const [isHovered, setIsHovered] = useState(false);
-
-    const getIcon = () => {
-        switch (member.state.toLowerCase()) {
-            case 'completed':
-                return <CheckCircle2 className="w-4 h-4" />;
-            case 'downloading':
-                return <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity }}>
-                    <Zap className="w-4 h-4" />
-                </motion.div>;
-            case 'error':
-                return <AlertCircle className="w-4 h-4" />;
-            case 'paused':
-                return <Clock className="w-4 h-4" />;
-            default:
-                return <Clock className="w-4 h-4" />;
-        }
-    };
 
     return (
         <motion.g
@@ -263,8 +242,6 @@ export const GroupDependencyVisualizer: React.FC<GroupDependencyVisualizerProps>
     onMemberClick = () => {},
     className = '',
 }) => {
-    const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
-
     const layout = useMemo(() => calculateDAGLayout(members), [members]);
 
     // Calculate SVG dimensions
@@ -355,10 +332,7 @@ export const GroupDependencyVisualizer: React.FC<GroupDependencyVisualizerProps>
                                         x: (pos.x * (maxX + 100)) / 100,
                                         y: pos.y + 50,
                                     }}
-                                    onSelect={() => {
-                                        setSelectedMemberId(member.id);
-                                        onMemberClick(member.id);
-                                    }}
+                                    onSelect={() => onMemberClick(member.id)}
                                 />
                             );
                         })}

@@ -9,7 +9,7 @@ import { MirrorScore } from '../types';
  * Displays mirror health metrics with auto-refresh and expandable details
  */
 export const MirrorScoringDashboard: React.FC = () => {
-  const { metrics, autoRefresh, setAutoRefresh, loading, fetchMetrics } = useMirrorMetrics();
+  const { metrics, autoRefresh, setAutoRefresh, loading } = useMirrorMetrics();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   /**

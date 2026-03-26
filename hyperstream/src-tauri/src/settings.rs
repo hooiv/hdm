@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::collections::{HashMap, HashSet};
-use crate::settings_cache::{SETTINGS_CACHE, SettingsValidator};
+use crate::settings_cache::{parse_settings_with_migration, SETTINGS_CACHE, SettingsValidator};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryRule {
@@ -462,7 +462,7 @@ pub fn load_settings() -> Settings {
     let path = get_settings_path();
     
     let mut settings = match fs::read_to_string(&path) {
-        Ok(json) => match serde_json::from_str(&json) {
+        Ok(json) => match parse_settings_with_migration(&json) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("WARNING: Settings file corrupted, using defaults: {}", e);
@@ -491,7 +491,7 @@ pub fn load_settings_uncached() -> Settings {
     let path = get_settings_path();
     
     let mut settings = match fs::read_to_string(&path) {
-        Ok(json) => match serde_json::from_str(&json) {
+        Ok(json) => match parse_settings_with_migration(&json) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("WARNING: Settings file corrupted, using defaults: {}", e);

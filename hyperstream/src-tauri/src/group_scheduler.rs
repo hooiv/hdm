@@ -1,4 +1,4 @@
-use crate::download_groups::{DownloadGroup, ExecutionStrategy, GroupState};
+use crate::download_groups::{DownloadGroup, GroupState};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -625,7 +625,7 @@ mod tests {
     fn test_parallel_strategy_multiple_ready_members() {
         let mut scheduler = create_test_scheduler();
         let mut group = create_test_group("Test Group");
-        group.strategy = ExecutionStrategy::Parallel;
+        group.strategy = crate::download_groups::ExecutionStrategy::Parallel;
 
         // Create 3 independent members (no dependencies)
         let member1_id = group.add_member("https://example.com/file1.zip", None);
@@ -648,7 +648,7 @@ mod tests {
     fn test_sequential_strategy_with_cascade_completion() {
         let mut scheduler = create_test_scheduler();
         let mut group = create_test_group("Test Group");
-        group.strategy = ExecutionStrategy::Sequential;
+        group.strategy = crate::download_groups::ExecutionStrategy::Sequential;
 
         let member1_id = group.add_member("https://example.com/file1.zip", None);
         let member2_id = group.add_member("https://example.com/file2.zip", Some(vec![member1_id.clone()]));
@@ -684,7 +684,7 @@ mod tests {
     fn test_hybrid_strategy_respects_dependencies() {
         let mut scheduler = create_test_scheduler();
         let mut group = create_test_group("Test Group");
-        group.strategy = ExecutionStrategy::Hybrid;
+        group.strategy = crate::download_groups::ExecutionStrategy::Hybrid;
 
         // Create a graph: member1 -> {member2, member3}, {member2, member3} -> member4
         let member1_id = group.add_member("https://example.com/file1.zip", None);
@@ -734,13 +734,13 @@ mod tests {
         let member1_id = group1.add_member("https://example.com/file1.zip", None);
 
         let mut group2 = create_test_group("Group 2");
-        let member2_id = group2.add_member("https://example.com/file2.zip", None);
+        let _member2_id = group2.add_member("https://example.com/file2.zip", None);
 
         scheduler.schedule_group(group1).unwrap();
         scheduler.schedule_group(group2).unwrap();
 
         let group1_id = scheduler.groups.keys().next().unwrap().clone();
-        let group2_id = scheduler.groups.keys().find(|id| id != &group1_id).unwrap().clone();
+        let group2_id = scheduler.groups.keys().find(|id| *id != &group1_id).unwrap().clone();
 
         scheduler.start_group(&group1_id).unwrap();
         scheduler.start_group(&group2_id).unwrap();

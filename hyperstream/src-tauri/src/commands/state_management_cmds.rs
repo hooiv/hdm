@@ -10,7 +10,6 @@ use crate::persistence::{SavedDownload, load_downloads};
 use crate::session_state::{DownloadState, DownloadStateInfo};
 use crate::session_recovery::{ResumeSafetyValidator, ResumeValidityReport, ValidationLevel};
 use serde::{Deserialize, Serialize};
-use tauri::State;
 
 /// Get state information for a single download
 #[tauri::command]

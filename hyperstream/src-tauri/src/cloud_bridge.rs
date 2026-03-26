@@ -52,6 +52,7 @@ impl CloudBridge {
         Ok(canon)
     }
 
+    #[allow(dead_code)]
     pub async fn upload_file(
         settings: &Settings,
         file_path: &str,

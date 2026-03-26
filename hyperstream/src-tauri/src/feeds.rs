@@ -29,6 +29,7 @@ pub struct FeedItem {
 
 // Helper used internally for path sanitization when auto-downloading
 impl FeedItem {
+    #[allow(dead_code)]
     pub fn unique_key(&self) -> String {
         self.link.clone()
     }

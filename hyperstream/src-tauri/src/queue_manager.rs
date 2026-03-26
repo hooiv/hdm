@@ -20,6 +20,7 @@ pub struct DownloadOverrides {
     /// Override the global segment count.
     pub custom_segments: Option<u32>,
     /// Group label.
+    #[allow(dead_code)]
     pub group: Option<String>,
 }
 
@@ -237,6 +238,7 @@ impl DownloadQueue {
     }
 
     /// Record a download as completed for dependency resolution.
+    #[allow(dead_code)]
     pub fn mark_completed(&mut self, id: &str) {
         self.completed_ids.insert(id.to_string());
     }
@@ -348,11 +350,13 @@ impl DownloadQueue {
     }
 
     /// Check if there's room to start a download immediately.
+    #[allow(dead_code)]
     pub fn has_slot(&self) -> bool {
         (self.active.len() as u32) < self.max_concurrent
     }
 
     /// Number of items currently active.
+    #[allow(dead_code)]
     pub fn active_count(&self) -> u32 {
         self.active.len() as u32
     }
@@ -462,6 +466,7 @@ impl DownloadQueue {
 
     /// Get the queue position of a specific download (1-based, across all lanes).
     /// Active downloads return position 0. Not found returns None.
+    #[allow(dead_code)]
     pub fn position(&self, id: &str) -> Option<u32> {
         if self.active.iter().any(|a| a == id) {
             return Some(0);

@@ -160,6 +160,7 @@ pub fn start_bandwidth_sampler(app: tauri::AppHandle) {
 }
 
 /// Save history to disk (called on app exit).
+#[allow(dead_code)]
 pub fn persist_history() {
     let path = get_history_path();
     if let Ok(history) = HISTORY.lock() {

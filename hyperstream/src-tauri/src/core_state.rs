@@ -1,9 +1,9 @@
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use tokio::sync::broadcast;
 use crate::downloader::manager::DownloadManager;
 use crate::http_server;
 use crate::network;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 
 pub type SlimSegment = (u32, u64, u64, u64, u8, u64);
 
@@ -63,6 +63,7 @@ pub struct AppState {
     pub torrent_manager: Option<Arc<network::bittorrent::manager::TorrentManager>>,
     pub connection_manager: network::connection_manager::ConnectionManager,
     pub chatops_manager: Arc<network::chatops::ChatOpsManager>,
+    pub recovery_manager: crate::download_recovery::DownloadRecoveryManager,
 }
 
 impl AppState {
@@ -133,13 +134,14 @@ mod tests {
             downloads: Mutex::new(HashMap::new()),
             hls_sessions: Mutex::new(HashMap::new()),
             dash_sessions: Mutex::new(HashMap::new()),
-            p2p_node: Arc::new(network::p2p::P2PNode::new()),
+            p2p_node: Arc::new(network::p2p::P2PNode::disabled()),
             p2p_file_map: Arc::new(Mutex::new(HashMap::new())),
             torrent_manager: None,
             connection_manager: network::connection_manager::ConnectionManager::default(),
             chatops_manager: Arc::new(network::chatops::ChatOpsManager::new(Arc::new(Mutex::new(
                 crate::settings::load_settings(),
             )))),
+            recovery_manager: crate::download_recovery::DownloadRecoveryManager::new(),
         }
     }
 
@@ -149,7 +151,9 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("hyperstream-core-state-{name}-{unique}.tmp"));
-        Arc::new(Mutex::new(std::fs::File::create(path).expect("temp writer")))
+        Arc::new(Mutex::new(
+            std::fs::File::create(path).expect("temp writer"),
+        ))
     }
 
     #[test]
@@ -188,46 +192,59 @@ mod tests {
         let state = make_test_state();
 
         let (http_stop_tx, _) = broadcast::channel(1);
-        state.downloads.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            "http-1".to_string(),
-            DownloadSession {
-                manager: Arc::new(Mutex::new(DownloadManager::new(100, 1))),
-                stop_tx: http_stop_tx,
-                url: "HTTPS://Example.com:443/file.bin#frag".to_string(),
-                path: "/tmp/file.bin".to_string(),
-                file_writer: make_temp_writer("http"),
-            },
-        );
+        state
+            .downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                "http-1".to_string(),
+                DownloadSession {
+                    manager: Arc::new(Mutex::new(DownloadManager::new(100, 1))),
+                    stop_tx: http_stop_tx,
+                    url: "HTTPS://Example.com:443/file.bin#frag".to_string(),
+                    path: "/tmp/file.bin".to_string(),
+                    file_writer: make_temp_writer("http"),
+                    group_context: None,
+                },
+            );
 
         let (hls_stop_tx, _) = broadcast::channel(1);
-        state.hls_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            "hls-1".to_string(),
-            HlsSession {
-                manifest_url: "https://example.com/live.m3u8".to_string(),
-                output_path: "/tmp/video.mp4".to_string(),
-                segments: Vec::new(),
-                segment_sizes: Vec::new(),
-                downloaded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                speed_bps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                stop_tx: hls_stop_tx,
-                file_writer: make_temp_writer("hls"),
-            },
-        );
+        state
+            .hls_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                "hls-1".to_string(),
+                HlsSession {
+                    manifest_url: "https://example.com/live.m3u8".to_string(),
+                    output_path: "/tmp/video.mp4".to_string(),
+                    segments: Vec::new(),
+                    segment_sizes: Vec::new(),
+                    downloaded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    speed_bps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    stop_tx: hls_stop_tx,
+                    file_writer: make_temp_writer("hls"),
+                },
+            );
 
         let (dash_stop_tx, _) = broadcast::channel(1);
-        state.dash_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            "dash-1".to_string(),
-            crate::engine::dash::DashSession {
-                manifest_url: "https://example.com/manifest.mpd".to_string(),
-                output_path: "/tmp/dash.mp4".to_string(),
-                video_rep: None,
-                audio_rep: None,
-                video_total: 0,
-                audio_total: 0,
-                downloaded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                stop_tx: dash_stop_tx,
-            },
-        );
+        state
+            .dash_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                "dash-1".to_string(),
+                crate::engine::dash::DashSession {
+                    manifest_url: "https://example.com/manifest.mpd".to_string(),
+                    output_path: "/tmp/dash.mp4".to_string(),
+                    video_rep: None,
+                    audio_rep: None,
+                    video_total: 0,
+                    audio_total: 0,
+                    downloaded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    stop_tx: dash_stop_tx,
+                },
+            );
 
         assert!(state.has_active_download_url("https://example.com/file.bin"));
         assert!(state.has_active_download_url("https://example.com/live.m3u8#master"));

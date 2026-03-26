@@ -3,7 +3,7 @@
 // Provides proactive network health monitoring, failure detection, and diagnostics
 
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 

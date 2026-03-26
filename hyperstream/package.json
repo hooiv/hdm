@@ -18,7 +18,8 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-qr-code": "^2.0.18",
-    "react-virtuoso": "^4.17.0"
+    "react-virtuoso": "^4.17.0",
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

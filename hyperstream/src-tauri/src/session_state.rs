@@ -14,7 +14,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Core download states
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]

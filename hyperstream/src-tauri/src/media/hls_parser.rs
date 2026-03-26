@@ -223,7 +223,7 @@ mod tests {
         let stream = parser.process_media_playlist(m3u8_rs::MediaPlaylist {
             version: None,
             media_sequence: 0,
-            target_duration: 5.0,
+            target_duration: 5,
             segments: vec![
                 m3u8_rs::MediaSegment {
                     uri: "seg1.ts".to_string(),
@@ -231,7 +231,7 @@ mod tests {
                     key: None,
                     byte_range: None,
                     discontinuity: false,
-                    unknown: Vec::new(),
+                    ..Default::default()
                 },
                 m3u8_rs::MediaSegment {
                     uri: "seg2.ts".to_string(),
@@ -239,7 +239,7 @@ mod tests {
                     key: None,
                     byte_range: None,
                     discontinuity: false,
-                    unknown: Vec::new(),
+                    ..Default::default()
                 },
             ],
             end_list: true,
@@ -256,7 +256,7 @@ mod tests {
         let stream = parser.process_media_playlist(m3u8_rs::MediaPlaylist {
             version: None,
             media_sequence: 100,
-            target_duration: 4.0,
+            target_duration: 4,
             segments: vec![
                 m3u8_rs::MediaSegment {
                     uri: "live1.ts".to_string(),
@@ -264,7 +264,7 @@ mod tests {
                     key: None,
                     byte_range: None,
                     discontinuity: false,
-                    unknown: Vec::new(),
+                    ..Default::default()
                 },
             ],
             end_list: false, // <-- no EXT-X-ENDLIST
@@ -278,7 +278,7 @@ mod tests {
     fn key_propagates_across_multiple_segments() {
         let parser = make_parser();
         let key = m3u8_rs::Key {
-            method: "AES-128".to_string(),
+            method: m3u8_rs::KeyMethod::AES128,
             uri: Some("https://cdn.example.com/key".to_string()),
             iv: Some("0x00000000000000000000000000000001".to_string()),
             keyformat: None,
@@ -287,7 +287,7 @@ mod tests {
         let stream = parser.process_media_playlist(m3u8_rs::MediaPlaylist {
             version: None,
             media_sequence: 0,
-            target_duration: 6.0,
+            target_duration: 6,
             segments: vec![
                 m3u8_rs::MediaSegment {
                     uri: "enc1.ts".to_string(),
@@ -295,7 +295,7 @@ mod tests {
                     key: Some(key),
                     byte_range: None,
                     discontinuity: false,
-                    unknown: Vec::new(),
+                    ..Default::default()
                 },
                 m3u8_rs::MediaSegment {
                     uri: "enc2.ts".to_string(),
@@ -303,7 +303,7 @@ mod tests {
                     key: None, // inherits previous key
                     byte_range: None,
                     discontinuity: false,
-                    unknown: Vec::new(),
+                    ..Default::default()
                 },
             ],
             end_list: true,
@@ -325,14 +325,14 @@ mod tests {
     fn none_key_clears_encryption() {
         let parser = make_parser();
         let enc_key = m3u8_rs::Key {
-            method: "AES-128".to_string(),
+            method: m3u8_rs::KeyMethod::AES128,
             uri: Some("https://cdn.example.com/key".to_string()),
             iv: None,
             keyformat: None,
             keyformatversions: None,
         };
         let clear_key = m3u8_rs::Key {
-            method: "NONE".to_string(),
+            method: m3u8_rs::KeyMethod::None,
             uri: None,
             iv: None,
             keyformat: None,
@@ -341,7 +341,7 @@ mod tests {
         let stream = parser.process_media_playlist(m3u8_rs::MediaPlaylist {
             version: None,
             media_sequence: 0,
-            target_duration: 6.0,
+            target_duration: 6,
             segments: vec![
                 m3u8_rs::MediaSegment {
                     uri: "enc.ts".to_string(),
@@ -349,7 +349,7 @@ mod tests {
                     key: Some(enc_key),
                     byte_range: None,
                     discontinuity: false,
-                    unknown: Vec::new(),
+                    ..Default::default()
                 },
                 m3u8_rs::MediaSegment {
                     uri: "clear.ts".to_string(),
@@ -357,7 +357,7 @@ mod tests {
                     key: Some(clear_key),
                     byte_range: None,
                     discontinuity: false,
-                    unknown: Vec::new(),
+                    ..Default::default()
                 },
             ],
             end_list: true,
@@ -393,8 +393,8 @@ mod tests {
                     video: None,
                     subtitles: None,
                     closed_captions: None,
-                    unknown: Vec::new(),
                     is_i_frame: false,
+                    ..Default::default()
                 },
                 m3u8_rs::VariantStream {
                     uri: "high.m3u8".to_string(),
@@ -407,15 +407,11 @@ mod tests {
                     video: None,
                     subtitles: None,
                     closed_captions: None,
-                    unknown: Vec::new(),
                     is_i_frame: false,
+                    ..Default::default()
                 },
             ],
-            session_data: vec![],
-            session_key: vec![],
-            start: None,
-            independent_segments: false,
-            unknown: Vec::new(),
+            ..Default::default()
         };
         let stream = parser.process_master_playlist(pl, &base());
         assert_eq!(stream.variants.len(), 2);

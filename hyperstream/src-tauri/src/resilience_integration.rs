@@ -2,7 +2,7 @@
 //
 // Provides integration points for monitoring, error handling, and recovery
 
-use crate::resilience::{ResilienceEngine, ErrorCategory, ClassifiedError};
+use crate::resilience::{ResilienceEngine, ErrorCategory};
 use crate::auto_recovery::AutoRecoveryEngine;
 use crate::network_diagnostics::NetworkDiagnostics;
 use std::sync::Arc;
@@ -134,7 +134,7 @@ impl RetryStrategy {
 
         let exponential = self.base_delay_ms * (2_u64.saturating_pow(retry_count));
         let jitter_range = (exponential * self.jitter_percent as u64) / 100;
-        let jitter = (jitter_range / 2); // ±50% of jitter range
+        let jitter = jitter_range / 2; // ±50% of jitter range
 
         exponential + jitter
     }

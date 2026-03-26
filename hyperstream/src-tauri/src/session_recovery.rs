@@ -11,7 +11,6 @@
 use crate::downloader::structures::Segment;
 use crate::persistence::SavedDownload;
 use chrono::Utc;
-use std::path::Path;
 use tokio::fs;
 
 /// Validation severity levels

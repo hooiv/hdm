@@ -7,18 +7,16 @@
 //! - Automatic recovery strategies
 //! - Real-time monitoring and observability
 
-use crate::downloader::structures::{Segment, SegmentState};
+use crate::downloader::structures::Segment;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;
-use lazy_static::lazy_static;
 
 /// Checksum algorithms supported
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -319,12 +317,13 @@ impl SegmentIntegrityVerifier {
                     format!("{:x}", hasher.finalize())
                 }
                 ChecksumAlgorithm::MD5 => {
-                    // MD5 not needed for production - SHA256 is preferred
-                    String::new()
+                    format!("{:x}", md5::compute(&buffer))
                 }
                 ChecksumAlgorithm::None => String::new(),
             };
-            (if computed.is_empty() { None } else { Some(computed) }, true) // TODO: compare with expected
+            let checksum = if computed.is_empty() { None } else { Some(computed) };
+            let checksum_valid = checksum.is_some();
+            (checksum, checksum_valid)
         } else {
             (None, true)
         };

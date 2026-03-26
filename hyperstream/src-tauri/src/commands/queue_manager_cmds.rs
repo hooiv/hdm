@@ -16,7 +16,7 @@
 
 use tauri::command;
 use serde::{Serialize, Deserialize};
-use crate::queue_manager::{self, DOWNLOAD_QUEUE, DownloadPriority};
+use crate::queue_manager::{DOWNLOAD_QUEUE, DownloadPriority};
 
 /// Queue download - matches the struct in queue_manager.rs
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -11,9 +11,8 @@
 //! - Comprehensive metrics and telemetry
 //! - Fallback mechanisms for fault tolerance
 
-use std::time::{Instant, Duration, SystemTime};
+use std::time::{Instant, Duration};
 use std::sync::{Arc, RwLock, atomic::{AtomicU64, AtomicBool, Ordering}};
-use std::collections::HashMap;
 use crate::settings::Settings;
 use serde::{Deserialize, Serialize};
 
@@ -58,7 +57,7 @@ impl SchemaMigrations {
         let mut current_version = from_version;
         
         while current_version < SETTINGS_SCHEMA_VERSION {
-            let migration_fn = match current_version {
+            let migration_fn: MigrationFn = match current_version {
                 1 => Self::migrate_v1_to_v2,
                 _ => return Err(format!("No migration path from version {}", current_version)),
             };
@@ -79,6 +78,24 @@ impl SchemaMigrations {
         }
         Ok(())
     }
+}
+
+/// Parse settings JSON and apply schema migrations when older versions are detected.
+pub fn parse_settings_with_migration(json: &str) -> Result<Settings, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("Failed to parse settings JSON: {}", e))?;
+
+    let source_version = value
+        .get("cache_version")
+        .or_else(|| value.get("schema_version"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as u32;
+
+    if source_version < SETTINGS_SCHEMA_VERSION {
+        SchemaMigrations::migrate(&mut value, source_version)?;
+    }
+
+    serde_json::from_value(value).map_err(|e| format!("Failed to decode settings after migration: {}", e))
 }
 
 // ============ CACHE ENTRY ============
@@ -181,12 +198,16 @@ impl SettingsCache {
     /// Get cached settings if valid, otherwise None (with metrics)
     pub fn get(&self) -> Result<Option<Settings>, String> {
         let start = Instant::now();
+        let current_generation = self.generation.load(Ordering::Relaxed);
         
         match self.cache.read() {
             Ok(cache) => {
                 if let Some(entry) = &*cache {
                     let age = entry.cached_at.elapsed();
-                    if age < self.ttl {
+                    if entry.generation > current_generation {
+                        self.generation.store(entry.generation, Ordering::Relaxed);
+                    }
+                    if age < self.ttl && entry.schema_version == SETTINGS_SCHEMA_VERSION {
                         self.record_hit(start);
                         return Ok(Some(entry.settings.clone()));
                     }
@@ -200,7 +221,10 @@ impl SettingsCache {
                 let cache = poisoned.into_inner();
                 if let Some(entry) = &*cache {
                     let age = entry.cached_at.elapsed();
-                    if age < self.ttl {
+                    if entry.generation > current_generation {
+                        self.generation.store(entry.generation, Ordering::Relaxed);
+                    }
+                    if age < self.ttl && entry.schema_version == SETTINGS_SCHEMA_VERSION {
                         self.record_hit(start);
                         return Ok(Some(entry.settings.clone()));
                     }
@@ -214,7 +238,7 @@ impl SettingsCache {
     /// Update cache with fresh settings and metrics
     pub fn put(&self, settings: Settings) -> Result<(), String> {
         let start = Instant::now();
-        let gen = self.generation.fetch_add(1, Ordering::Relaxed);
+        let gen = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let entry = CacheEntry {
             settings: settings.clone(),
             cached_at: Instant::now(),

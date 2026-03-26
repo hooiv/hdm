@@ -5,7 +5,6 @@ use crate::core_state::*;
 use crate::*;
 use crate::mirror_scoring::GLOBAL_MIRROR_SCORER;
 use crate::group_scheduler::GLOBAL_GROUP_SCHEDULER;
-use crate::download_groups::GroupState;
 
 /// After a download failure or stall: try queue retry; if not retrying, release queue slot,
 /// deregister bandwidth, and remove session from AppState. Call once per failed download.
@@ -2095,9 +2094,8 @@ mod tests {
 // Group Integration Tests
 #[cfg(test)]
 mod group_integration_tests {
-    use super::super::*;
     use crate::download_groups::{DownloadGroup, GroupState, ExecutionStrategy};
-    use crate::group_scheduler::{GroupScheduler, GLOBAL_GROUP_SCHEDULER, ExecutionState};
+    use crate::group_scheduler::GroupScheduler;
 
     #[test]
     fn test_group_dependency_checking_blocks_unmet_dependencies() {
@@ -2127,13 +2125,14 @@ mod group_integration_tests {
         let mut scheduler = GroupScheduler::new();
         let mut group = DownloadGroup::new("Progress Test");
         let member_id = group.add_member("http://example.com/file.txt", None);
+        let group_id = group.id.clone();
         
         scheduler.schedule_group(group).unwrap();
         
         // Update progress above 100% - should clamp
-        scheduler.update_member_progress(&group.id, &member_id, 150.0);
+        scheduler.update_member_progress(&group_id, &member_id, 150.0);
         
-        if let Some(group) = scheduler.get_group(&group.id) {
+        if let Some(group) = scheduler.get_group(&group_id) {
             if let Some(member) = group.members.get(&member_id) {
                 assert_eq!(member.progress_percent, 100.0);
                 assert_eq!(member.state, GroupState::Completed);
@@ -2144,11 +2143,12 @@ mod group_integration_tests {
         let mut scheduler2 = GroupScheduler::new();
         let mut group2 = DownloadGroup::new("Progress Test 2");
         let member_id2 = group2.add_member("http://example.com/file2.txt", None);
+        let group2_id = group2.id.clone();
         scheduler2.schedule_group(group2).unwrap();
         
-        scheduler2.update_member_progress(&group.id, &member_id2, -50.0);
+        scheduler2.update_member_progress(&group2_id, &member_id2, -50.0);
         
-        if let Some(group) = scheduler2.get_group(&group.id) {
+        if let Some(group) = scheduler2.get_group(&group2_id) {
             if let Some(member) = group.members.get(&member_id2) {
                 assert_eq!(member.progress_percent, 0.0);
             }
@@ -2334,8 +2334,8 @@ mod group_integration_tests {
         let mut group = DownloadGroup::new("Status Test Group");
         
         let m1 = group.add_member("http://example.com/file1.txt", None);
-        let m2 = group.add_member("http://example.com/file2.txt", None);
-        let m3 = group.add_member("http://example.com/file3.txt", None);
+        let _m2 = group.add_member("http://example.com/file2.txt", None);
+        let _m3 = group.add_member("http://example.com/file3.txt", None);
         let group_id = group.id.clone();
         
         scheduler.schedule_group(group).unwrap();

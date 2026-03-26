@@ -32,6 +32,7 @@ pub struct SavedDownload {
 }
 
 /// Persistent health and cooldown state for a mirror host.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MirrorHostHealth {
     #[serde(default)]
@@ -63,6 +64,7 @@ fn get_storage_path() -> PathBuf {
     PathBuf::from(home).join(".hyperstream").join("downloads.json")
 }
 
+#[allow(dead_code)]
 fn get_mirror_host_health_path() -> PathBuf {
     if let Some(config_dir) = dirs::config_dir() {
         return config_dir.join("hyperstream").join("mirror-host-health.json");
@@ -170,6 +172,7 @@ fn recover_from_backups(path: &PathBuf) -> Result<Vec<SavedDownload>, String> {
     Ok(Vec::new())
 }
 
+#[allow(dead_code)]
 pub fn load_mirror_host_health() -> Result<HashMap<String, MirrorHostHealth>, String> {
     let path = get_mirror_host_health_path();
 
@@ -184,6 +187,7 @@ pub fn load_mirror_host_health() -> Result<HashMap<String, MirrorHostHealth>, St
     }
 }
 
+#[allow(dead_code)]
 pub fn save_mirror_host_health(health: &HashMap<String, MirrorHostHealth>) -> Result<(), String> {
     let _lock = PERSISTENCE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = get_mirror_host_health_path();

@@ -20,7 +20,7 @@ mod persistence;
 mod http_server;
 mod commands;
 use crate::http_server::StreamingSource;
-mod settings;
+pub mod settings;
 pub mod settings_cache;
 mod settings_utils;
 mod speed_limiter;
@@ -63,6 +63,11 @@ pub mod group_batch_detector;
 pub mod group_atomic_ops;
 pub mod group_metrics;
 pub mod group_smart_queue;
+pub mod group_error_handler;
+pub mod group_commands;
+pub mod download_recovery;
+pub mod recovery_commands;
+pub mod recovery_integration;
 
 // mod virtual_drive;
 mod cloud_bridge;
@@ -4343,7 +4348,15 @@ fn classify_network_requests(
             commands::group_metrics_cmds::get_group_trends,
             commands::group_metrics_cmds::get_group_performance_summary,
             commands::group_metrics_cmds::estimate_group_completion_time,
-            commands::group_metrics_cmds::get_system_download_stats
+            commands::group_metrics_cmds::get_system_download_stats,
+            // Download Recovery Commands (Corruption Detection & Auto-Repair)
+            recovery_commands::detect_corruption,
+            recovery_commands::get_recovery_strategy,
+            recovery_commands::execute_recovery,
+            recovery_commands::get_corruption_report,
+            recovery_commands::get_mirror_rankings,
+            recovery_commands::update_mirror_reliability,
+            recovery_commands::cleanup_recovery_data
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -4521,6 +4534,7 @@ fn classify_network_requests(
                  torrent_manager: torrent_manager.clone(),
                  connection_manager: network::connection_manager::ConnectionManager::new(conn_limit),
                  chatops_manager: chatops_manager.clone(),
+                 recovery_manager: crate::download_recovery::DownloadRecoveryManager::new(),
             });
 
             // Spawn HTTP server (after AppState is managed)
@@ -5119,13 +5133,14 @@ mod active_download_status_tests {
             downloads: Mutex::new(HashMap::new()),
             hls_sessions: Mutex::new(HashMap::new()),
             dash_sessions: Mutex::new(HashMap::new()),
-            p2p_node: Arc::new(network::p2p::P2PNode::new()),
+            p2p_node: Arc::new(network::p2p::P2PNode::disabled()),
             p2p_file_map: Arc::new(Mutex::new(HashMap::new())),
             torrent_manager: None,
             connection_manager: network::connection_manager::ConnectionManager::default(),
             chatops_manager: Arc::new(network::chatops::ChatOpsManager::new(Arc::new(Mutex::new(
                 crate::settings::load_settings(),
             )))),
+            recovery_manager: crate::download_recovery::DownloadRecoveryManager::new(),
         }
     }
 
@@ -5160,6 +5175,7 @@ mod active_download_status_tests {
                 url: "https://example.com/file.bin".to_string(),
                 path: "/tmp/file.bin".to_string(),
                 file_writer: make_temp_writer("http"),
+                group_context: None,
             },
         );
 
@@ -5172,6 +5188,7 @@ mod active_download_status_tests {
                 segments: Vec::new(),
                 segment_sizes: vec![300, 300],
                 downloaded: Arc::new(std::sync::atomic::AtomicU64::new(150)),
+                speed_bps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 stop_tx: hls_stop_tx,
                 file_writer: make_temp_writer("hls"),
             },
@@ -5239,6 +5256,7 @@ mod active_download_status_tests {
                 url: "https://example.com/complete.bin".to_string(),
                 path: "/tmp/complete.bin".to_string(),
                 file_writer: make_temp_writer("complete"),
+                group_context: None,
             },
         );
 
@@ -5416,5 +5434,231 @@ mod torrent_add_config_tests {
         let normalized = normalize_torrent_error_message(&msg);
         assert!(normalized.ends_with("..."));
         assert_eq!(normalized.chars().count(), MAX_TORRENT_ERROR_MESSAGE_CHARS + 3);
+    }
+}
+
+// ============ DOWNLOAD GROUPS INTEGRATION TESTS ============
+#[cfg(test)]
+mod download_group_tests {
+    use crate::download_groups::{DownloadGroup, GroupMember, ExecutionStrategy};
+    use crate::group_dag_solver::DagSolver;
+
+    #[test]
+    fn test_simple_chain_a_b_c() {
+        let mut group = DownloadGroup::new("Chain A→B→C");
+        group.strategy = ExecutionStrategy::Sequential;
+
+        let member_a = GroupMember::new("http://example.com/a.zip".to_string(), vec![]);
+        let member_b = GroupMember::new(
+            "http://example.com/b.zip".to_string(),
+            vec![member_a.id.clone()],
+        );
+        let member_c = GroupMember::new(
+            "http://example.com/c.zip".to_string(),
+            vec![member_b.id.clone()],
+        );
+
+        let id_a = member_a.id.clone();
+        let id_b = member_b.id.clone();
+        let id_c = member_c.id.clone();
+
+        group.members.insert(id_a.clone(), member_a);
+        group.members.insert(id_b.clone(), member_b);
+        group.members.insert(id_c.clone(), member_c);
+
+        let topo = DagSolver::topological_sort(&group).expect("Topo sort failed");
+        assert_eq!(topo.order, vec![id_a, id_b, id_c]);
+        assert_eq!(topo.critical_path_length, 3);
+    }
+
+    #[test]
+    fn test_fan_out_a_spawns_b_c_d() {
+        let mut group = DownloadGroup::new("Fan-out A→[B,C,D]");
+        group.strategy = ExecutionStrategy::Hybrid;
+
+        let member_a = GroupMember::new("http://example.com/a.zip".to_string(), vec![]);
+        let id_a = member_a.id.clone();
+
+        let member_b = GroupMember::new(
+            "http://example.com/b.zip".to_string(),
+            vec![id_a.clone()],
+        );
+        let member_c = GroupMember::new(
+            "http://example.com/c.zip".to_string(),
+            vec![id_a.clone()],
+        );
+        let member_d = GroupMember::new(
+            "http://example.com/d.zip".to_string(),
+            vec![id_a.clone()],
+        );
+
+        let id_b = member_b.id.clone();
+        let id_c = member_c.id.clone();
+        let id_d = member_d.id.clone();
+
+        group.members.insert(id_a.clone(), member_a);
+        group.members.insert(id_b.clone(), member_b);
+        group.members.insert(id_c.clone(), member_c);
+        group.members.insert(id_d.clone(), member_d);
+
+        let topo = DagSolver::topological_sort(&group).expect("Topo sort failed");
+        assert_eq!(topo.order[0], id_a);
+        assert!(topo.order[1..].contains(&id_b));
+        assert!(topo.order[1..].contains(&id_c));
+        assert!(topo.order[1..].contains(&id_d));
+        assert_eq!(topo.critical_path_length, 2);
+    }
+
+    #[test]
+    fn test_diamond_a_to_d_via_b_c() {
+        let mut group = DownloadGroup::new("Diamond A→[B,C]→D");
+        group.strategy = ExecutionStrategy::Hybrid;
+
+        let member_a = GroupMember::new("http://example.com/a.zip".to_string(), vec![]);
+        let id_a = member_a.id.clone();
+
+        let member_b = GroupMember::new(
+            "http://example.com/b.zip".to_string(),
+            vec![id_a.clone()],
+        );
+        let member_c = GroupMember::new(
+            "http://example.com/c.zip".to_string(),
+            vec![id_a.clone()],
+        );
+
+        let id_b = member_b.id.clone();
+        let id_c = member_c.id.clone();
+
+        let member_d = GroupMember::new(
+            "http://example.com/d.zip".to_string(),
+            vec![id_b.clone(), id_c.clone()],
+        );
+        let id_d = member_d.id.clone();
+
+        group.members.insert(id_a.clone(), member_a);
+        group.members.insert(id_b.clone(), member_b);
+        group.members.insert(id_c.clone(), member_c);
+        group.members.insert(id_d.clone(), member_d);
+
+        let topo = DagSolver::topological_sort(&group).expect("Topo sort failed");
+        assert_eq!(topo.order[0], id_a);
+        assert!(topo.order[1..3].contains(&id_b));
+        assert!(topo.order[1..3].contains(&id_c));
+        assert_eq!(topo.order[3], id_d);
+        assert_eq!(topo.critical_path_length, 3);
+    }
+
+    #[test]
+    fn test_self_circular_dependency_detected() {
+        let mut group = DownloadGroup::new("Self-cycle A→A");
+
+        let member_a = GroupMember::new("http://example.com/a.zip".to_string(), vec![]);
+        let id_a = member_a.id.clone();
+
+        let member_a_bad = GroupMember::new(
+            "http://example.com/a.zip".to_string(),
+            vec![id_a.clone()],
+        );
+
+        group.members.insert(id_a.clone(), member_a_bad);
+
+        let result = DagSolver::topological_sort(&group);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("Circular"));
+    }
+
+    #[test]
+    fn test_two_member_cycle_a_b_detected() {
+        let mut group = DownloadGroup::new("Two-cycle A↔B");
+
+        let member_a = GroupMember::new("http://example.com/a.zip".to_string(), vec![]);
+        let id_a = member_a.id.clone();
+
+        let member_b = GroupMember::new(
+            "http://example.com/b.zip".to_string(),
+            vec![id_a.clone()],
+        );
+        let id_b = member_b.id.clone();
+
+        let member_a_bad = GroupMember::new(
+            "http://example.com/a.zip".to_string(),
+            vec![id_b.clone()],
+        );
+
+        group.members.insert(id_a.clone(), member_a_bad);
+        group.members.insert(id_b.clone(), member_b);
+
+        let result = DagSolver::topological_sort(&group);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_group() {
+        let group = DownloadGroup::new("Empty");
+        let result = DagSolver::topological_sort(&group);
+        assert!(result.is_ok());
+        assert!(result.unwrap().order.is_empty());
+    }
+
+    #[test]
+    fn test_single_member_group() {
+        let mut group = DownloadGroup::new("Single");
+        let member = GroupMember::new("http://example.com/file.zip".to_string(), vec![]);
+        let id = member.id.clone();
+        group.members.insert(id.clone(), member);
+
+        let topo = DagSolver::topological_sort(&group).expect("Topo sort failed");
+        assert_eq!(topo.order.len(), 1);
+        assert_eq!(topo.order[0], id);
+    }
+
+    #[test]
+    fn test_complex_nested_dependencies() {
+        let mut group = DownloadGroup::new("Complex DAG");
+
+        let member_a = GroupMember::new("http://example.com/a.zip".to_string(), vec![]);
+        let id_a = member_a.id.clone();
+
+        let member_b = GroupMember::new("http://example.com/b.zip".to_string(), vec![id_a.clone()]);
+        let id_b = member_b.id.clone();
+
+        let member_c = GroupMember::new("http://example.com/c.zip".to_string(), vec![id_a.clone()]);
+        let id_c = member_c.id.clone();
+
+        let member_d = GroupMember::new(
+            "http://example.com/d.zip".to_string(),
+            vec![id_b.clone(), id_c.clone()],
+        );
+        let id_d = member_d.id.clone();
+
+        let member_e = GroupMember::new(
+            "http://example.com/e.zip".to_string(),
+            vec![id_b.clone(), id_c.clone()],
+        );
+        let id_e = member_e.id.clone();
+
+        let member_f = GroupMember::new(
+            "http://example.com/f.zip".to_string(),
+            vec![id_d.clone(), id_e.clone()],
+        );
+        let id_f = member_f.id.clone();
+
+        group.members.insert(id_a.clone(), member_a);
+        group.members.insert(id_b.clone(), member_b);
+        group.members.insert(id_c.clone(), member_c);
+        group.members.insert(id_d.clone(), member_d);
+        group.members.insert(id_e.clone(), member_e);
+        group.members.insert(id_f.clone(), member_f);
+
+        let topo = DagSolver::topological_sort(&group).expect("Topo sort failed");
+        
+        assert_eq!(topo.order[0], id_a);
+        assert!(topo.order[1..3].contains(&id_b));
+        assert!(topo.order[1..3].contains(&id_c));
+        let d_idx = topo.order.iter().position(|x| x == &id_d).unwrap();
+        let e_idx = topo.order.iter().position(|x| x == &id_e).unwrap();
+        assert!(d_idx > 2 && e_idx > 2);
+        assert_eq!(topo.order[topo.order.len() - 1], id_f);
+        assert_eq!(topo.critical_path_length, 4);
     }
 }

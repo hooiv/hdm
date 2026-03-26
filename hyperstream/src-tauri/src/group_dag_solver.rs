@@ -9,7 +9,9 @@
 ///
 /// Detects cycles, computes critical path, and provides optimal execution ordering.
 
-use crate::download_groups::{DownloadGroup, GroupMember, GroupState, ExecutionStrategy};
+use crate::download_groups::DownloadGroup;
+#[cfg(test)]
+use crate::download_groups::{GroupMember, GroupState};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Topological sort result

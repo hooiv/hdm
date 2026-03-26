@@ -24,6 +24,7 @@ export default function Overlay() {
                         downloaded: d.downloaded_bytes,
                         total: d.total_size,
                         speed: 0,
+                        dateAdded: Date.now(),
                         status: toTaskStatus(d.status),
                     }));
                     setTasks(initial);
@@ -56,6 +57,7 @@ export default function Overlay() {
                         total,
                         progress: total > 0 ? (downloaded / total) * 100 : 0,
                         speed: 0,
+                        dateAdded: Date.now(),
                         status: 'Downloading' as const,
                         lastUpdate: Date.now(),
                     }];

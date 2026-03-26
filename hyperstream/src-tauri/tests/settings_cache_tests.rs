@@ -10,6 +10,9 @@
 //! - Metrics accuracy
 //! - Validation edge cases
 
+use hyperstream_lib::settings::Settings;
+use hyperstream_lib::settings_cache::{ErrorSeverity, SettingsCache, SettingsValidator};
+
 #[cfg(test)]
 mod settings_cache_tests {
     use std::time::Duration;

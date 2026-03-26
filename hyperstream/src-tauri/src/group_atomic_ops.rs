@@ -478,7 +478,6 @@ impl Default for GroupTransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::download_groups::ExecutionStrategy;
 
     #[test]
     fn test_atomic_create() {
@@ -510,7 +509,6 @@ mod tests {
     #[test]
     fn test_transaction_rollback() {
         let mgr = GroupTransactionManager::new();
-        let group = DownloadGroup::new("test");
         let mut groups = HashMap::new();
 
         // Transaction that will fail: add member to non-existent group

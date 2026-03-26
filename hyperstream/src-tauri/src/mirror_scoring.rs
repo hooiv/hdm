@@ -202,7 +202,6 @@ lazy_static! {
 mod tests {
     use super::*;
     use std::thread;
-    use std::time::Duration;
 
     /// Test 1: Initial neutral score and risk level assignment
     #[test]

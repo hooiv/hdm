@@ -44,7 +44,7 @@ pub struct GroupMember {
 
 impl GroupMember {
     /// Create a new group member
-    fn new(url: String, dependencies: Vec<String>) -> Self {
+    pub fn new(url: String, dependencies: Vec<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             url,
@@ -55,7 +55,7 @@ impl GroupMember {
     }
 
     /// Check if this member can start (all dependencies completed)
-    fn can_start(&self, members: &HashMap<String, GroupMember>) -> bool {
+    pub fn can_start(&self, members: &HashMap<String, GroupMember>) -> bool {
         if self.state != GroupState::Pending {
             return false;
         }
@@ -69,6 +69,7 @@ impl GroupMember {
     }
 
     /// Check if this member is complete
+    #[allow(dead_code)]
     fn is_complete(&self) -> bool {
         self.state == GroupState::Completed && self.progress_percent >= 100.0
     }
@@ -393,8 +394,7 @@ mod tests {
         let mut group = DownloadGroup::new("Test Group");
         let id1 = group.add_member("https://example.com/file1.zip", None);
         let id2 = group.add_member("https://example.com/file2.zip", Some(vec![id1.clone()]));
-        let id3 =
-            group.add_member("https://example.com/file3.zip", Some(vec![id2.clone()]));
+        let id3 = group.add_member("https://example.com/file3.zip", Some(vec![id2.clone()]));
 
         let order = group.resolve_execution_order();
 
@@ -413,7 +413,7 @@ mod tests {
         let mut group = DownloadGroup::new("Test Group");
         let id1 = group.add_member("https://example.com/file1.zip", None);
         let id2 = group.add_member("https://example.com/file2.zip", Some(vec![id1.clone()]));
-        
+
         // Create circular dependency: id1 depends on id2, id2 depends on id1
         group.add_dependency(id1.clone(), id2.clone());
 

@@ -2,8 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  AlertTriangle, CheckCircle, Shield, TrendingUp, Zap, RotateCcw,
-  Download, Eye, RefreshCw, BarChart3, Layers3, Clock, Droplet
+  AlertTriangle, CheckCircle, Shield, TrendingUp, Zap,
+  RefreshCw, BarChart3, Layers3, Clock, Droplet
 } from 'lucide-react';
 
 interface SegmentIntegrityInfo {

@@ -19,8 +19,8 @@ use tauri::command;
 use serde::{Serialize, Deserialize};
 use lazy_static::lazy_static;
 use std::sync::Mutex;
-use crate::download_groups::{DownloadGroup, GroupMember, GroupState, ExecutionStrategy};
-use crate::group_scheduler::{GroupScheduler, ExecutionState};
+use crate::download_groups::{DownloadGroup, GroupMember};
+use crate::group_scheduler::GroupScheduler;
 
 /// Response DTO for a member
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,18 +48,7 @@ pub struct GroupResponse {
     pub completed_at_ms: u64,
 }
 
-/// Response DTO for scheduler state summary
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchedulerStateResponse {
-    pub total_groups: usize,
-    pub active_groups: usize,
-    pub completed_groups: usize,
-    pub total_members: usize,
-    pub completed_members: usize,
-    pub overall_progress: f64,
-}
-
-/// Global group scheduler instance
+// Global group scheduler instance
 lazy_static! {
     static ref GLOBAL_GROUP_SCHEDULER: Mutex<GroupScheduler> = Mutex::new(GroupScheduler::new());
 }

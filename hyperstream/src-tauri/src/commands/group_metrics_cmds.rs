@@ -98,7 +98,7 @@ pub fn estimate_group_completion_time(group_id: String) -> Result<CompletionTime
             eta_seconds,
             success: true,
         }),
-        Err(e) => Ok(CompletionTimeResponse {
+        Err(_e) => Ok(CompletionTimeResponse {
             group_id,
             eta_seconds: 0,
             success: false,

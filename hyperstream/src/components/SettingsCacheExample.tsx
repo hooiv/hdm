@@ -5,15 +5,16 @@
  * into an existing settings page component.
  */
 
-import React, { useState, useEffect } from 'react';
-import { Settings } from '@/types';
-import { useSettingsCache } from '@/hooks/useSettingsCache';
+import { useState, useEffect } from 'react';
+import type { AppSettings } from '../types';
+import { useSettingsCache } from '../hooks/useSettingsCache';
+import * as settingsCache from '../api/settingsCache';
 import {
   SettingsCacheStatus,
   SettingsValidationFeedback,
   SaveSettingsButton,
   SegmentsSettingField,
-} from '@/components/SettingsCacheUI';
+} from './SettingsCacheUI';
 
 /**
  * Example SettingsPage with integrated Settings Cache System
@@ -30,19 +31,18 @@ export function ExampleSettingsPage() {
     cacheStats,
     lastValidation,
     validateDraft,
-    saveDraft,
     isLoading,
   } = useSettingsCache();
 
   // 2. Local state for settings form
-  const [settings, setSettings] = useState<Settings>(() => {
+  const [settings, setSettings] = useState<AppSettings>(() => {
     // Load initial settings (from API or defaults)
     return {
       segments: 4,
       download_dir: '/downloads',
       max_connections_per_host: 6,
       // ... other settings
-    } as any;
+    } as AppSettings;
   });
 
   // 3. Auto-validate when settings change
@@ -54,18 +54,8 @@ export function ExampleSettingsPage() {
     return () => clearTimeout(timer);
   }, [settings, validateDraft]);
 
-  // 4. Handle save with validation
-  const handleSave = async () => {
-    const result = await saveDraft(settings);
-    if (result.success) {
-      console.log('Settings saved successfully!');
-    } else {
-      console.error('Save failed:', result.validation_report.errors);
-    }
-  };
-
   // 5. Handle field changes
-  const handleFieldChange = (fieldName: string, value: any) => {
+  const handleFieldChange = (fieldName: keyof AppSettings, value: AppSettings[keyof AppSettings]) => {
     setSettings((prev) => ({
       ...prev,
       [fieldName]: value,
@@ -85,8 +75,7 @@ export function ExampleSettingsPage() {
         {/* Form Fields */}
         <SegmentsSettingField
           value={settings.segments}
-          onChange={(val) => handleFieldChange('segments', val)}
-          settings={settings}
+          onChange={(val: number) => handleFieldChange('segments', val)}
         />
 
         {/* Add more field components here... */}
@@ -94,14 +83,13 @@ export function ExampleSettingsPage() {
         {/* Validation Feedback */}
         <SettingsValidationFeedback
           settings={settings}
-          onChange={handleFieldChange}
         />
       </div>
 
       {/* Save Button with Validation */}
       <SaveSettingsButton
         settings={settings}
-        onSave={(success) => {
+        onSave={(success: boolean) => {
           if (success) {
             // Show success toast
             console.log('✅ Settings saved');
@@ -133,9 +121,7 @@ export function ExampleSettingsPage() {
  * For simpler use cases where you don't need auto-polling
  */
 export function SimpleSettingsPage() {
-  import * as settingsCache from '@/api/settingsCache';
-
-  const [settings, setSettings] = useState<Settings>({} as any);
+  const [settings, setSettings] = useState<AppSettings>({} as AppSettings);
 
   const handleSave = async () => {
     try {
@@ -164,7 +150,7 @@ export function SimpleSettingsPage() {
     <div className="space-y-4">
       <input
         value={settings.segments}
-        onChange={(e) := {
+        onChange={(e) => {
           const newVal = parseInt(e.target.value);
           setSettings((prev) => ({
             ...prev,

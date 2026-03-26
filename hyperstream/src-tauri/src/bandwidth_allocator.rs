@@ -38,10 +38,6 @@ impl TokenBucket {
         }
     }
 
-    fn get_limit(&self) -> u64 {
-        self.limit_bps.load(Ordering::Relaxed)
-    }
-
     async fn acquire(&self, requested: u64) -> u64 {
         let limit = self.limit_bps.load(Ordering::Relaxed);
         if limit == 0 {

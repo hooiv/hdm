@@ -13,10 +13,6 @@
 
 #[cfg(test)]
 mod integration_tests {
-    use std::time::Duration;
-    use std::sync::Arc;
-    use std::thread;
-
     #[test]
     fn test_cache_system_overview() {
         println!("\n=== PRODUCTION-GRADE SETTINGS CACHE SYSTEM ===\n");
@@ -279,7 +275,6 @@ mod integration_tests {
         println!("             │    (~1-10KB, JSON formatted)        │");
         println!("             └──────────────────────────────────────┘");
     }
-}
 
     #[test]
     fn test_file_structure() {
@@ -359,7 +354,7 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_performance_characteristics() {
+    fn test_performance_characteristics_profile() {
         // Cache performance profile:
         println!("Cache Performance:");
         println!("  Cache hit (fresh): <1µs");

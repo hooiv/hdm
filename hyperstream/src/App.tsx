@@ -54,7 +54,6 @@ const resolveActivityTab = (module: Awaited<ReturnType<typeof loadActivityTab>>)
 const resolveQueueManager = (module: Awaited<ReturnType<typeof loadQueueManager>>) => module.QueueManager;
 const resolveSearchTab = (module: Awaited<ReturnType<typeof loadSearchTab>>) => module.SearchTab;
 const resolvePluginEditor = (module: Awaited<ReturnType<typeof loadPluginEditor>>) => module.default;
-const resolveDownloadGroupTree = (module: Awaited<ReturnType<typeof loadDownloadGroupTree>>) => module.DownloadGroupTree;
 
 import { GlobalTelemetry } from './components/GlobalTelemetry';
 

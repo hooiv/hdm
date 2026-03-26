@@ -22,6 +22,7 @@ impl EventBus {
         Self { sender }
     }
 
+    #[allow(dead_code)]
     pub fn broadcast(&self, event: SystemEvent) -> Result<usize, broadcast::error::SendError<SystemEvent>> {
         self.sender.send(event)
     }

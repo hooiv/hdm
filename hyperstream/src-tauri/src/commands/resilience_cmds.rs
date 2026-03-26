@@ -1,6 +1,7 @@
 // resilience_cmds.rs — Tauri commands for resilience and recovery system
 //
 // Exposes resilience monitoring and recovery functionality to the frontend
+#![allow(dead_code)]
 
 use crate::resilience::ResilienceEngine;
 use crate::auto_recovery::AutoRecoveryEngine;

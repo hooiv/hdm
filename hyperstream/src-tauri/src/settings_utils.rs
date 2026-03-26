@@ -5,6 +5,7 @@
 //! - Automatic retry with exponential backoff
 //! - Error classification (transient vs permanent)
 //! - Structured logging compatible with production monitoring
+#![allow(dead_code)]
 
 use std::time::Duration;
 use std::fmt;

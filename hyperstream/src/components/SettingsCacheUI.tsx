@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { Settings } from '@/types';
-import { useSettingsCache } from '@/hooks/useSettingsCache';
-import { validateSettings, getCacheStats } from '@/api/settingsCache';
+import { useState, useEffect } from 'react';
+import type { AppSettings } from '../types';
+import { useSettingsCache } from '../hooks/useSettingsCache';
 
 /**
  * SettingsCacheStatus - Displays cache freshness and metrics
@@ -60,10 +59,8 @@ export function SettingsCacheStatus() {
  */
 export function SettingsValidationFeedback({
   settings,
-  onChange,
 }: {
-  settings: Settings;
-  onChange: (field: string, value: any) => void;
+  settings: AppSettings;
 }) {
   const { validateDraft, lastValidation } = useSettingsCache();
   const [isValidating, setIsValidating] = useState(false);
@@ -138,11 +135,9 @@ export function SettingsValidationFeedback({
 export function SegmentsSettingField({
   value,
   onChange,
-  settings,
 }: {
   value: number;
   onChange: (value: number) => void;
-  settings: Settings;
 }) {
   const [error, setError] = useState<string | null>(null);
 
@@ -201,11 +196,11 @@ export function SaveSettingsButton({
   onSave,
   disabled,
 }: {
-  settings: Settings;
+  settings: AppSettings;
   onSave: (success: boolean) => void;
   disabled?: boolean;
 }) {
-  const { saveDraft, isLoading, lastValidation } = useSettingsCache();
+  const { saveDraft, lastValidation } = useSettingsCache();
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
@@ -226,7 +221,7 @@ export function SaveSettingsButton({
         setSaveStatus('error');
         onSave(false);
       }
-    } catch (err) {
+    } catch (_err) {
       setSaveStatus('error');
       onSave(false);
     } finally {

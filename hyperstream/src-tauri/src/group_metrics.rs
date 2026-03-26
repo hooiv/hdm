@@ -132,6 +132,7 @@ pub struct GroupMetricsTracker {
     /// Historical trend data (up to last 1000 points)
     trends: Arc<Mutex<HashMap<String, Vec<TrendDataPoint>>>>,
     /// Metrics sample interval (milliseconds)
+    #[allow(dead_code)]
     sample_interval_ms: u64,
 }
 

@@ -3,7 +3,6 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::Sha256;
 use sha1::Digest as _;
-use sha2::Digest as _;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::Path;
@@ -54,8 +53,10 @@ struct RankedCandidate {
 pub struct DiscoveryContext {
     pub filename: String,
     pub file_size: u64,
+    #[allow(dead_code)]
     pub sha256: Option<String>,
     pub md5: Option<String>,
+    #[allow(dead_code)]
     pub sha1: Option<String>,
     pub client: Client,
 }
@@ -105,6 +106,7 @@ impl DiscoveryEngine {
 
         let mut futures: Vec<futures::future::BoxFuture<Vec<MirrorCandidate>>> = Vec::new();
         for provider in &self.providers {
+            let _provider_name = provider.name();
             let ctx_ref = ctx.clone();
             futures.push(Box::pin(async move {
                 provider.discover(&ctx_ref).await

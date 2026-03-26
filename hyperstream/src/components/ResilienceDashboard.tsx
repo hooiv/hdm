@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AlertTriangle, Activity, TrendingUp, CheckCircle2, Clock, AlertCircle, Zap, BarChart3 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 
 interface DownloadHealth {
   download_id: string;
@@ -25,13 +25,6 @@ interface RecoveryAction {
   created_at: number;
 }
 
-interface NetworkHealth {
-  is_online: boolean;
-  latency_ms: number;
-  packet_loss_percent: number;
-  dns_working: boolean;
-}
-
 interface ResilienceDashboardProps {
   isOpen: boolean;
   onClose: () => void;
@@ -47,7 +40,6 @@ export const ResilienceDashboard: React.FC<ResilienceDashboardProps> = ({
   const [errorStats, setErrorStats] = useState<any>(null);
   const [recoveryStats, setRecoveryStats] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [selectedDownload, setSelectedDownload] = useState<string | null>(null);
 
   const loadData = async () => {
     setLoading(true);
@@ -217,7 +209,6 @@ export const ResilienceDashboard: React.FC<ResilienceDashboardProps> = ({
                       className={`p-4 border rounded-lg cursor-pointer transition-all ${getStatusColor(
                         dl.status
                       )}`}
-                      onClick={() => setSelectedDownload(dl.download_id)}
                       whileHover={{ scale: 1.02 }}
                     >
                       <div className="flex items-center justify-between mb-2">
@@ -323,7 +314,7 @@ export const ResilienceDashboard: React.FC<ResilienceDashboardProps> = ({
                   {Object.entries(errorStats.error_categories).map(([category, count]) => (
                     <div key={category} className="flex items-center justify-between p-3 bg-white/[0.02] rounded-lg">
                       <span className="text-sm text-slate-300">{category}</span>
-                      <span className="text-sm font-bold text-red-400">{count}</span>
+                      <span className="text-sm font-bold text-red-400">{String(count)}</span>
                     </div>
                   ))}
                 </div>

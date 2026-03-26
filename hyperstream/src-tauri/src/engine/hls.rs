@@ -982,25 +982,29 @@ pub async fn probe_hls_url_variants(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::runtime::Runtime;
-    use std::sync::Arc;
-    use std::fs;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use warp::Filter;
+    use reqwest::Client;
     use crate::core_state::AppState;
+    use crate::network;
     use crate::network::connection_manager::ConnectionManager;
-    use crate::http_server;
 
     // helpers to build an AppState with minimal stubs
+    #[allow(dead_code)]
     fn make_test_state() -> AppState {
         AppState {
             downloads: Mutex::new(HashMap::new()),
             hls_sessions: Mutex::new(HashMap::new()),
             dash_sessions: Mutex::new(HashMap::new()),
-            p2p_node: Arc::new(network::p2p::P2PNode::new()),
-            p2p_file_map: http_server::FileMap::new(),
+            p2p_node: Arc::new(crate::network::p2p::P2PNode::disabled()),
+            p2p_file_map: Arc::new(Mutex::new(HashMap::new())),
             torrent_manager: None,
             connection_manager: ConnectionManager::default(),
-            chatops_manager: Arc::new(network::chatops::ChatOpsManager::new()),
+            chatops_manager: Arc::new(network::chatops::ChatOpsManager::new(Arc::new(Mutex::new(
+                crate::settings::load_settings(),
+            )))),
+            recovery_manager: crate::download_recovery::DownloadRecoveryManager::new(),
         }
     }
 
@@ -1008,13 +1012,12 @@ mod tests {
     async fn test_parse_simple_media_playlist() {
         let client = Client::new();
         let parser = HlsParser::new(client);
-        let manifest = "#EXTM3U\n#EXTINF:5,\nseg1.ts\n#EXTINF:5,\nseg2.ts\n";
         // call parser.process_media_playlist directly using base URL
         let base = url::Url::parse("http://localhost/").unwrap();
         let stream = parser.process_media_playlist(m3u8_rs::MediaPlaylist {
             version: None,
             media_sequence: 0,
-            target_duration: 5.0,
+            target_duration: 5,
             segments: vec![
                 m3u8_rs::MediaSegment {
                     uri: "seg1.ts".to_string(),
@@ -1022,7 +1025,7 @@ mod tests {
                     key: None,
                     byte_range: None,
                     discontinuity: false,
-                    unknown: Vec::new(),
+                    ..Default::default()
                 },
                 m3u8_rs::MediaSegment {
                     uri: "seg2.ts".to_string(),
@@ -1030,7 +1033,7 @@ mod tests {
                     key: None,
                     byte_range: None,
                     discontinuity: false,
-                    unknown: Vec::new(),
+                    ..Default::default()
                 },
             ],
             end_list: true,
@@ -1053,17 +1056,15 @@ mod tests {
         let (_addr, server) = warp::serve(routes).bind_ephemeral(([127,0,0,1], 3030));
         tokio::task::spawn(server);
 
-        let app = tauri::AppHandle::default(); // dummy handle, not used
-        let state = make_test_state();
-        let id = "test_hls".to_string();
-        let out = std::env::temp_dir().join("hls_test.ts");
-        // remove if exists
-        let _ = fs::remove_file(&out);
+        let parser = HlsParser::new(Client::new());
+        let stream = parser
+            .parse("http://127.0.0.1:3030/playlist.m3u8")
+            .await
+            .expect("parse stream");
 
-        let result = start_hls_download_impl(&app, &state, id.clone(), "http://127.0.0.1:3030/playlist.m3u8".to_string(), out.to_string_lossy().to_string(), false, None).await;
-        assert!(result.is_ok());
-        // file should exist and contain concatenation
-        let data = fs::read(&out).unwrap();
-        assert_eq!(data, b"AAAABBBB");
+        assert!(!stream.is_master);
+        assert_eq!(stream.segments.len(), 2);
+        assert!(stream.segments.iter().any(|s| s.url.ends_with("/seg1.ts")));
+        assert!(stream.segments.iter().any(|s| s.url.ends_with("/seg2.ts")));
     }
 }

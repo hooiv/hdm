@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useDownloadStateManagement, useResumeValidation, getStatusLabel, getStatusColor } from '@/hooks/useDownloadStateManagement';
+import { useDownloadStateManagement, useResumeValidation, getStatusLabel, getStatusColor } from '../hooks/useDownloadStateManagement';
 import { AlertCircle, CheckCircle, AlertTriangle, Loader } from 'lucide-react';
 
 interface ResumeSafetyWarningProps {

@@ -8,7 +8,7 @@
  * - Smart strategy recommendations
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Network,
@@ -45,12 +45,6 @@ interface BatchDetectionResult {
     suggested_name: string;
     strategy: string;
     reason: string;
-}
-
-interface StrategyRecommendation {
-    recommended_strategy: string;
-    reason: string;
-    confidence: number;
 }
 
 /**

@@ -5,10 +5,7 @@
 /// - Batch auto-detection from URLs
 /// - Atomic transaction support
 
-use crate::group_dag_solver::DagSolver;
-use crate::group_batch_detector::{BatchDetector, BatchDetection};
-use crate::group_atomic_ops::GroupTransactionManager;
-use crate::download_groups::DownloadGroup;
+use crate::group_batch_detector::BatchDetector;
 
 /// Analyze a group's dependency structure
 #[tauri::command]
@@ -16,7 +13,7 @@ pub fn analyze_group_dependencies(
     group_id: String,
     state: tauri::State<crate::AppState>,
 ) -> Result<AnalysisSummary, String> {
-    let downloads = state.downloads.lock().map_err(|e| e.to_string())?;
+    let _downloads = state.downloads.lock().map_err(|e| e.to_string())?;
 
     // Find the group in any of the downloads
     // (Note: In actual implementation, groups are stored separately via group_scheduler)
@@ -92,7 +89,7 @@ pub fn recommend_execution_strategy(urls: Vec<String>) -> Result<StrategyRecomme
 /// Validate a download group's dependency graph
 #[tauri::command]
 pub fn validate_group_dependencies(
-    members: serde_json::Value,
+    _members: serde_json::Value,
 ) -> Result<ValidationResult, String> {
     // Parse members into a mock group for validation
     // This is a simplified version - real implementation would deserialize properly

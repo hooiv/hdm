@@ -9,7 +9,6 @@
 /// Provides confidence scores and suggested grouping strategies.
 
 use regex::Regex;
-use std::collections::HashMap;
 use url::Url;
 
 /// Confidence score (0.0 to 1.0)
@@ -240,7 +239,7 @@ impl BatchDetector {
 
     /// Detect directory batch (same path, different files)
     fn detect_directory_batch(urls: &[&str]) -> Option<BatchDetection> {
-        let mut parsed_urls: Vec<Url> = urls
+        let parsed_urls: Vec<Url> = urls
             .iter()
             .filter_map(|u| Url::parse(u).ok())
             .collect();
@@ -256,7 +255,7 @@ impl BatchDetector {
         }
 
         // Check if paths are similar (same directory)
-        let mut paths: Vec<_> = parsed_urls.iter().map(|u| u.path()).collect();
+        let paths: Vec<_> = parsed_urls.iter().map(|u| u.path()).collect();
         let common_dir = Self::find_common_path(&paths)?;
 
         if paths.len() < 3 {
@@ -286,7 +285,7 @@ impl BatchDetector {
 
     /// Detect generic batch (domain + similar stems)
     fn detect_generic_batch(urls: &[&str]) -> Option<BatchDetection> {
-        let mut parsed_urls: Vec<Url> = urls
+        let parsed_urls: Vec<Url> = urls
             .iter()
             .filter_map(|u| Url::parse(u).ok())
             .collect();
@@ -437,7 +436,7 @@ mod tests {
         ];
 
         let detected = BatchDetector::detect_batch(
-            &urls.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &urls.iter().copied().collect::<Vec<_>>(),
         );
 
         assert!(detected.is_some());

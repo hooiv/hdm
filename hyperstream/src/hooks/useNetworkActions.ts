@@ -2,9 +2,8 @@ import { useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { formatBytes } from '../utils/formatters';
-import type { DiscoveredMirror, DownloadTask } from '../types';
+import type { DiscoveredMirror, DownloadTask, WaybackSnapshot } from '../types';
 import type {
-    WaybackSnapshot,
     MirrorResult,
     ApiFuzzResult,
     ReplayResult,
@@ -29,11 +28,8 @@ export function useNetworkActions(task: DownloadTask, options: UseNetworkActions
                 if (m.hostname) badges.push(m.hostname);
                 if (m.content_length) badges.push(formatBytes(m.content_length));
                 if (m.supports_range) badges.push('range');
-                return `${index + 1}. ${m.source} — ${badges.join(' — ')}${m.note ? `
-   ${m.note}` : ''}
-   ${m.url}`;
-            }).join('
-');
+                return `${index + 1}. ${m.source} — ${badges.join(' — ')}${m.note ? `\n   ${m.note}` : ''}\n   ${m.url}`;
+            }).join('\n');
 
             toastRef.current.success(
                 `🔍 Mirror intelligence complete
@@ -82,8 +78,7 @@ export function useNetworkActions(task: DownloadTask, options: UseNetworkActions
                     .sort((a, b) => b.avg_speed_bps - a.avg_speed_bps || a.latency_ms - b.latency_ms);
                 const summary = ranked.slice(0, 5).map((m, index) =>
                     `${index === 0 ? '🏆' : '  '} ${m.source} — ${formatBytes(m.avg_speed_bps)}/s — ${m.latency_ms < 999999 ? `${m.latency_ms}ms` : '—'}${m.supports_range ? ' — range' : ''}`
-                ).join('
-');
+                ).join('\n');
 
                 toastRef.current.success(`📡 Mirror probe complete
 ${summary || 'No mirrors responded during probe.'}`);
@@ -100,8 +95,7 @@ ${summary || 'No mirrors responded during probe.'}`);
             toastRef.current.info('Fuzzing URL for alternate endpoints...');
             const result = await invoke<ApiFuzzResult>('fuzz_url', { url: task.url });
             const interesting = result.mutations?.filter((m) => m.interesting) || [];
-            const hitList = interesting.slice(0, 10).map((m) => `[${m.status_code}] ${m.mutated_url}`).join('
-') || 'None';
+            const hitList = interesting.slice(0, 10).map((m) => `[${m.status_code}] ${m.mutated_url}`).join('\n') || 'None';
             toastRef.current.success(`API Fuzz Complete
 Tested: ${result.mutations?.length || 0}
 Interesting: ${interesting.length}
@@ -124,8 +118,7 @@ ${hitList}`);
                 body: null,
             });
             const headerLines = Object.entries(result.headers).slice(0, 8)
-                .map(([k, v]) => `  ${k}: ${v}`).join('
-');
+                .map(([k, v]) => `  ${k}: ${v}`).join('\n');
             toastRef.current.success(
                 `HTTP ${result.status_code} — ${result.response_time_ms}ms — ${result.body_size} bytes
 

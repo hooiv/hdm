@@ -60,8 +60,7 @@ Timestamp: ${result.timestamp}`);
                 toastRef.current.error('No USB drives found. Insert a USB drive and try again.');
                 return;
             }
-            const driveList = drives.map((d) => `Drive ${d.number}: ${d.model} (${d.size_display})`).join('
-');
+            const driveList = drives.map((d) => `Drive ${d.number}: ${d.model} (${d.size_display})`).join('\n');
             const choice = prompt(`⚡ Select USB drive to flash:
 
 ${driveList}
@@ -125,8 +124,7 @@ ${result.destination}`);
             try {
                 toastRef.current.info('Computing checksums...');
                 const results = await invoke<{ algorithm: string; hash: string; file_size: number }[]>('compute_file_checksums', { path: filePath });
-                const lines = results.map(r => `${r.algorithm}: ${r.hash}`).join('
-');
+                const lines = results.map((r) => `${r.algorithm}: ${r.hash}`).join('\n');
                 toastRef.current.success(`File Checksums (${formatBytes(results[0]?.file_size ?? 0)}):
 
 ${lines}`);
@@ -149,9 +147,9 @@ Actual:   ${result.hash}`);
     }, [filePath]);
 
     const handleSqlQuery = useCallback(async () => {
-        const sql = prompt('Enter SQL query:
+        const sql = prompt(`Enter SQL query:
 
-Example: SELECT * FROM file WHERE column > 10 LIMIT 20');
+    Example: SELECT * FROM file WHERE column > 10 LIMIT 20`);
         if (!sql) return;
         try {
             const result = await invoke<SqlQueryResult>('query_file', { path: filePath, sql });

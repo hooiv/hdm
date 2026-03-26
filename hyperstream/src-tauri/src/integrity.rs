@@ -303,6 +303,7 @@ pub async fn auto_verify(
 
 /// Compute a file hash with progress reporting via a callback.
 /// Callback receives (bytes_processed, total_bytes).
+#[allow(dead_code)]
 pub async fn compute_file_hash_with_progress<F>(
     path: &str,
     algorithm: HashAlgorithm,
