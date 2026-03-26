@@ -166,6 +166,28 @@ export async function updateMirrorReliability(
 }
 
 /**
+ * Automatically execute recovery for a segment without user intervention
+ * Evaluates the best recovery strategy and returns the action taken
+ */
+export async function autoExecuteRecovery(
+  downloadId: string,
+  segmentId: number,
+  segmentStart: number,
+  segmentEnd: number,
+  originalUrl: string,
+  alternativeMirrors: string[]
+): Promise<string> {
+  return invoke<string>('auto_execute_recovery', {
+    download_id: downloadId,
+    segment_id: segmentId,
+    segment_start: segmentStart,
+    segment_end: segmentEnd,
+    original_url: originalUrl,
+    alternative_mirrors: alternativeMirrors,
+  });
+}
+
+/**
  * Clean up old recovery data (>7 days)
  */
 export async function cleanupRecoveryData(): Promise<void> {

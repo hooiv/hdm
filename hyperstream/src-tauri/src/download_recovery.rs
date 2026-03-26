@@ -278,21 +278,39 @@ impl DownloadRecoveryManager {
             };
         }
 
-        // Strategy 2: Try a different mirror
+        // Strategy 2: Try a different mirror (with domain-based intelligence)
         if !alternative_mirrors.is_empty() {
-            // Find healthiest mirror
-            let best_mirror = alternative_mirrors
+            // Group mirrors by domain
+            let domain_groups = group_mirrors_by_domain(&alternative_mirrors);
+            
+            // Find the healthiest domain (average score of all mirrors in that domain)
+            let best_domain_mirrors = domain_groups
                 .iter()
-                .max_by_key(|url| {
-                    mirrors.get(*url).map(|m| m.score).unwrap_or(70) // Default score for untested mirrors
+                .max_by_key(|(domain, urls)| {
+                    let avg_score: f64 = urls
+                        .iter()
+                        .map(|url| mirrors.get(url).map(|m| m.score as f64).unwrap_or(70.0))
+                        .sum::<f64>()
+                        / urls.len() as f64;
+                    (avg_score * 100.0) as i32 // Return as scaled int for comparison
                 })
-                .cloned()
-                .unwrap_or_else(|| alternative_mirrors[0].clone());
+                .map(|(_, urls)| urls);
 
-            return RecoveryStrategy::SwitchMirror {
-                current_mirror_url: original_url.to_string(),
-                fallback_mirror_url: best_mirror,
-            };
+            if let Some(urls) = best_domain_mirrors {
+                // Pick the best mirror from the best domain
+                let best_mirror = urls
+                    .iter()
+                    .max_by_key(|url| {
+                        mirrors.get(*url).map(|m| m.score).unwrap_or(70)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| urls[0].clone());
+
+                return RecoveryStrategy::SwitchMirror {
+                    current_mirror_url: original_url.to_string(),
+                    fallback_mirror_url: best_mirror,
+                };
+            }
         }
 
         // Strategy 3: Resume from offset (if this is the only option)
@@ -405,9 +423,63 @@ fn exponential_backoff_with_jitter(attempt: u32) -> u64 {
     backoff + jitter
 }
 
+/// Extract domain from a URL for mirror grouping
+/// For example: "https://cdn1.example.com/file" -> "example.com"
+fn extract_domain_from_url(url: &str) -> String {
+    if let Ok(parsed) = url.parse::<url::Url>() {
+        if let Some(host) = parsed.host_str() {
+            // Remove common CDN prefixes (cdn1, cdn2, etc.)
+            let domain = host.to_string();
+            
+            // For subdomains, return the base domain (last 2 parts)
+            let parts: Vec<&str> = domain.split('.').collect();
+            if parts.len() > 2 {
+                // Return last two parts (e.g., example.com from cdn.example.com)
+                format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1])
+            } else {
+                domain
+            }
+        } else {
+            url.to_string()
+        }
+    } else {
+        url.to_string()
+    }
+}
+
+/// Group mirrors by domain for smarter selection
+fn group_mirrors_by_domain(mirrors: &[String]) -> std::collections::HashMap<String, Vec<String>> {
+    let mut groups = std::collections::HashMap::new();
+    for mirror in mirrors {
+        let domain = extract_domain_from_url(mirror);
+        groups.entry(domain).or_insert_with(Vec::new).push(mirror.clone());
+    }
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_domain_extraction() {
+        assert_eq!(extract_domain_from_url("https://cdn1.example.com/file"), "example.com");
+        assert_eq!(extract_domain_from_url("https://example.com/file"), "example.com");
+        assert_eq!(extract_domain_from_url("https://mirror.cdn.example.com/file"), "example.com");
+    }
+
+    #[test]
+    fn test_mirror_grouping_by_domain() {
+        let mirrors = vec![
+            "https://cdn1.example.com/file".to_string(),
+            "https://cdn2.example.com/file".to_string(),
+            "https://other.com/file".to_string(),
+        ];
+        let groups = group_mirrors_by_domain(&mirrors);
+        
+        assert_eq!(groups.get("example.com").map(|v| v.len()), Some(2));
+        assert_eq!(groups.get("other.com").map(|v| v.len()), Some(1));
+    }
 
     #[tokio::test]
     async fn test_mirror_reliability_score_computation() {

@@ -53,6 +53,13 @@ pub mod auto_recovery;
 pub mod resilience_integration;
 pub mod resilience_analytics;
 pub mod mirror_scoring;
+pub mod download_recovery;
+pub mod recovery_commands;
+pub mod recovery_integration;
+pub mod parallel_mirror_retry;
+pub mod parallel_mirror_commands;
+pub mod mirror_analytics;
+pub mod mirror_analytics_commands;
 pub mod failure_prediction;
 pub mod download_groups;
 pub mod group_scheduler;
@@ -65,9 +72,6 @@ pub mod group_metrics;
 pub mod group_smart_queue;
 pub mod group_error_handler;
 pub mod group_commands;
-pub mod download_recovery;
-pub mod recovery_commands;
-pub mod recovery_integration;
 
 // mod virtual_drive;
 mod cloud_bridge;
@@ -4356,7 +4360,21 @@ fn classify_network_requests(
             recovery_commands::get_corruption_report,
             recovery_commands::get_mirror_rankings,
             recovery_commands::update_mirror_reliability,
-            recovery_commands::cleanup_recovery_data
+            recovery_commands::auto_execute_recovery,
+            recovery_commands::cleanup_recovery_data,
+            // Parallel Mirror Retry Commands
+            parallel_mirror_commands::get_parallel_retry_config,
+            parallel_mirror_commands::update_parallel_retry_config,
+            parallel_mirror_commands::select_optimal_mirrors,
+            parallel_mirror_commands::estimate_aggregated_throughput,
+            parallel_mirror_commands::simulate_parallel_retry,
+            // Mirror Analytics Commands
+            mirror_analytics_commands::analyze_mirror_statistics,
+            mirror_analytics_commands::compare_two_mirrors,
+            mirror_analytics_commands::get_mirror_trend,
+            mirror_analytics_commands::get_mirror_recommendation,
+            mirror_analytics_commands::health_check_mirrors,
+            mirror_analytics_commands::calculate_percentiles,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

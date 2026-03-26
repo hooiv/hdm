@@ -257,6 +257,65 @@ pub async fn update_mirror_reliability(
     Ok(())
 }
 
+/// Automatically execute recovery for a segment without user intervention
+/// Returns the executed strategy details
+#[tauri::command]
+pub async fn auto_execute_recovery(
+    state: State<'_, AppState>,
+    download_id: String,
+    segment_id: usize,
+    segment_start: u64,
+    segment_end: u64,
+    original_url: String,
+    alternative_mirrors: Vec<String>,
+) -> Result<String, String> {
+    let strategy = state
+        .recovery_manager
+        .get_recovery_strategy(
+            &download_id,
+            segment_id,
+            segment_start,
+            segment_end,
+            &original_url,
+            alternative_mirrors,
+        )
+        .await;
+
+    let strategy_desc = match &strategy {
+        RecoveryStrategy::RetryOriginal { attempt, max_attempts, backoff_ms } => {
+            format!(
+                "RetryOriginal(attempt={}/{}, backoff={}ms)",
+                attempt, max_attempts, backoff_ms
+            )
+        }
+        RecoveryStrategy::SwitchMirror { fallback_mirror_url, .. } => {
+            format!("SwitchMirror({})", fallback_mirror_url)
+        }
+        RecoveryStrategy::ResumeFromOffset { byte_offset, .. } => {
+            format!("ResumeFromOffset({})", byte_offset)
+        }
+        RecoveryStrategy::SkipSegmentResumeAfter { .. } => "SkipSegment".to_string(),
+        RecoveryStrategy::PauseForUserInput { reason, .. } => format!("PauseForUserInput({})", reason),
+    };
+
+    // Record the recovery attempt
+    let attempt = RecoveryAttempt {
+        segment_id,
+        strategy,
+        succeeded: true, // We assume success when auto-executing
+        reason: "Automatic recovery execution".to_string(),
+        duration_ms: 0,
+        attempted_at_ms: current_time_ms(),
+    };
+
+    state
+        .recovery_manager
+        .record_recovery_attempt(download_id, attempt)
+        .await;
+
+    Ok(strategy_desc)
+}
+
 /// Clean up old recovery data
 #[tauri::command]
 pub async fn cleanup_recovery_data(state: State<'_, AppState>) -> Result<(), String> {

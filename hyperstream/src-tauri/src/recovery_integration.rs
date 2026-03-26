@@ -7,14 +7,12 @@
 //! - Emits UI events for user notification
 //! - Records mirror reliability metrics
 
-use crate::download_recovery::{
-    CorruptionEvidence, CorruptionType, RecoveryStrategy,
-};
 use crate::core_state::AppState;
-use tauri::Emitter;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use crate::download_recovery::{CorruptionEvidence, CorruptionType, RecoveryStrategy};
 use sha2::Digest;
+use std::sync::Arc;
+use tauri::Emitter;
+use tokio::sync::Mutex;
 
 /// Event emitted when corruption is detected during a download
 #[derive(serde::Serialize, Clone)]
@@ -46,23 +44,27 @@ pub async fn on_segment_completion(
     expected_checksum: Option<&str>,
     mirror_url: &str,
 ) {
-    // Check for entropy-based corruption
-    let entropy = calculate_entropy(data);
-    if entropy < 1.5 {
+    // Quick exit for empty data
+    if data.is_empty() {
+        return;
+    }
+
+    let mut detected_corruption = false;
+
+    // 1. Check for size consistency
+    let expected_size = segment_end - segment_start;
+    if data.len() as u64 != expected_size {
         let evidence = CorruptionEvidence {
             segment_id,
             segment_start,
             segment_end,
-            corruption_type: CorruptionType::LowEntropy {
-                entropy,
-                threshold: 1.5,
+            corruption_type: CorruptionType::SizeMismatch {
+                expected: expected_size,
+                actual: data.len() as u64,
             },
-            confidence: 75,
+            confidence: 95,
             detected_at_ms: current_time_ms(),
-            evidence_data: format!(
-                "Entropy {:.4} below threshold 1.5 (likely compressed or corrupted)",
-                entropy
-            ),
+            evidence_data: format!("Expected {} bytes, got {} bytes", expected_size, data.len()),
         };
 
         state
@@ -70,19 +72,19 @@ pub async fn on_segment_completion(
             .report_corruption(download_id.to_string(), evidence.clone())
             .await;
 
-        // Emit UI event
         let _ = app_handle.emit(
             "corruption_detected",
             CorruptionDetectedEvent {
                 download_id: download_id.to_string(),
                 segment_id,
                 evidence,
-                suggested_recovery: "Switch mirror or retry from offset".to_string(),
+                suggested_recovery: "Resume from offset".to_string(),
             },
         );
+        detected_corruption = true;
     }
 
-    // Check checksum if provided
+    // 2. Check checksum if provided
     if let Some(expected) = expected_checksum {
         let mut hasher = sha2::Sha256::new();
         hasher.update(data);
@@ -116,19 +118,86 @@ pub async fn on_segment_completion(
                     suggested_recovery: "Re-download from mirror".to_string(),
                 },
             );
+            detected_corruption = true;
         }
     }
 
-    // Update mirror reliability (success case)
-    let avg_speed = if segment_end > segment_start {
-        ((segment_end - segment_start) as u64 * 1000) / 1000 // placeholder
-    } else {
-        0
-    };
+    // 3. Check for GZIP-compressed data (low entropy is expected for valid GZIP)
+    let entropy = calculate_entropy(data);
+    let is_gzip = is_gzip_data(data);
 
+    if entropy == 0.0 {
+        // All bytes identical - definitely corruption
+        let evidence = CorruptionEvidence {
+            segment_id,
+            segment_start,
+            segment_end,
+            corruption_type: CorruptionType::ZeroEntropy,
+            confidence: 98,
+            detected_at_ms: current_time_ms(),
+            evidence_data: "All bytes are identical - definite corruption".to_string(),
+        };
+
+        state
+            .recovery_manager
+            .report_corruption(download_id.to_string(), evidence.clone())
+            .await;
+
+        let _ = app_handle.emit(
+            "corruption_detected",
+            CorruptionDetectedEvent {
+                download_id: download_id.to_string(),
+                segment_id,
+                evidence,
+                suggested_recovery: "Retry or switch mirror".to_string(),
+            },
+        );
+        detected_corruption = true;
+    } else if entropy < 1.5 && !is_gzip {
+        // Low entropy but NOT gzip - suspect
+        let evidence = CorruptionEvidence {
+            segment_id,
+            segment_start,
+            segment_end,
+            corruption_type: CorruptionType::LowEntropy {
+                entropy,
+                threshold: 1.5,
+            },
+            confidence: 65,
+            detected_at_ms: current_time_ms(),
+            evidence_data: format!(
+                "Entropy {:.4} below threshold 1.5 (not GZIP, possibly corrupted)",
+                entropy
+            ),
+        };
+
+        state
+            .recovery_manager
+            .report_corruption(download_id.to_string(), evidence.clone())
+            .await;
+
+        let _ = app_handle.emit(
+            "corruption_detected",
+            CorruptionDetectedEvent {
+                download_id: download_id.to_string(),
+                segment_id,
+                evidence,
+                suggested_recovery: "Switch mirror or retry from offset".to_string(),
+            },
+        );
+        detected_corruption = true;
+    }
+
+    // 4. Update mirror reliability
+    let segment_size = segment_end - segment_start;
     state
         .recovery_manager
-        .update_mirror_reliability(mirror_url.to_string(), true, false, avg_speed)
+        .update_mirror_reliability(
+            mirror_url.to_string(),
+            !detected_corruption, // success if no corruption detected
+            false,
+            segment_size, // use segment size as proxy for speed metric
+        )
         .await;
 }
 
@@ -144,7 +213,13 @@ pub async fn on_segment_failure(
     alternative_mirrors: Vec<String>,
     mirror_url: &str,
 ) {
-    // Get recommended strategy
+    // Report failure to mirror reliability
+    state
+        .recovery_manager
+        .update_mirror_reliability(mirror_url.to_string(), false, true, 0)
+        .await;
+
+    // Get recommended strategy based on attempt history
     let strategy = state
         .recovery_manager
         .get_recovery_strategy(
@@ -153,36 +228,45 @@ pub async fn on_segment_failure(
             segment_start,
             segment_end,
             original_url,
-            alternative_mirrors,
+            alternative_mirrors.clone(),
         )
         .await;
 
     let strategy_str = match &strategy {
-        RecoveryStrategy::RetryOriginal { attempt, .. } => format!("Retry (attempt {})", attempt),
-        RecoveryStrategy::SwitchMirror { fallback_mirror_url, .. } => {
+        RecoveryStrategy::RetryOriginal {
+            attempt,
+            max_attempts,
+        } => {
+            format!("Retry original (attempt {}/{})", attempt, max_attempts)
+        }
+        RecoveryStrategy::SwitchMirror {
+            fallback_mirror_url,
+            ..
+        } => {
             format!("Switch to mirror: {}", fallback_mirror_url)
         }
-        RecoveryStrategy::ResumeFromOffset { byte_offset, .. } => format!("Resume at {}", byte_offset),
+        RecoveryStrategy::ResumeFromOffset { byte_offset, .. } => {
+            format!("Resume at offset {}", byte_offset)
+        }
         RecoveryStrategy::SkipSegmentResumeAfter { .. } => "Skip segment".to_string(),
         RecoveryStrategy::PauseForUserInput { reason, .. } => format!("Paused: {}", reason),
     };
 
-    // Emit UI event
+    // Emit UI event for recovery attempt
     let _ = app_handle.emit(
         "recovery_triggered",
         RecoveryTriggeredEvent {
             download_id: download_id.to_string(),
             segment_id,
-            strategy: strategy_str,
+            strategy: strategy_str.clone(),
             reason: "Segment download failed".to_string(),
         },
     );
 
-    // Update mirror reliability (failure case)
-    state
-        .recovery_manager
-        .update_mirror_reliability(mirror_url.to_string(), false, true, 0)
-        .await;
+    eprintln!(
+        "[Recovery] Download {} segment {} failed, attempting: {}",
+        download_id, segment_id, strategy_str
+    );
 }
 
 /// Periodic cleanup of old recovery data
@@ -195,6 +279,12 @@ pub async fn periodic_recovery_cleanup(state: Arc<Mutex<AppState>>) {
 }
 
 // ============= Helper Functions =============
+
+/// Detect if data is GZIP compressed
+/// GZIP files start with magic bytes: 0x1f 0x8b
+fn is_gzip_data(data: &[u8]) -> bool {
+    data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b
+}
 
 fn calculate_entropy(data: &[u8]) -> f64 {
     if data.is_empty() {
