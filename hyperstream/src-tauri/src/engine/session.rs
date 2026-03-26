@@ -559,9 +559,20 @@ pub(crate) async fn start_download_impl(
             if ready_members.is_empty() {
                 return Err(format!("No ready members in group {} (all have unsatisfied dependencies or are already started)", gid));
             }
-            
-            // Use the first ready member
-            ready_members[0].clone()
+
+            // Use smart queue ordering instead of arbitrary first member selection.
+            let completed_members = scheduler.get_completed_members(gid);
+            let ordered_members = crate::group_engine::prioritize_ready_members(
+                group,
+                ready_members,
+                completed_members,
+                10_000_000,
+            );
+
+            ordered_members
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("No schedulable members in group {}", gid))?
         } else {
             return Err(format!("Group {} not found", gid));
         }

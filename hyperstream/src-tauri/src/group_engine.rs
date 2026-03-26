@@ -5,8 +5,68 @@
 /// Handles download completion cascading.
 
 use tauri::{AppHandle, Emitter};
+use crate::download_groups::DownloadGroup;
 use crate::group_scheduler::GLOBAL_GROUP_SCHEDULER;
 use crate::download_groups::GroupState;
+use crate::group_smart_queue::{Priority, SchedulingConstraint, SmartPriorityQueue};
+
+const DEFAULT_GROUP_BANDWIDTH_BPS: u64 = 10_000_000;
+const DEFAULT_MEMBER_SIZE_BYTES: u64 = 100_000_000;
+
+fn derive_member_priority(group: &DownloadGroup, member_id: &str) -> Priority {
+    let downstream_count = group
+        .members
+        .values()
+        .filter(|m| m.dependencies.iter().any(|dep| dep == member_id))
+        .count();
+
+    match downstream_count {
+        n if n >= 3 => Priority::Critical,
+        2 => Priority::High,
+        1 => Priority::Normal,
+        _ => Priority::Low,
+    }
+}
+
+pub fn prioritize_ready_members(
+    group: &DownloadGroup,
+    ready_members: Vec<String>,
+    completed_members: Vec<String>,
+    available_bandwidth: u64,
+) -> Vec<String> {
+    if ready_members.is_empty() {
+        return Vec::new();
+    }
+
+    let mut queue = SmartPriorityQueue::new(available_bandwidth);
+    let fair_share_speed = (available_bandwidth / ready_members.len() as u64).max(1);
+
+    for completed in completed_members {
+        queue.mark_completed(&completed);
+    }
+
+    for member_id in ready_members {
+        if let Some(member) = group.members.get(&member_id) {
+            queue.add_member(SchedulingConstraint {
+                member_id: member_id.clone(),
+                priority: derive_member_priority(group, &member_id),
+                min_bandwidth: (fair_share_speed / 2).max(1),
+                deadline_ms: 0,
+                earliest_start_ms: 0,
+                dependencies: member.dependencies.clone(),
+                expected_size: DEFAULT_MEMBER_SIZE_BYTES,
+                expected_speed: fair_share_speed,
+            });
+        }
+    }
+
+    let mut ordered = Vec::new();
+    while let Some(member_id) = queue.pop() {
+        ordered.push(member_id);
+    }
+
+    ordered
+}
 
 /// Check if any group members are ready to start and trigger their downloads
 pub fn trigger_ready_downloads(app: &AppHandle) {
@@ -29,8 +89,15 @@ pub fn trigger_ready_downloads(app: &AppHandle) {
 
         // Get ready members (dependencies satisfied, state is Pending)
         let ready_members = scheduler.get_ready_members(&group.id);
+        let completed_members = scheduler.get_completed_members(&group.id);
+        let ordered_ready_members = prioritize_ready_members(
+            group,
+            ready_members,
+            completed_members,
+            DEFAULT_GROUP_BANDWIDTH_BPS,
+        );
 
-        for member_id in ready_members {
+        for member_id in ordered_ready_members {
             if let Some(member) = group.members.get(&member_id) {
                 events_to_emit.push((group.id.clone(), member_id.clone(), member.url.clone()));
             }
@@ -217,10 +284,31 @@ pub fn init_group_engine(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::download_groups::DownloadGroup;
 
     #[test]
     fn test_group_engine_module() {
         // Just ensure module compiles
         assert!(true);
+    }
+
+    #[test]
+    fn test_prioritize_ready_members_prefers_dependency_hub() {
+        let mut group = DownloadGroup::new("Priority Test");
+        let hub = group.add_member("https://example.com/hub.zip", None);
+        let leaf = group.add_member("https://example.com/leaf.zip", None);
+        let _downstream = group.add_member(
+            "https://example.com/dependent.zip",
+            Some(vec![hub.clone()]),
+        );
+
+        let ordered = prioritize_ready_members(
+            &group,
+            vec![hub.clone(), leaf.clone()],
+            vec![],
+            DEFAULT_GROUP_BANDWIDTH_BPS,
+        );
+
+        assert_eq!(ordered.first(), Some(&hub));
     }
 }

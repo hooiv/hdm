@@ -58,6 +58,11 @@ pub mod download_groups;
 pub mod group_scheduler;
 pub mod group_persistence;
 pub mod group_engine;
+pub mod group_dag_solver;
+pub mod group_batch_detector;
+pub mod group_atomic_ops;
+pub mod group_metrics;
+pub mod group_smart_queue;
 
 // mod virtual_drive;
 mod cloud_bridge;
@@ -4324,7 +4329,21 @@ fn classify_network_requests(
             commands::download_groups_cmds::get_next_group_member,
             commands::download_groups_cmds::update_member_progress,
             commands::download_groups_cmds::complete_group_member,
-            commands::download_groups_cmds::list_all_groups
+            commands::download_groups_cmds::list_all_groups,
+            // Advanced Group Operations Commands
+            commands::advanced_group_cmds::analyze_group_dependencies,
+            commands::advanced_group_cmds::detect_url_batch,
+            commands::advanced_group_cmds::recommend_execution_strategy,
+            commands::advanced_group_cmds::validate_group_dependencies,
+            commands::advanced_group_cmds::get_group_execution_plan,
+            // Group Metrics Commands
+            commands::group_metrics_cmds::get_group_metrics,
+            commands::group_metrics_cmds::get_all_group_metrics,
+            commands::group_metrics_cmds::get_group_member_metrics,
+            commands::group_metrics_cmds::get_group_trends,
+            commands::group_metrics_cmds::get_group_performance_summary,
+            commands::group_metrics_cmds::estimate_group_completion_time,
+            commands::group_metrics_cmds::get_system_download_stats
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

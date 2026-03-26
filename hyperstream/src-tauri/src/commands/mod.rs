@@ -9,5 +9,6 @@ pub mod state_management_cmds;
 pub mod segment_integrity_cmds;
 pub mod mirror_scoring_cmds;
 pub mod download_groups_cmds;
-
+pub mod advanced_group_cmds;
+pub mod group_metrics_cmds;
 
