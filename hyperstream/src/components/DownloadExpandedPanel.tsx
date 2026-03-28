@@ -6,6 +6,7 @@ import { useMediaActions } from "../hooks/useMediaActions";
 import { useNetworkActions } from "../hooks/useNetworkActions";
 import { useToast } from "../contexts/ToastContext";
 import { ThreadVisualizer } from "./ThreadVisualizer";
+import { SmartRouteOptimizer } from "./SmartRouteOptimizer";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Archive,
@@ -174,6 +175,13 @@ export const DownloadExpandedPanel: React.FC<DownloadExpandedPanelProps> = ({
             </span>
           </div>
           <SpeedChart samples={speedHistory.current} />
+        </div>
+      )}
+
+      {/* Smart Route Optimizer Dashboard */}
+      {task.status === "Downloading" && (
+        <div className="mt-4">
+          <SmartRouteOptimizer downloadId={task.id} />
         </div>
       )}
 

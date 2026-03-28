@@ -2,10 +2,8 @@
 //!
 //! Exposes statistical analysis, trend detection, recommendations, and comparisons.
 
-use crate::core_state::AppState;
 use crate::mirror_analytics::{MirrorAnalyticsEngine, MirrorStatistics};
 use serde::{Deserialize, Serialize};
-use std::sync::MutexGuard;
 
 /// Request to analyze mirror performance
 #[derive(Debug, Serialize, Deserialize)]
@@ -160,7 +158,7 @@ pub async fn get_mirror_recommendation(
     let mut best_idx = 0;
     let mut best_score = 0.0;
 
-    for (i, url) in mirror_urls.iter().enumerate() {
+    for (i, _url) in mirror_urls.iter().enumerate() {
         let reliability = if i < success_rates.len() {
             success_rates[i] * 0.6
         } else {

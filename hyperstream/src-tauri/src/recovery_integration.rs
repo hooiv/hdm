@@ -236,6 +236,7 @@ pub async fn on_segment_failure(
         RecoveryStrategy::RetryOriginal {
             attempt,
             max_attempts,
+            backoff_ms: _,
         } => {
             format!("Retry original (attempt {}/{})", attempt, max_attempts)
         }

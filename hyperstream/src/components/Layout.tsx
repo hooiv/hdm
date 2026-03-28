@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle, History, Activity, ListOrdered, ShieldAlert, Video, Wifi, Film, Globe2, FolderTree } from 'lucide-react';
+import { Download as DownloadCloud, Settings, Plus, LayoutGrid, Calendar, Magnet, Globe, Zap, Search, Rss, Puzzle, History, Activity, ListOrdered, ShieldAlert, Video, Wifi, Film, Globe2, FolderTree, BarChart3 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { TitleBar } from './TitleBar';
 import { motion } from 'framer-motion';
@@ -15,8 +15,10 @@ interface LayoutProps {
     onCrashRecoveryClick: () => void;
     onStreamDetectorClick: () => void;
     onNetworkDiagClick: () => void;
+    onSpeedAccelerationClick: () => void;
     onMediaProcessingClick: () => void;
     onIpfsClick: () => void;
+    onCircuitBreakerClick: () => void;
     onSettingsClick: () => void;
     onOverlayClick: () => void;
     stats: {
@@ -26,9 +28,9 @@ interface LayoutProps {
         totalBytes: number;
     };
     onSpeedLimitChange: (limit: number) => void;
-    activeTab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue' | 'groups';
-    onTabChange: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue' | 'groups') => void;
-    onTabIntent?: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue' | 'groups') => void;
+    activeTab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue' | 'groups' | 'orchestrator' | 'preflight' | 'analytics';
+    onTabChange: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue' | 'groups' | 'orchestrator' | 'preflight' | 'analytics') => void;
+    onTabIntent?: (tab: 'downloads' | 'torrents' | 'feeds' | 'search' | 'plugins' | 'history' | 'activity' | 'queue' | 'groups' | 'orchestrator' | 'preflight' | 'analytics') => void;
     globalSpeed?: number;
 }
 
@@ -75,8 +77,10 @@ export const Layout: React.FC<LayoutProps> = ({
     onCrashRecoveryClick,
     onStreamDetectorClick,
     onNetworkDiagClick,
+    onSpeedAccelerationClick,
     onMediaProcessingClick,
     onIpfsClick,
+    onCircuitBreakerClick,
     onSettingsClick,
     onOverlayClick,
     stats,
@@ -204,6 +208,27 @@ export const Layout: React.FC<LayoutProps> = ({
                             onClick={() => onTabChange('groups')}
                             onIntent={() => onTabIntent?.('groups')}
                         />
+                        <NavItem
+                            icon={Zap}
+                            label="Orchestrator"
+                            active={activeTab === 'orchestrator'}
+                            onClick={() => onTabChange('orchestrator')}
+                            onIntent={() => onTabIntent?.('orchestrator')}
+                        />
+                        <NavItem
+                            icon={Globe}
+                            label="Pre-Flight"
+                            active={activeTab === 'preflight'}
+                            onClick={() => onTabChange('preflight')}
+                            onIntent={() => onTabIntent?.('preflight')}
+                        />
+                        <NavItem
+                            icon={BarChart3}
+                            label="Analytics"
+                            active={activeTab === 'analytics'}
+                            onClick={() => onTabChange('analytics')}
+                            onIntent={() => onTabIntent?.('analytics')}
+                        />
 
                         <div className="px-4 mt-8 mb-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest pl-4">Tools</div>
 
@@ -257,6 +282,13 @@ export const Layout: React.FC<LayoutProps> = ({
                         >
                             <Globe2 size={16} className="group-hover:text-teal-400 transition-colors" />
                             <span>IPFS Download</span>
+                        </button>
+                        <button
+                            onClick={onCircuitBreakerClick}
+                            className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all flex items-center gap-2 group"
+                        >
+                            <Zap size={16} className="group-hover:text-yellow-400 transition-colors" />
+                            <span>Circuit Breaker</span>
                         </button>
                         <button
                             onClick={onOverlayClick}

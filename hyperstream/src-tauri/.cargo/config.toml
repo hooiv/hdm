@@ -1,0 +1,6 @@
+# Cargo configuration for Rust Analyzer and build tools
+# Sets CMAKE_GENERATOR=Ninja to ensure boring-sys2 and other CMake-based
+# dependencies use Ninja instead of Visual Studio generator
+
+[env]
+CMAKE_GENERATOR = "Ninja"

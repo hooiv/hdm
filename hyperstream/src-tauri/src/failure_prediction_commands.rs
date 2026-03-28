@@ -5,7 +5,7 @@
 
 use crate::failure_prediction::*;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Request to add metrics for analysis
 #[derive(Debug, Deserialize)]
@@ -53,6 +53,7 @@ pub async fn record_download_metrics(
     rate_limit_hits: u32,
     access_denied_hits: u32,
     connection_refused: u32,
+    app: AppHandle,
     state: State<'_, crate::AppState>,
 ) -> Result<String, String> {
     let engine = state
@@ -81,17 +82,135 @@ pub async fn record_download_metrics(
             .as_secs(),
     };
 
-    engine.add_metrics(metrics);
+    engine.add_metrics(&download_id, metrics);
 
     // Check if we should predict failure
     if let Some(prediction) = engine.predict_failure(&download_id) {
         // Emit event with high-risk predictions
         if prediction.probability_percent > 60 {
-            let _ = state.get_window().emit("failure_prediction", &prediction);
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("failure_prediction", &prediction);
+        }
         }
     }
 
     Ok("Metrics recorded".to_string())
+}
+
+#[tauri::command]
+pub async fn reset_prediction_history(
+    download_id: String,
+    state: State<'_, crate::AppState>,
+) -> Result<String, String> {
+    let engine = state
+        .failure_prediction_engine
+        .lock()
+        .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+
+    engine.reset_history(&download_id);
+    Ok(format!("History reset for {}", download_id))
+}
+
+#[tauri::command]
+pub async fn simulate_prediction_chaos(
+    download_id: String,
+    scenario: String,
+    state: State<'_, crate::AppState>,
+    app: AppHandle,
+) -> Result<String, String> {
+    let engine = state
+        .failure_prediction_engine
+        .lock()
+        .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut metrics_list = Vec::new();
+
+    match scenario.as_str() {
+        "GradualStall" => {
+            // Simulate 10MB/s -> zero over 10 samples
+            for i in 0..10 {
+                let speed = 10_000_000 - (i * 1_000_000);
+                metrics_list.push(DownloadMetrics {
+                    speed_bps: speed,
+                    idle_time_ms: if i == 9 { 5000 } else { 0 },
+                    active_connections: 8,
+                    recent_errors: 0,
+                    timeout_count: 0,
+                    latency_ms: (50 + (i * 50)) as u64,
+                    jitter_ms: 0,
+                    avg_segment_time_ms: 1000,
+                    retried_bytes: 0,
+                    retry_rate_percent: 0.0,
+                    dns_failures: 0,
+                    rate_limit_hits: 0,
+                    access_denied_hits: 0,
+                    connection_refused: 0,
+                    timestamp_secs: now + i as u64,
+                });
+            }
+        }
+        "HighJitter" => {
+            // Constant speed but increasing jitter and latent delays
+            for i in 0..10 {
+                metrics_list.push(DownloadMetrics {
+                    speed_bps: 5_000_000,
+                    idle_time_ms: 0,
+                    active_connections: 8,
+                    recent_errors: 1,
+                    timeout_count: i / 2,
+                    latency_ms: (100 + (i * 100)) as u64,
+                    jitter_ms: i * 50,
+                    avg_segment_time_ms: 2000,
+                    retried_bytes: i as u64 * 1024,
+                    retry_rate_percent: 10.0,
+                    dns_failures: 0,
+                    rate_limit_hits: 0,
+                    access_denied_hits: 0,
+                    connection_refused: 0,
+                    timestamp_secs: now + i as u64,
+                });
+            }
+        }
+        "RateLimited" => {
+            // Increasing 429s
+            for i in 0..10 {
+                metrics_list.push(DownloadMetrics {
+                    speed_bps: 2_000_000,
+                    idle_time_ms: 0,
+                    active_connections: 8,
+                    recent_errors: i,
+                    timeout_count: 0,
+                    latency_ms: 200,
+                    jitter_ms: 0,
+                    avg_segment_time_ms: 1000,
+                    retried_bytes: 0,
+                    retry_rate_percent: 20.0,
+                    dns_failures: 0,
+                    rate_limit_hits: i,
+                    access_denied_hits: 0,
+                    connection_refused: 0,
+                    timestamp_secs: now + i as u64,
+                });
+            }
+        }
+        _ => return Err(format!("Unknown scenario: {}", scenario)),
+    }
+
+    engine.add_bulk_metrics(&download_id, metrics_list);
+
+    // After bulk update, provide an initial prediction to trigger events
+    if let Some(prediction) = engine.predict_failure(&download_id) {
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("failure_prediction", &prediction);
+        }
+    }
+
+    Ok(format!("Simulation '{}' applied to {}", scenario, download_id))
 }
 
 /// Get failure prediction for current download
@@ -163,9 +282,9 @@ pub async fn get_prediction_accuracy_stats(
     Ok(engine.get_accuracy_stats())
 }
 
-/// Get current prediction
 #[tauri::command]
 pub async fn get_current_failure_prediction(
+    download_id: String,
     state: State<'_, crate::AppState>,
 ) -> Result<Option<FailurePrediction>, String> {
     let engine = state
@@ -173,7 +292,7 @@ pub async fn get_current_failure_prediction(
         .lock()
         .map_err(|e| format!("Failed to acquire lock: {}", e))?;
 
-    Ok(engine.get_current_prediction())
+    Ok(engine.get_current_prediction(&download_id))
 }
 
 /// Reset prediction engine
@@ -214,7 +333,7 @@ mod tests {
             timestamp_secs: 1000,
         };
 
-        engine.add_metrics(metrics);
+        engine.add_metrics("test", metrics);
         // Verify no panic
         assert!(engine.predict_failure("test").is_none());
     }
@@ -242,7 +361,7 @@ mod tests {
                 connection_refused: 0,
                 timestamp_secs: 1000 + i,
             };
-            engine.add_metrics(metrics);
+            engine.add_metrics("test", metrics);
         }
 
         // Add stalled metrics
@@ -263,7 +382,7 @@ mod tests {
             connection_refused: 0,
             timestamp_secs: 1005,
         };
-        engine.add_metrics(stalled);
+        engine.add_metrics("test", stalled);
 
         let prediction = engine.predict_failure("test");
         assert!(prediction.is_some());
@@ -294,7 +413,7 @@ mod tests {
             timestamp_secs: 1000,
         };
 
-        engine.add_metrics(timeout_metrics);
+        engine.add_metrics("test", timeout_metrics);
 
         let prediction = engine.predict_failure("test");
         assert!(prediction.is_some());
@@ -324,7 +443,7 @@ mod tests {
             timestamp_secs: 1000,
         };
 
-        engine.add_metrics(rate_limited);
+        engine.add_metrics("test", rate_limited);
 
         let prediction = engine.predict_failure("test");
         assert!(prediction.is_some());
@@ -355,7 +474,7 @@ mod tests {
             timestamp_secs: 1000,
         };
 
-        engine.add_metrics(metrics);
+        engine.add_metrics("test", metrics);
         let pred = engine.predict_failure("test").unwrap_or_default();
 
         engine.record_prediction_result(&pred.prediction_id, true);
@@ -386,7 +505,7 @@ mod tests {
             timestamp_secs: 1000,
         };
 
-        engine.add_metrics(bad_metrics);
+        engine.add_metrics("test", bad_metrics);
 
         let prediction = engine.predict_failure("test");
         assert!(prediction.is_some());
@@ -418,7 +537,7 @@ mod tests {
             timestamp_secs: 1000,
         };
 
-        engine.add_metrics(healthy);
+        engine.add_metrics("test", healthy);
 
         let prediction = engine.predict_failure("test");
         // Should not predict failure for perfect conditions

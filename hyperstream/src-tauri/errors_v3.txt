@@ -1,0 +1,387 @@
+    Checking hyperstream v0.1.0 (C:\Users\aditya\Desktop\hdm\hyperstream\src-tauri)
+warning: unused imports: `Deserialize` and `Serialize`
+  --> src\commands\queue_orchestrator_commands.rs:10:13
+   |
+10 | use serde::{Deserialize, Serialize};
+   |             ^^^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tokio::io::AsyncReadExt`
+ --> src\network\mirror_scout.rs:5:5
+  |
+5 | use tokio::io::AsyncReadExt;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AppHandle`
+ --> src\parallel_mirror_retry.rs:8:13
+  |
+8 | use tauri::{AppHandle, Manager};
+  |             ^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src\parallel_mirror_retry.rs:9:5
+  |
+9 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `Duration` and `interval`
+  --> src\parallel_mirror_retry.rs:10:19
+   |
+10 | use tokio::time::{Duration, interval};
+   |                   ^^^^^^^^  ^^^^^^^^
+
+warning: unused imports: `GLOBAL_MIRROR_SCORER` and `MirrorMetrics`
+  --> src\smart_route_manager.rs:16:29
+   |
+16 | use crate::mirror_scoring::{MirrorMetrics, GLOBAL_MIRROR_SCORER};
+   |                             ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `FailurePrediction` and `FailureRisk`
+  --> src\smart_route_manager.rs:17:33
+   |
+17 | use crate::failure_prediction::{FailurePrediction, FailureRisk};
+   |                                 ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src\mirror_analytics.rs:7:5
+  |
+7 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::SystemTime`
+ --> src\mirror_analytics.rs:8:5
+  |
+8 | use std::time::SystemTime;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around block return value
+   --> src\mirror_analytics.rs:262:13
+    |
+262 |             ((stats_a.average_speed_bps as f64 / stats_b.average_speed_bps as f64 - 1.0) * 100.0)
+    |             ^                                                                                   ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+262 -             ((stats_a.average_speed_bps as f64 / stats_b.average_speed_bps as f64 - 1.0) * 100.0)
+262 +             (stats_a.average_speed_bps as f64 / stats_b.average_speed_bps as f64 - 1.0) * 100.0
+    |
+
+warning: unnecessary parentheses around assigned value
+   --> src\mirror_analytics.rs:273:37
+    |
+273 |         let reliability_advantage = (stats_a.success_rate_percent - stats_b.success_rate_percent);
+    |                                     ^                                                           ^
+    |
+help: remove these parentheses
+    |
+273 -         let reliability_advantage = (stats_a.success_rate_percent - stats_b.success_rate_percent);
+273 +         let reliability_advantage = stats_a.success_rate_percent - stats_b.success_rate_percent;
+    |
+
+warning: unused import: `crate::core_state::AppState`
+ --> src\mirror_analytics_commands.rs:5:5
+  |
+5 | use crate::core_state::AppState;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::MutexGuard`
+ --> src\mirror_analytics_commands.rs:8:5
+  |
+8 | use std::sync::MutexGuard;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `SystemTime`
+ --> src\speed_acceleration.rs:8:27
+  |
+8 | use std::time::{Duration, SystemTime};
+  |                           ^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> src\speed_acceleration.rs:253:28
+    |
+253 |                 let diff = (m.speed_bps as f64 - mean as f64);
+    |                            ^                                ^
+    |
+help: remove these parentheses
+    |
+253 -                 let diff = (m.speed_bps as f64 - mean as f64);
+253 +                 let diff = m.speed_bps as f64 - mean as f64;
+    |
+
+warning: unused import: `NetworkCondition`
+ --> src\speed_acceleration_commands.rs:5:55
+  |
+5 | use crate::speed_acceleration::{BandwidthMeasurement, NetworkCondition, SpeedAccelerationEngine};
+  |                                                       ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src\failure_prediction.rs:24:17
+   |
+24 | use std::time::{Duration, SystemTime, UNIX_EPOCH};
+   |                 ^^^^^^^^
+
+warning: unused imports: `Duration`, `SystemTime`, and `UNIX_EPOCH`
+  --> src\queue_orchestrator.rs:28:17
+   |
+28 | use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+   |                 ^^^^^^^^           ^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src\preflight_analysis.rs:13:17
+   |
+13 | use std::time::{Duration, Instant};
+   |                 ^^^^^^^^
+
+warning: unused import: `Arc`
+  --> src\speed_estimator.rs:18:17
+   |
+18 | use std::sync::{Arc, Mutex};
+   |                 ^^^
+
+warning: unused import: `Duration`
+  --> src\speed_estimator.rs:19:17
+   |
+19 | use std::time::{Duration, Instant};
+   |                 ^^^^^^^^
+
+warning: unused variable: `cb_w`
+    --> src\engine\session.rs:1600:37
+     |
+1600 | ...                   let cb_w = circuit_breaker_monitor.clone();
+     |                           ^^^^ help: if this is intentional, prefix it with an underscore: `_cb_w`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stop_tx_w`
+    --> src\engine\session.rs:1602:37
+     |
+1602 | ...                   let stop_tx_w = stop_tx_monitor.clone();
+     |                           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_stop_tx_w`
+
+warning: unused variable: `id_w`
+    --> src\engine\session.rs:1603:37
+     |
+1603 | ...                   let id_w = id_monitor.clone();
+     |                           ^^^^ help: if this is intentional, prefix it with an underscore: `_id_w`
+
+warning: unused variable: `dm_w`
+    --> src\engine\session.rs:1606:37
+     |
+1606 | ...                   let dm_w = dynamic_mirrors_monitor.clone();
+     |                           ^^^^ help: if this is intentional, prefix it with an underscore: `_dm_w`
+
+warning: variable does not need to be mutable
+    --> src\engine\session.rs:1615:41
+     |
+1615 | ...                   let mut current_url = url_w.clone();
+     |                           ----^^^^^^^^^^^
+     |                           |
+     |                           help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\network\mirror_scout.rs:109:23
+    |
+109 |             if let Ok(mut resp) = get_res {
+    |                       ----^^^^
+    |                       |
+    |                       help: remove this `mut`
+
+warning: unused variable: `domain`
+   --> src\download_recovery.rs:290:31
+    |
+290 |                 .max_by_key(|(domain, urls)| {
+    |                               ^^^^^^ help: if this is intentional, prefix it with an underscore: `_domain`
+
+warning: unused variable: `state`
+   --> src\smart_route_commands.rs:133:5
+    |
+133 |     state: State<'_, AppState>,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+
+warning: unused variable: `url`
+   --> src\mirror_analytics_commands.rs:163:13
+    |
+163 |     for (i, url) in mirror_urls.iter().enumerate() {
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `measurement`
+  --> src\speed_acceleration_commands.rs:81:9
+   |
+81 |     let measurement = BandwidthMeasurement {
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_measurement`
+
+warning: unused variable: `avg_speed`
+   --> src\speed_acceleration_commands.rs:110:9
+    |
+110 |     let avg_speed = engine.get_average_speed(50);
+    |         ^^^^^^^^^
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+110 |     let _avg_speed = engine.get_average_speed(50);
+    |         +
+help: you might have meant to pattern match on the similarly named constant `MAX_RANGE_SIZE`
+    |
+110 -     let avg_speed = engine.get_average_speed(50);
+110 +     let start_range_download::{closure#0}::MAX_RANGE_SIZE = engine.get_average_speed(50);
+    |
+
+warning: unused variable: `start`
+   --> src\preflight_analysis.rs:116:13
+    |
+116 |         let start = Instant::now();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `url`
+   --> src\preflight_analysis.rs:319:39
+    |
+319 |     async fn test_connectivity(&self, url: &str) -> (ConnectionHealth, Option<u32>, Option<u32>, Option<u32>, Option<f64>) {
+    |                                       ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `url`
+   --> src\preflight_analysis.rs:330:42
+    |
+330 |     async fn fetch_content_length(&self, url: &str) -> Option<u64> {
+    |                                          ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `url`
+   --> src\preflight_analysis.rs:336:33
+    |
+336 |     async fn assess_risk(&self, url: &str, health: &ConnectionHealth, mirrors: &[MirrorInfo], size: Option<u64>) -> (f64, f64, f64, Vec<S...
+    |                                 ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused import: `Manager`
+ --> src\parallel_mirror_retry.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+error: future cannot be sent between threads safely
+    --> src\engine\session.rs:1248:5
+     |
+1248 | /     tokio::spawn(async move {
+1249 | |         let mut interval = tokio::time::interval(std::time::Duration::from_millis(33)); // ~30fps
+1250 | |         let monitor_start = std::time::Instant::now();
+1251 | |         let monitor_start_iso = chrono::Local::now().to_rfc3339();
+...    |
+2222 | |     });
+     | |______^ future created by async block is not `Send`
+     |
+     = help: within `{async block@src\engine\session.rs:1248:18: 1248:28}`, the trait `std::marker::Send` is not implemented for `std::sync::MutexGuard<'_, FailurePredictionEngine>`
+note: future is not `Send` as this value is used across an await
+    --> src\parallel_mirror_retry.rs:97:103
+     |
+  83 |         if let Ok(engine) = state.failure_prediction_engine.lock() {
+     |                   ------ has type `std::sync::MutexGuard<'_, FailurePredictionEngine>` which is not `Send`
+...
+  97 |                                 let mirrors = state.mirror_aggregator.get_active_mirrors(download_id).await;
+     |                                                                                                       ^^^^^ await occurs here, with `engine` maybe used later
+note: required by a bound in `tokio::spawn`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.48.0\src\task\spawn.rs:171:21
+     |
+ 169 |     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+     |            ----- required by a bound in this function
+ 170 |     where
+ 171 |         F: Future + Send + 'static,
+     |                     ^^^^ required by this bound in `spawn`
+
+error: future cannot be sent between threads safely
+    --> src\engine\session.rs:1248:5
+     |
+1248 | /     tokio::spawn(async move {
+1249 | |         let mut interval = tokio::time::interval(std::time::Duration::from_millis(33)); // ~30fps
+1250 | |         let monitor_start = std::time::Instant::now();
+1251 | |         let monitor_start_iso = chrono::Local::now().to_rfc3339();
+...    |
+2222 | |     });
+     | |______^ future created by async block is not `Send`
+     |
+     = help: within `{async block@src\engine\session.rs:1248:18: 1248:28}`, the trait `std::marker::Send` is not implemented for `std::sync::MutexGuard<'_, DownloadManager>`
+note: future is not `Send` as this value is used across an await
+    --> src\parallel_mirror_retry.rs:97:103
+     |
+  96 | ...                   if let Some(new_seg) = manager.lock().unwrap().trigger_proactive_split(slowest.id) {
+     |                                              ----------------------- has type `std::sync::MutexGuard<'_, DownloadManager>` which is not `Send`
+  97 | ...                      let mirrors = state.mirror_aggregator.get_active_mirrors(download_id).await;
+     |                                                                                                ^^^^^ await occurs here, with `manager.lock().unwrap()` maybe used later
+note: required by a bound in `tokio::spawn`
+    --> C:\Users\aditya\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.48.0\src\task\spawn.rs:171:21
+     |
+ 169 |     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+     |            ----- required by a bound in this function
+ 170 |     where
+ 171 |         F: Future + Send + 'static,
+     |                     ^^^^ required by this bound in `spawn`
+
+warning: unused variable: `metrics`
+   --> src\resilience\failover_metrics.rs:219:13
+    |
+219 |         let metrics = self.metrics.lock().unwrap();
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_metrics`
+
+warning: unused variable: `primary`
+   --> src\smart_route_manager.rs:398:9
+    |
+398 |         primary: &str,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_primary`
+
+warning: unused variable: `prediction_id`
+   --> src\failure_prediction.rs:621:44
+    |
+621 |     pub fn record_prediction_result(&self, prediction_id: &str, actually_failed: bool) {
+    |                                            ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prediction_id`
+
+warning: unused variable: `url`
+   --> src\preflight_analysis.rs:392:40
+    |
+392 |     fn generate_recommendations(&self, url: &str, health: &ConnectionHealth, size: Option<u64>, speed: f64, mirrors: &[MirrorInfo], succe...
+    |                                        ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `speed`
+   --> src\preflight_analysis.rs:392:97
+    |
+392 |     fn generate_recommendations(&self, url: &str, health: &ConnectionHealth, size: Option<u64>, speed: f64, mirrors: &[MirrorInfo], succe...
+    |                                                                                                 ^^^^^
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+392 |     fn generate_recommendations(&self, url: &str, health: &ConnectionHealth, size: Option<u64>, _speed: f64, mirrors: &[MirrorInfo], success_prob: f64) -> Vec<DownloadRecommendation> {
+    |                                                                                                 +
+help: you might have meant to pattern match on the similarly named constant `GB`
+    |
+392 |     fn generate_recommendations(&self, url: &str, health: &ConnectionHealth, size: Option<u64>, speed_estimator::format_speed::GB: f64, mirrors: &[MirrorInfo], success_prob: f64) -> Vec<DownloadRecommendation> {
+    |                                                                                                      ++++++++++++++++++++++++++++
+
+warning: unused variable: `size`
+   --> src\preflight_analysis.rs:467:61
+    |
+467 |     fn determine_strategy(&self, health: &ConnectionHealth, size: Option<u64>, speed: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> S...
+    |                                                             ^^^^ help: if this is intentional, prefix it with an underscore: `_size`
+
+warning: unused variable: `speed`
+   --> src\preflight_analysis.rs:467:80
+    |
+467 |     fn determine_strategy(&self, health: &ConnectionHealth, size: Option<u64>, speed: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> S...
+    |                                                                                ^^^^^
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+467 |     fn determine_strategy(&self, health: &ConnectionHealth, size: Option<u64>, _speed: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> String {
+    |                                                                                +
+help: you might have meant to pattern match on the similarly named constant `GB`
+    |
+467 |     fn determine_strategy(&self, health: &ConnectionHealth, size: Option<u64>, speed_estimator::format_speed::GB: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> String {
+    |                                                                                     ++++++++++++++++++++++++++++
+
+warning: unused variable: `mirrors`
+   --> src\preflight_analysis.rs:467:110
+    |
+467 | ...eed: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> String {
+    |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mirrors`
+
+warning: `hyperstream` (lib) generated 45 warnings
+error: could not compile `hyperstream` (lib) due to 2 previous errors; 45 warnings emitted

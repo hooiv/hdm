@@ -97,6 +97,12 @@ pub struct Settings {
     #[serde(default)]
     pub p2p_upload_limit_kbps: Option<u64>,
     
+    // Mirror Hunting
+    #[serde(default = "default_mirror_hunting_enabled")]
+    pub mirror_hunting_enabled: bool,
+    #[serde(default = "default_mirror_check_interval")]
+    pub mirror_check_interval_secs: u32,
+
     // Webhooks
     #[serde(default)]
     pub webhooks: Option<Vec<crate::webhooks::WebhookConfig>>,
@@ -374,6 +380,8 @@ impl Default for Settings {
             cleanup_archives_after_extract: false,
             p2p_enabled: false,
             p2p_upload_limit_kbps: None,
+            mirror_hunting_enabled: true,
+            mirror_check_interval_secs: 300,
             webhooks: None,
             // Custom Sound Files
             custom_sound_start: None,
@@ -622,3 +630,5 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
     eprintln!("[settings] Saved to {:?} (cache invalidated)", path);
     Ok(())
 }
+fn default_mirror_hunting_enabled() -> bool { true }
+fn default_mirror_check_interval() -> u32 { 180 }

@@ -4,7 +4,11 @@ use crate::mirror_scoring::GLOBAL_MIRROR_SCORER;
 use crate::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
+use url::Url;
+use crate::network::mirror_scout::MirrorScout;
+use crate::mirror_hunter::DiscoveryEngine;
 
 /// After a download failure or stall: try queue retry; if not retrying, release queue slot,
 /// deregister bandwidth, and remove session from AppState. Call once per failed download.
@@ -21,12 +25,14 @@ pub(crate) fn handle_download_failure_cleanup(app: &tauri::AppHandle, id: &str) 
         };
 
         if let Some(url) = url {
-            let recovery_manager = app_state.recovery_manager.clone();
+            let app_handle = app.clone();
             // Update mirror reliability to reflect the failure
             tokio::spawn(async move {
-                recovery_manager
-                    .update_mirror_reliability(url, false, true, 0)
-                    .await;
+                if let Some(app_state) = app_handle.try_state::<crate::core_state::AppState>() {
+                    let _ = app_state.recovery_manager
+                        .update_mirror_reliability(url, false, false, 0)
+                        .await;
+                }
             });
         }
 
@@ -552,8 +558,87 @@ fn finalize_http_success_side_effects(
     }
 }
 
+/// Spawns a background task that periodically hunts for and verifies mirrors for an active download.
+pub(crate) fn spawn_mirror_aggregator(
+    id: String,
+    url: String,
+    total_size: u64,
+    md5: Option<String>,
+    sha256: Option<String>,
+    dynamic_mirrors: Arc<std::sync::RwLock<Vec<String>>>,
+    stop_tx: broadcast::Sender<()>,
+    interval_secs: u64,
+) {
+    let id_clone = id.clone();
+    let url_clone = url.clone();
+    let mut stop_rx = stop_tx.subscribe();
+
+    tokio::spawn(async move {
+        println!("[MirrorAggregator] Started for download {}", id_clone);
+        let scout = MirrorScout::new();
+        let engine = DiscoveryEngine::new();
+        let interval = Duration::from_secs(interval_secs.max(30)); // Minimum 30s interval
+
+        loop {
+            // Perform discovery
+            println!("[MirrorAggregator] Hunting for mirrors: {} (size: {})", id_clone, total_size);
+            let filename = extract_filename(&url_clone).to_string();
+            // find_mirrors(filename, size, sha256, md5, sha1)
+            let candidates = engine.find_mirrors(&filename, total_size, sha256.clone(), md5.clone(), None).await;
+            
+            let mut new_mirrors = Vec::new();
+            {
+                if let Ok(pool) = dynamic_mirrors.read() {
+                    for c in candidates {
+                        if !pool.contains(&c.url) {
+                            new_mirrors.push(c);
+                        }
+                    }
+                }
+            }
+
+            if !new_mirrors.is_empty() {
+                println!("[MirrorAggregator] Found {} new candidates, verifying...", new_mirrors.len());
+                
+                use futures::future::BoxFuture;
+                let mut probe_futures: Vec<BoxFuture<'static, crate::network::mirror_scout::ScoutResult>> = Vec::new();
+                for candidate in new_mirrors {
+                    // Check for stop signal
+                    if stop_rx.try_recv().is_ok() {
+                        return;
+                    }
+
+                    let url = candidate.url.clone();
+                    let scout_inner = std::sync::Arc::new(scout.clone());
+                    probe_futures.push(Box::pin(async move {
+                        scout_inner.verify_mirror(&url, total_size, None).await
+                    }));
+                }
+
+                for fut in probe_futures {
+                    let scout_res = fut.await;
+                    if scout_res.status == crate::network::mirror_scout::ScoutStatus::Valid {
+                        println!("[MirrorAggregator] Verified valid mirror: {}", scout_res.url);
+                        if let Ok(mut pool) = dynamic_mirrors.write() {
+                            if !pool.contains(&scout_res.url) {
+                                pool.push(scout_res.url);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Wait for next interval or stop signal
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {},
+                _ = stop_rx.recv() => break,
+            }
+        }
+        println!("[MirrorAggregator] Terminated for download {}", id_clone);
+    });
+}
+
 /// Extract filename from a path string, handling both Unix and Windows separators.
-/// Falls back to the full path string if no filename component can be extracted.
 pub(crate) fn extract_filename(path: &str) -> &str {
     std::path::Path::new(path)
         .file_name()
@@ -1023,8 +1108,30 @@ pub(crate) async fn start_download_impl(
     let downloaded_total = Arc::new(AtomicU64::new(resume_from));
     // let last_progress_emit = Arc::new(Mutex::new(std::time::Instant::now())); // Removed
 
+    // 4.5. === INTEGRATION POINT: Smart Route Optimizer ===
+    // Call the smart router to get optimal mirror selections and parallelization strategy
+    let route_decision = {
+        let current_speed = crate::bandwidth_allocator::ALLOCATOR
+            .get_current_speed(&id)
+            .unwrap_or(0);
+        
+        crate::smart_route_manager::GLOBAL_ROUTE_MANAGER.optimize_route(
+            &id,
+            vec![(actual_url.clone(), 75)], // Primary mirror with neutral score for now
+            current_speed,
+            total_size - resume_from, // Remaining bytes to download
+        )
+    };
+    
+    // Log the routing decision
+    println!(
+        "[SmartRoute] Download {} will use Primary: {} and {} Parallel Mirrors.",
+        id, route_decision.primary_mirror, route_decision.parallel_mirrors.len()
+    );
+
     // 5. Setup Stop Signal
     let (stop_tx, _) = broadcast::channel(1);
+    let dynamic_mirrors = Arc::new(std::sync::RwLock::new(vec![actual_url.clone()]));
 
     // 6. Store Session
     {
@@ -1038,7 +1145,22 @@ pub(crate) async fn start_download_impl(
                 path: path.clone(),
                 file_writer: file_mutex.clone(),
                 group_context: group_context.clone(),
+                dynamic_mirrors: dynamic_mirrors.clone(),
             },
+        );
+    }
+
+    // --- Start Mirror Aggregator ---
+    if settings.mirror_hunting_enabled && total_size > 0 {
+        spawn_mirror_aggregator(
+            id.clone(),
+            actual_url.clone(),
+            total_size,
+            md5.clone(),
+            None, // sha256 not available in this scope
+            dynamic_mirrors.clone(),
+            stop_tx.clone(),
+            settings.mirror_check_interval_secs as u64,
         );
     }
 
@@ -1105,7 +1227,9 @@ pub(crate) async fn start_download_impl(
     let mut stop_rx_monitor = stop_tx.subscribe();
     let stop_tx_monitor = stop_tx.clone();
     let chatops_monitor = state.chatops_manager.clone();
+    let circuit_breaker_monitor = state.circuit_breaker_manager.clone();
     let disk_io_error_monitor = disk_io_error.clone();
+    let dynamic_mirrors_monitor = dynamic_mirrors.clone();
     // Additional clones for dynamic worker spawning
     let tx_monitor = tx.clone();
     let client_monitor = client.clone();
@@ -1386,6 +1510,217 @@ pub(crate) async fn start_download_impl(
                     }
                     // --- End failure & stall detection ---
 
+                    // ── PROACTIVE SEGMENT SHADOWING (Mirror-aware failover) ──
+                    if adaptive_splitting_enabled 
+                        && total_size > 0 
+                        && d < total_size 
+                        && last_split_check.elapsed() >= std::time::Duration::from_secs(5)
+                    {
+                        let retry_context = {
+                             if let Some(state) = window_monitor.try_state::<Arc<AppState>>() {
+                                 Some((state.parallel_mirror_retry.clone(), state.inner().clone()))
+                             } else { None }
+                        };
+
+                        if let Some((retry_manager, state_arc)) = retry_context {
+                            let download_id = id_monitor.clone();
+
+                            // ── FEED AI FAILURE PREDICTION ENGINE ──
+                            {
+                                if let Ok(engine) = state_arc.failure_prediction_engine.lock() {
+                                    let active_conns = segments.iter()
+                                        .filter(|s| s.state == crate::downloader::structures::SegmentState::Downloading)
+                                        .count() as u32;
+                                    
+                                    let speed_val: u64 = segments.iter()
+                                        .filter(|s| s.state == crate::downloader::structures::SegmentState::Downloading)
+                                        .map(|s| s.speed_bps)
+                                        .sum();
+
+                                    let avg_lat = if active_conns > 0 {
+                                        speed_val / active_conns as u64
+                                    } else { 0 };
+
+                                    let metrics = crate::failure_prediction::DownloadMetrics {
+                                        speed_bps: speed_val,
+                                        idle_time_ms: if speed_val == 0 { 5000 } else { 0 },
+                                        active_connections: active_conns,
+                                        recent_errors: 0,
+                                        timeout_count: 0,
+                                        latency_ms: avg_lat.min(1000),
+                                        jitter_ms: 0,
+                                        avg_segment_time_ms: 0,
+                                        retried_bytes: 0,
+                                        retry_rate_percent: 0.0,
+                                        dns_failures: 0,
+                                        rate_limit_hits: 0,
+                                        access_denied_hits: 0,
+                                        connection_refused: 0,
+                                        timestamp_secs: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs(),
+                                    };
+                                    
+                                    engine.add_metrics(&id_monitor, metrics);
+                                }
+                            }
+
+                            // Evaluate and trigger splits for stragglers
+                            // This .await is safe because the non-Send tauri-state is dropped
+                            let proactively_split = retry_manager.evaluate_and_split(&download_id, &state_arc).await;
+                            last_split_check = std::time::Instant::now();
+                            
+                            for action in proactively_split {
+                                let seg = action.segment;
+                                let mirror_url = action.mirror_url;
+                                let reason = action.reason;
+                                
+                                let seg_id = seg.id;
+                                let start_pos = seg.start_byte;
+                                let end_pos = seg.end_byte;
+                                
+                                // Emit UI event
+                                let event_name = match reason {
+                                    crate::parallel_mirror_retry::SplitReason::Predictive => "predictive_failover_triggered",
+                                    crate::parallel_mirror_retry::SplitReason::Straggler => "straggler_shadowing_triggered",
+                                };
+                                let _ = window_monitor.emit(event_name, &seg);
+
+                                println!(
+                                    "[{}] Spawning SHADOW worker for segment {} from mirror {}",
+                                    if matches!(reason, crate::parallel_mirror_retry::SplitReason::Predictive) { "PredictiveRetry" } else { "ParallelRetry" },
+                                    seg_id, mirror_url
+                                );
+
+                                // Clone resources for the shadow worker
+                                let mgr = manager_monitor.clone();
+                                let url_w = mirror_url.clone();
+                                let tx_w = tx_monitor.clone();
+                                let cl_w = client_monitor.clone();
+                                let dl_w = downloaded_monitor.clone();
+                                let cm_w = cm_monitor.clone();
+                                let _cb_w = circuit_breaker_monitor.clone();
+                                let mut stop_w = stop_tx_monitor.subscribe();
+                                let _stop_tx_w = stop_tx_monitor.clone();
+                                let _id_w = id_monitor.clone();
+                                let dio_w = disk_io_error_monitor.clone();
+                                let retry_config = dynamic_retry_config.clone();
+                                let _dm_w = dynamic_mirrors_monitor.clone();
+
+                                tokio::spawn(async move {
+                                    let mut current_pos = start_pos;
+                                    let mut seg_id_dyn = seg_id;
+                                    let mut retry_state = crate::downloader::network::RetryState::from_config(&retry_config);
+                                    let mut bytes_since_cursor_update: u64 = 0;
+                                    const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024;
+                                    let mut end_dyn = end_pos;
+                                    let current_url = url_w.clone();
+
+                                    loop {
+                                        if stop_w.try_recv().is_ok() {
+                                            let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                            let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                            if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                s.downloaded_cursor = current_pos;
+                                                s.state = crate::downloader::structures::SegmentState::Paused;
+                                            }
+                                            break;
+                                        }
+
+                                        if dio_w.load(std::sync::atomic::Ordering::Acquire) {
+                                            let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                            let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                            if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                s.downloaded_cursor = current_pos;
+                                                s.state = crate::downloader::structures::SegmentState::Error;
+                                            }
+                                            break;
+                                        }
+
+                                        if current_pos >= end_dyn {
+                                            let stolen = {
+                                                let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                                m.on_segment_complete(seg_id_dyn)
+                                            };
+                                            if let Some(w) = stolen {
+                                                seg_id_dyn = w.new_segment.id;
+                                                current_pos = w.new_segment.start_byte;
+                                                end_dyn = w.new_segment.end_byte;
+                                                retry_state = crate::downloader::network::RetryState::from_config(&retry_config);
+                                                bytes_since_cursor_update = 0;
+                                                continue;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+
+                                        // Shadow workers specifically target the assigned mirror
+                                        let range_header = format!("bytes={}-{}", current_pos, end_dyn - 1);
+                                        let _permit = cm_w.acquire(&current_url).await.ok();
+
+                                        let res = tokio::select! {
+                                            _ = stop_w.recv() => {
+                                                let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                                let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                                if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                    s.downloaded_cursor = current_pos;
+                                                    s.state = crate::downloader::structures::SegmentState::Paused;
+                                                }
+                                                break;
+                                            }
+                                            r = cl_w.get(&current_url).header("Range", &range_header).send() => r
+                                        };
+
+                                        match res {
+                                            Ok(response) => {
+                                                if response.status().is_success() || response.status() == rquest::StatusCode::PARTIAL_CONTENT {
+                                                    let mut stream = response.bytes_stream();
+                                                    use futures_util::StreamExt;
+                                                    while let Some(item) = stream.next().await {
+                                                        if stop_w.try_recv().is_ok() { break; }
+                                                        match item {
+                                                            Ok(chunk) => {
+                                                                let n = chunk.len() as u64;
+                                                                if let Ok(_) = tx_w.send(crate::downloader::disk::WriteRequest {
+                                                                    segment_id: seg_id_dyn,
+                                                                    offset: current_pos,
+                                                                    data: chunk.to_vec(),
+                                                                }) {
+                                                                    current_pos += n;
+                                                                    dl_w.fetch_add(n, Ordering::Relaxed);
+                                                                    bytes_since_cursor_update += n;
+                                                                    if bytes_since_cursor_update >= CURSOR_UPDATE_THRESHOLD {
+                                                                        let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                                                        let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                                                        if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                                            s.downloaded_cursor = current_pos;
+                                                                        }
+                                                                        bytes_since_cursor_update = 0;
+                                                                    }
+                                                                } else {
+                                                                    break; // Channel closed
+                                                                }
+                                                            }
+                                                            Err(_) => break,
+                                                        }
+                                                    }
+                                                } else {
+                                                    break; // Error status
+                                                }
+                                            }
+                                            Err(_) => {
+                                                if retry_state.immediate_attempts + retry_state.delayed_attempts > 10 { break; }
+                                                retry_state.delayed_attempts += 1;
+                                                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+
                     // Feed adaptive threads system with bandwidth data
                     {
                         let speed: u64 = segments.iter()
@@ -1437,12 +1772,14 @@ pub(crate) async fn start_download_impl(
                             let cl_w = client_monitor.clone();
                             let dl_w = downloaded_monitor.clone();
                             let cm_w = cm_monitor.clone();
+                            let cb_w = circuit_breaker_monitor.clone();
                             let mut stop_w = stop_tx_monitor.subscribe();
                             let stop_tx_w = stop_tx_monitor.clone();
                             let id_w = id_monitor.clone();
                             // path_w and app_w were unused
                             let dio_w = disk_io_error_monitor.clone();
                             let retry_config = dynamic_retry_config.clone();
+                            let dm_w = dynamic_mirrors_monitor.clone();
 
                             tokio::spawn(async move {
                                 let mut current_pos = start_pos;
@@ -1452,6 +1789,7 @@ pub(crate) async fn start_download_impl(
                                 let mut bytes_since_cursor_update: u64 = 0;
                                 const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024;
                                 let mut end_dyn = end;
+                                let mut current_url = url_w.clone();
 
                                 loop {
                                     if stop_w.try_recv().is_ok() {
@@ -1491,8 +1829,54 @@ pub(crate) async fn start_download_impl(
                                         }
                                     }
 
+                                    // Pivot logic: if we had failures, try a different mirror
+                                    if retry_state.delayed_attempts > 0 || retry_state.immediate_attempts > 0 {
+                                        if let Ok(pool) = dm_w.read() {
+                                            if pool.len() > 1 {
+                                                let idx = pool.iter().position(|r| r == &current_url).unwrap_or(0);
+                                                current_url = pool[(idx + 1) % pool.len()].clone();
+                                            }
+                                        }
+                                    }
+
                                     let range_header = format!("bytes={}-{}", current_pos, end_dyn - 1);
-                                    let _permit = cm_w.acquire(&url_w).await.ok();
+                                    let _permit = cm_w.acquire(&current_url).await.ok();
+
+                                    // Circuit breaker: Extract mirror host and check health
+                                    let mirror_host = if let Ok(parsed) = Url::parse(&current_url) {
+                                        parsed.host_str().unwrap_or("unknown").to_string()
+                                    } else {
+                                        "unknown".to_string()
+                                    };
+
+                                    // Check if this mirror is available before attempting the request
+                                    if !cb_w.can_use_mirror(&mirror_host) {
+                                        // Mirror is circuit-broken, attempt to pivot immediately
+                                        if let Ok(pool) = dm_w.read() {
+                                            if pool.len() > 1 {
+                                                let idx = pool.iter().position(|r| r == &current_url).unwrap_or(0);
+                                                current_url = pool[(idx + 1) % pool.len()].clone();
+                                                continue; // Retry with new mirror
+                                            }
+                                        }
+                                        
+                                        cb_w.record_failure(&mirror_host);
+                                        retry_state.delayed_attempts += 1;
+                                        // ... rest of failure logic ...
+                                        if retry_state.delayed_attempts > retry_config.max_delayed_retries {
+                                            let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                                            let mut segs = m.segments.write().unwrap_or_else(|e| e.into_inner());
+                                            if let Some(s) = segs.iter_mut().find(|s| s.id == seg_id_dyn) {
+                                                s.downloaded_cursor = current_pos;
+                                                s.state = crate::downloader::structures::SegmentState::Error;
+                                            }
+                                            break;
+                                        }
+                                        let backoff = crate::downloader::network::calculate_backoff(retry_state.current_delay, &retry_config);
+                                        retry_state.current_delay = backoff;
+                                        tokio::time::sleep(backoff).await;
+                                        continue;
+                                    }
 
                                     let res = tokio::select! {
                                         _ = stop_w.recv() => {
@@ -1504,10 +1888,26 @@ pub(crate) async fn start_download_impl(
                                             }
                                             break;
                                         }
-                                        r = cl_w.get(&url_w).header("Range", &range_header).send() => r
+                                        r = cl_w.get(&current_url).header("Range", &range_header).send() => r
                                     };
 
+                                    // Record circuit breaker success/failure based on response
                                     let response = match res {
+                                        Ok(r) => {
+                                            // Successful response - record success
+                                            if r.status().is_success() {
+                                                cb_w.record_success(&mirror_host);
+                                            }
+                                            Ok(r)
+                                        },
+                                        Err(e) => {
+                                            // Record failure for circuit breaker
+                                            cb_w.record_failure(&mirror_host);
+                                            Err(e)
+                                        }
+                                    };
+
+                                    let response = match response {
                                         Ok(r) => r,
                                         Err(e) => {
                                             let strategy = crate::downloader::network::analyze_error(&e);
@@ -1562,10 +1962,14 @@ pub(crate) async fn start_download_impl(
 
                                     // Handle 403/410 and rate limiting for dynamic workers
                                     if response.status() == rquest::StatusCode::FORBIDDEN || response.status() == rquest::StatusCode::GONE {
+                                        // Record these as circuit breaker failures
+                                        cb_w.record_failure(&mirror_host);
                                         let _ = stop_tx_w.send(());
                                         return;
                                     }
                                     if response.status() == rquest::StatusCode::TOO_MANY_REQUESTS || response.status() == rquest::StatusCode::SERVICE_UNAVAILABLE {
+                                        // Record rate limiting as circuit breaker failure
+                                        cb_w.record_failure(&mirror_host);
                                         retry_state.delayed_attempts += 1;
                                         if retry_state.delayed_attempts > retry_config.max_delayed_retries {
                                             let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
@@ -1637,6 +2041,8 @@ pub(crate) async fn start_download_impl(
                                                         }
                                                     }
                                                     Some(Err(_stream_err)) => {
+                                                        // Record stream error as circuit breaker failure
+                                                        cb_w.record_failure(&mirror_host);
                                                         retry_state.delayed_attempts += 1;
                                                         if retry_state.delayed_attempts > retry_config.max_delayed_retries {
                                                             let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
@@ -1673,16 +2079,47 @@ pub(crate) async fn start_download_impl(
                         s.speed_bps
                     )).collect();
 
-                    let total_speed: u64 = segments.iter().map(|s| s.speed_bps).sum();
+                    // Update speed estimator with current bytes for smoothed speed + ETA
+                    crate::speed_estimator::GLOBAL_ESTIMATOR.update(&id_monitor, d);
+                    let smoothed_speed = crate::speed_estimator::GLOBAL_ESTIMATOR.get_speed(&id_monitor);
+                    let eta_info = crate::speed_estimator::GLOBAL_ESTIMATOR.get_download_info(&id_monitor, d);
+
+                    // Use smoothed speed for payload (reduces UI jitter)
+                    let display_speed = if smoothed_speed > 0 { smoothed_speed } else { 0 };
+
                     let payload = Payload {
                         id: id_monitor.clone(),
                         downloaded: d,
                         total: total_size,
-                        speed_bps: total_speed,
+                        speed_bps: display_speed,
                         segments: slim_segments.clone()
                     };
                     let _ = window_monitor.emit("download_progress", payload.clone());
                     let _ = crate::http_server::get_event_sender().send(serde_json::to_value(&payload).unwrap_or(serde_json::json!(null)));
+
+                    // Emit ETA event for the frontend
+                    if let Some(info) = eta_info {
+                        let _ = window_monitor.emit("download_eta", serde_json::json!({
+                            "id": id_monitor,
+                            "eta_secs": info.eta_secs,
+                            "eta_display": info.eta_display,
+                            "smoothed_speed_bps": info.speed_bps,
+                            "peak_speed_bps": info.peak_speed_bps,
+                            "avg_speed_bps": info.avg_speed_bps,
+                            "is_stalled": info.is_stalled,
+                            "elapsed_secs": info.elapsed_secs,
+                        }));
+                    }
+
+                    // Emit circuit breaker health status
+                    {
+                        let cb_health = circuit_breaker_monitor.get_all_mirrors_health();
+                        let cb_event = serde_json::json!({
+                            "download_id": id_monitor.clone(),
+                            "mirrors_health": cb_health
+                        });
+                        let _ = window_monitor.emit("circuit_breaker_health", cb_event);
+                    }
 
                     // INTEGRATION POINT 2: Update group member progress
                     if let Some((gid, mid)) = &group_context_monitor {
@@ -1755,6 +2192,11 @@ pub(crate) async fn start_download_impl(
                             crate::group_engine::on_download_complete(&window_monitor, &id_monitor);
                         }
 
+                        // INTEGRATION POINT 4: Record successful route decision for feedback
+                        {
+                            crate::smart_route_manager::GLOBAL_ROUTE_MANAGER.record_mirror_feedback(&url_monitor, true, monitor_start.elapsed().as_millis() as f64);
+                        }
+
                         // Signal save loop and workers to stop
                         let _ = stop_tx_monitor.send(());
                         // Notify queue manager that a slot opened up (success path resolves deps)
@@ -1763,6 +2205,7 @@ pub(crate) async fn start_download_impl(
                             queue.mark_finished_success(&id_monitor);
                         }
                         crate::bandwidth_allocator::ALLOCATOR.deregister(&id_monitor);
+                        crate::speed_estimator::GLOBAL_ESTIMATOR.unregister(&id_monitor);
                         // Clean up session from in-memory state to prevent memory leak
                         if let Some(app_state) = window_monitor.try_state::<crate::core_state::AppState>() {
                             let mut downloads = app_state.downloads.lock().unwrap_or_else(|e| e.into_inner());
@@ -1785,6 +2228,9 @@ pub(crate) async fn start_download_impl(
     crate::bandwidth_allocator::ALLOCATOR
         .register(&id, crate::bandwidth_allocator::BandwidthConfig::default());
 
+    // 9.5. Register with speed estimator for smoothed speed + ETA tracking
+    crate::speed_estimator::GLOBAL_ESTIMATOR.register(&id, total_size, resume_from);
+
     // 10. Spawn Worker Threads
     let mut handles = Vec::new();
 
@@ -1799,6 +2245,8 @@ pub(crate) async fn start_download_impl(
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .len();
+
+    let dm_clone = dynamic_mirrors.clone();
 
     for i in 0..segments_count {
         let manager_clone = manager.clone();
@@ -1817,6 +2265,7 @@ pub(crate) async fn start_download_impl(
         let app_handle_clone = app.clone(); // Capture app handle for emitting events
         let total_size_worker = total_size; // u64 is Copy
         let disk_io_error_worker = disk_io_error.clone();
+        let dm_w = dm_clone.clone();
         let retry_config = segment_retry_config.clone();
 
         let handle = tokio::spawn(async move {
@@ -1840,6 +2289,7 @@ pub(crate) async fn start_download_impl(
             let mut bytes_since_cursor_update: u64 = 0;
             let segment_start_time = std::time::Instant::now();
             const CURSOR_UPDATE_THRESHOLD: u64 = 256 * 1024; // Update cursor every 256KB
+            let mut current_url = url_clone.clone();
 
             loop {
                 // Check for stop signal
@@ -1893,10 +2343,20 @@ pub(crate) async fn start_download_impl(
                     }
                 }
 
+                // Pivot logic: if we had failures, try a different mirror
+                if retry_state.delayed_attempts > 0 || retry_state.immediate_attempts > 0 {
+                    if let Ok(pool) = dm_w.read() {
+                        if pool.len() > 1 {
+                            let idx = pool.iter().position(|r| r == &current_url).unwrap_or(0);
+                            current_url = pool[(idx + 1) % pool.len()].clone();
+                        }
+                    }
+                }
+
                 let range_header = format!("bytes={}-{}", current_pos, end - 1);
 
                 // Acquire permit via ConnectionManager
-                let _permit = cm_clone.acquire(&url_clone).await.ok();
+                let _permit = cm_clone.acquire(&current_url).await.ok();
 
                 // Chaos Mode Check: Inject latency or failure here
                 if let Err(_e) = crate::network::chaos::check_chaos().await {
@@ -1909,7 +2369,7 @@ pub(crate) async fn start_download_impl(
 
                 // Use tokio::select to allow cancellation during request
                 let res_future = client_clone
-                    .get(&url_clone)
+                    .get(&current_url)
                     .header("Range", &range_header)
                     .send();
 
@@ -1977,6 +2437,8 @@ pub(crate) async fn start_download_impl(
                             }
                             crate::downloader::network::RetryStrategy::Delayed(delay) => {
                                 retry_state.delayed_attempts += 1;
+                                // Report throttle to connection manager for adaptive limiting
+                                cm_clone.report_throttle(&url_clone);
                                 if retry_state.delayed_attempts > retry_config.max_delayed_retries {
                                     eprintln!(
                                         "[seg {}] Exceeded delayed retries ({})",
@@ -2111,6 +2573,8 @@ pub(crate) async fn start_download_impl(
                 if response.status() == rquest::StatusCode::TOO_MANY_REQUESTS
                     || response.status() == rquest::StatusCode::SERVICE_UNAVAILABLE
                 {
+                    // Report throttle to connection manager — adaptively reduces per-host limit
+                    cm_clone.report_throttle(&url_clone);
                     retry_state.delayed_attempts += 1;
                     if retry_state.delayed_attempts > retry_config.max_delayed_retries {
                         eprintln!(

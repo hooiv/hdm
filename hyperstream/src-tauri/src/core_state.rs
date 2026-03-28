@@ -37,6 +37,7 @@ pub struct HlsSession {
     pub file_writer: Arc<Mutex<std::fs::File>>,
 }
 
+#[derive(Clone)]
 pub struct DownloadSession {
     #[allow(dead_code)]
     pub manager: Arc<Mutex<DownloadManager>>,
@@ -49,6 +50,8 @@ pub struct DownloadSession {
     pub file_writer: Arc<Mutex<std::fs::File>>,
     /// Optional group context: (group_id, member_id)
     pub group_context: Option<(String, String)>,
+    /// Dynamically discovered mirrors for bandwidth aggregation and failover
+    pub dynamic_mirrors: Arc<std::sync::RwLock<Vec<String>>>,
 }
 
 pub struct AppState {
@@ -65,6 +68,9 @@ pub struct AppState {
     pub chatops_manager: Arc<network::chatops::ChatOpsManager>,
     pub recovery_manager: crate::download_recovery::DownloadRecoveryManager,
     pub failure_prediction_engine: Arc<Mutex<crate::failure_prediction::FailurePredictionEngine>>,
+    pub circuit_breaker_manager: Arc<crate::resilience::CircuitBreakerManager>,
+    pub mirror_aggregator: Arc<crate::network::mirror_aggregator::MirrorAggregator>,
+    pub parallel_mirror_retry: Arc<crate::parallel_mirror_retry::ParallelMirrorRetryManager>,
 }
 
 impl AppState {
@@ -148,6 +154,9 @@ mod tests {
                     crate::failure_prediction::PredictionConfig::default(),
                 ),
             )),
+            circuit_breaker_manager: Arc::new(crate::resilience::CircuitBreakerManager::new(
+                crate::resilience::CircuitBreakerConfig::default(),
+            )),
         }
     }
 
@@ -211,6 +220,7 @@ mod tests {
                     path: "/tmp/file.bin".to_string(),
                     file_writer: make_temp_writer("http"),
                     group_context: None,
+                    dynamic_mirrors: Arc::new(std::sync::RwLock::new(vec![])),
                 },
             );
 

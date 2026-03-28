@@ -164,6 +164,7 @@ pub struct RecoveryAttempt {
 }
 
 /// Download recovery manager
+#[derive(Clone)]
 pub struct DownloadRecoveryManager {
     /// Map of download_id → corruption evidence
     corruptions: Arc<RwLock<HashMap<String, Vec<CorruptionEvidence>>>>,
@@ -286,7 +287,7 @@ impl DownloadRecoveryManager {
             // Find the healthiest domain (average score of all mirrors in that domain)
             let best_domain_mirrors = domain_groups
                 .iter()
-                .max_by_key(|(domain, urls)| {
+                .max_by_key(|(_domain, urls)| {
                     let avg_score: f64 = urls
                         .iter()
                         .map(|url| mirrors.get(url).map(|m| m.score as f64).unwrap_or(70.0))

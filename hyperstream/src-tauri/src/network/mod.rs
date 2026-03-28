@@ -11,3 +11,5 @@ pub mod sync_client;
 pub mod differential;
 pub mod wfp;
 pub mod tls_ja3;
+pub mod mirror_scout;
+pub mod mirror_aggregator;

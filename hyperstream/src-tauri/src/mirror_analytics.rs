@@ -4,8 +4,6 @@
 //! trend detection, and prediction capabilities.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::time::SystemTime;
 
 /// Performance statistics for a mirror
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,7 +202,7 @@ impl MirrorAnalyticsEngine {
             time_since_last_success_secs: 0, // Would be calculated from actual timestamps
             reliability_score,
             trend: "stable".to_string(),
-            confidence,
+            confidence_percent: confidence,
         })
     }
 
@@ -259,7 +257,7 @@ impl MirrorAnalyticsEngine {
         stats_b: &MirrorStatistics,
     ) -> MirrorComparison {
         let speed_advantage = if stats_b.average_speed_bps > 0 {
-            ((stats_a.average_speed_bps as f64 / stats_b.average_speed_bps as f64 - 1.0) * 100.0)
+            (stats_a.average_speed_bps as f64 / stats_b.average_speed_bps as f64 - 1.0) * 100.0
         } else {
             0.0
         };
@@ -270,7 +268,7 @@ impl MirrorAnalyticsEngine {
             stats_b.url.clone()
         };
 
-        let reliability_advantage = (stats_a.success_rate_percent - stats_b.success_rate_percent);
+        let reliability_advantage = stats_a.success_rate_percent - stats_b.success_rate_percent;
         let more_reliable = if stats_a.success_rate_percent > stats_b.success_rate_percent {
             stats_a.url.clone()
         } else {
@@ -283,7 +281,7 @@ impl MirrorAnalyticsEngine {
             stats_b.url.clone()
         };
 
-        let confidence = ((stats_a.confidence as u32 + stats_b.confidence as u32) / 2) as u8;
+        let confidence = ((stats_a.confidence_percent as u32 + stats_b.confidence_percent as u32) / 2) as u8;
 
         MirrorComparison {
             mirror_a: stats_a.url.clone(),
@@ -344,7 +342,7 @@ mod tests {
             time_since_last_success_secs: 60,
             reliability_score: 92,
             trend: "stable".to_string(),
-            confidence: 100,
+            confidence_percent: 100,
         };
 
         let mut stats_b = stats_a.clone();

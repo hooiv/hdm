@@ -1,0 +1,356 @@
+    Checking hyperstream v0.1.0 (C:\Users\aditya\Desktop\hdm\hyperstream\src-tauri)
+warning: unused imports: `Deserialize` and `Serialize`
+  --> src\commands\queue_orchestrator_commands.rs:10:13
+   |
+10 | use serde::{Deserialize, Serialize};
+   |             ^^^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tokio::io::AsyncReadExt`
+ --> src\network\mirror_scout.rs:5:5
+  |
+5 | use tokio::io::AsyncReadExt;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `GLOBAL_MIRROR_SCORER` and `MirrorMetrics`
+  --> src\smart_route_manager.rs:16:29
+   |
+16 | use crate::mirror_scoring::{MirrorMetrics, GLOBAL_MIRROR_SCORER};
+   |                             ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `FailurePrediction` and `FailureRisk`
+  --> src\smart_route_manager.rs:17:33
+   |
+17 | use crate::failure_prediction::{FailurePrediction, FailureRisk};
+   |                                 ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src\mirror_analytics.rs:7:5
+  |
+7 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::SystemTime`
+ --> src\mirror_analytics.rs:8:5
+  |
+8 | use std::time::SystemTime;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around block return value
+   --> src\mirror_analytics.rs:262:13
+    |
+262 |             ((stats_a.average_speed_bps as f64 / stats_b.average_speed_bps as f64 - 1.0) * 100.0)
+    |             ^                                                                                   ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+262 -             ((stats_a.average_speed_bps as f64 / stats_b.average_speed_bps as f64 - 1.0) * 100.0)
+262 +             (stats_a.average_speed_bps as f64 / stats_b.average_speed_bps as f64 - 1.0) * 100.0
+    |
+
+warning: unnecessary parentheses around assigned value
+   --> src\mirror_analytics.rs:273:37
+    |
+273 |         let reliability_advantage = (stats_a.success_rate_percent - stats_b.success_rate_percent);
+    |                                     ^                                                           ^
+    |
+help: remove these parentheses
+    |
+273 -         let reliability_advantage = (stats_a.success_rate_percent - stats_b.success_rate_percent);
+273 +         let reliability_advantage = stats_a.success_rate_percent - stats_b.success_rate_percent;
+    |
+
+warning: unused import: `crate::core_state::AppState`
+ --> src\mirror_analytics_commands.rs:5:5
+  |
+5 | use crate::core_state::AppState;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::MutexGuard`
+ --> src\mirror_analytics_commands.rs:8:5
+  |
+8 | use std::sync::MutexGuard;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `SystemTime`
+ --> src\speed_acceleration.rs:8:27
+  |
+8 | use std::time::{Duration, SystemTime};
+  |                           ^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> src\speed_acceleration.rs:253:28
+    |
+253 |                 let diff = (m.speed_bps as f64 - mean as f64);
+    |                            ^                                ^
+    |
+help: remove these parentheses
+    |
+253 -                 let diff = (m.speed_bps as f64 - mean as f64);
+253 +                 let diff = m.speed_bps as f64 - mean as f64;
+    |
+
+warning: unused import: `NetworkCondition`
+ --> src\speed_acceleration_commands.rs:5:55
+  |
+5 | use crate::speed_acceleration::{BandwidthMeasurement, NetworkCondition, SpeedAccelerationEngine};
+  |                                                       ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src\failure_prediction.rs:24:17
+   |
+24 | use std::time::{Duration, SystemTime, UNIX_EPOCH};
+   |                 ^^^^^^^^
+
+warning: unused imports: `Duration`, `SystemTime`, and `UNIX_EPOCH`
+  --> src\queue_orchestrator.rs:28:17
+   |
+28 | use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+   |                 ^^^^^^^^           ^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src\preflight_analysis.rs:13:17
+   |
+13 | use std::time::{Duration, Instant};
+   |                 ^^^^^^^^
+
+warning: unused import: `Arc`
+  --> src\speed_estimator.rs:18:17
+   |
+18 | use std::sync::{Arc, Mutex};
+   |                 ^^^
+
+warning: unused import: `Duration`
+  --> src\speed_estimator.rs:19:17
+   |
+19 | use std::time::{Duration, Instant};
+   |                 ^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src\engine\session.rs:1628:95
+     |
+1628 | ...                   if let Ok(mut tx) = tx_w.send((seg_id_dyn, current_pos, chunk.to_vec())).await {
+     |                                                ---- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `WriteRequest`, found `(u32, u64, Vec<u8>)`
+     |                                                |
+     |                                                arguments to this method are incorrect
+     |
+     = note: expected struct `disk::WriteRequest`
+                 found tuple `(u32, u64, Vec<u8>)`
+help: the return type of this call is `(u32, u64, Vec<u8>)` due to the type of the argument passed
+    --> src\engine\session.rs:1628:85
+     |
+1628 | ...                   if let Ok(mut tx) = tx_w.send((seg_id_dyn, current_pos, chunk.to_vec())).await {
+     |                                           ^^^^^^^^^^-----------------------------------------^
+     |                                                     |
+     |                                                     this argument influences the return type of `send`
+note: method defined here
+    --> C:\Users\aditya\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\sync\mpsc.rs:607:12
+     |
+ 607 |     pub fn send(&self, t: T) -> Result<(), SendError<T>> {
+     |            ^^^^
+
+error[E0277]: `Result<(), std::sync::mpmc::SendError<disk::WriteRequest>>` is not a future
+    --> src\engine\session.rs:1628:138
+     |
+1628 | ...                   if let Ok(mut tx) = tx_w.send((seg_id_dyn, current_pos, chunk.to_vec())).await {
+     |                                                                                                ^^^^^ `Result<(), std::sync::mpmc::SendError<disk::WriteRequest>>` is not a future
+     |
+     = help: the trait `futures::Future` is not implemented for `Result<(), std::sync::mpmc::SendError<disk::WriteRequest>>`
+     = note: Result<(), std::sync::mpmc::SendError<disk::WriteRequest>> must be a future or must implement `IntoFuture` to be awaited
+     = note: required for `Result<(), std::sync::mpmc::SendError<disk::WriteRequest>>` to implement `std::future::IntoFuture`
+help: remove the `.await`
+     |
+1628 -                                                                 if let Ok(mut tx) = tx_w.send((seg_id_dyn, current_pos, chunk.to_vec())).await {
+1628 +                                                                 if let Ok(mut tx) = tx_w.send((seg_id_dyn, current_pos, chunk.to_vec())) {
+     |
+
+warning: variable does not need to be mutable
+   --> src\network\mirror_scout.rs:109:23
+    |
+109 |             if let Ok(mut resp) = get_res {
+    |                       ----^^^^
+    |                       |
+    |                       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `domain`
+   --> src\download_recovery.rs:290:31
+    |
+290 |                 .max_by_key(|(domain, urls)| {
+    |                               ^^^^^^ help: if this is intentional, prefix it with an underscore: `_domain`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no method named `evaluate_download` found for reference `&ParallelMirrorRetryManager` in the current scope
+  --> src\parallel_mirror_retry.rs:67:18
+   |
+67 |             self.evaluate_download(&id, &state, app).await;
+   |                  ^^^^^^^^^^^^^^^^^ method not found in `&ParallelMirrorRetryManager`
+
+error[E0599]: no method named `get_stats` found for struct `Arc<std::sync::Mutex<DownloadManager>>` in the current scope
+  --> src\parallel_mirror_retry.rs:83:29
+   |
+83 |         let stats = manager.get_stats();
+   |                             ^^^^^^^^^
+   |
+help: there is a method `get_mut` with a similar name
+   |
+83 -         let stats = manager.get_stats();
+83 +         let stats = manager.get_mut();
+   |
+
+error[E0599]: no method named `get_segments_snapshot` found for struct `Arc<std::sync::Mutex<DownloadManager>>` in the current scope
+  --> src\parallel_mirror_retry.rs:92:32
+   |
+92 |         let segments = manager.get_segments_snapshot();
+   |                                ^^^^^^^^^^^^^^^^^^^^^ method not found in `Arc<std::sync::Mutex<DownloadManager>>`
+
+error[E0609]: no field `config` on type `Arc<std::sync::Mutex<DownloadManager>>`
+   --> src\parallel_mirror_retry.rs:101:76
+    |
+101 |             if seg.speed_bps < slow_threshold && seg.remaining() > manager.config.min_split_size * 2 {
+    |                                                                            ^^^^^^ unknown field
+
+error[E0599]: no method named `trigger_proactive_split` found for struct `Arc<std::sync::Mutex<DownloadManager>>` in the current scope
+   --> src\parallel_mirror_retry.rs:106:48
+    |
+106 |                 if let Some(new_seg) = manager.trigger_proactive_split(seg.id) {
+    |                                                ^^^^^^^^^^^^^^^^^^^^^^^ method not found in `Arc<std::sync::Mutex<DownloadManager>>`
+
+error[E0599]: no method named `trigger_proactive_split` found for struct `Arc<std::sync::Mutex<DownloadManager>>` in the current scope
+  --> src\parallel_mirror_commands.rs:49:36
+   |
+49 |     let _new_seg = session.manager.trigger_proactive_split(segment_id)
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^ method not found in `Arc<std::sync::Mutex<DownloadManager>>`
+
+warning: unused variable: `state`
+   --> src\smart_route_commands.rs:133:5
+    |
+133 |     state: State<'_, AppState>,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+
+warning: unused variable: `url`
+   --> src\mirror_analytics_commands.rs:163:13
+    |
+163 |     for (i, url) in mirror_urls.iter().enumerate() {
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `measurement`
+  --> src\speed_acceleration_commands.rs:81:9
+   |
+81 |     let measurement = BandwidthMeasurement {
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_measurement`
+
+warning: unused variable: `avg_speed`
+   --> src\speed_acceleration_commands.rs:110:9
+    |
+110 |     let avg_speed = engine.get_average_speed(50);
+    |         ^^^^^^^^^
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+110 |     let _avg_speed = engine.get_average_speed(50);
+    |         +
+help: you might have meant to pattern match on the similarly named constant `MAX_RANGE_SIZE`
+    |
+110 -     let avg_speed = engine.get_average_speed(50);
+110 +     let start_range_download::{closure#0}::MAX_RANGE_SIZE = engine.get_average_speed(50);
+    |
+
+warning: unused variable: `start`
+   --> src\preflight_analysis.rs:116:13
+    |
+116 |         let start = Instant::now();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `url`
+   --> src\preflight_analysis.rs:319:39
+    |
+319 |     async fn test_connectivity(&self, url: &str) -> (ConnectionHealth, Option<u32>, Option<u32>, Option<u32>, Option<f64>) {
+    |                                       ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `url`
+   --> src\preflight_analysis.rs:330:42
+    |
+330 |     async fn fetch_content_length(&self, url: &str) -> Option<u64> {
+    |                                          ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `url`
+   --> src\preflight_analysis.rs:336:33
+    |
+336 |     async fn assess_risk(&self, url: &str, health: &ConnectionHealth, mirrors: &[MirrorInfo], size: Option<u64>) -> (f64, f64, f64, Vec<S...
+    |                                 ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `metrics`
+   --> src\resilience\failover_metrics.rs:219:13
+    |
+219 |         let metrics = self.metrics.lock().unwrap();
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_metrics`
+
+warning: unused variable: `primary`
+   --> src\smart_route_manager.rs:398:9
+    |
+398 |         primary: &str,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_primary`
+
+warning: unused variable: `prediction_id`
+   --> src\failure_prediction.rs:603:44
+    |
+603 |     pub fn record_prediction_result(&self, prediction_id: &str, actually_failed: bool) {
+    |                                            ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prediction_id`
+
+warning: unused variable: `url`
+   --> src\preflight_analysis.rs:392:40
+    |
+392 |     fn generate_recommendations(&self, url: &str, health: &ConnectionHealth, size: Option<u64>, speed: f64, mirrors: &[MirrorInfo], succe...
+    |                                        ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `speed`
+   --> src\preflight_analysis.rs:392:97
+    |
+392 |     fn generate_recommendations(&self, url: &str, health: &ConnectionHealth, size: Option<u64>, speed: f64, mirrors: &[MirrorInfo], succe...
+    |                                                                                                 ^^^^^
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+392 |     fn generate_recommendations(&self, url: &str, health: &ConnectionHealth, size: Option<u64>, _speed: f64, mirrors: &[MirrorInfo], success_prob: f64) -> Vec<DownloadRecommendation> {
+    |                                                                                                 +
+help: you might have meant to pattern match on the similarly named constant `GB`
+    |
+392 |     fn generate_recommendations(&self, url: &str, health: &ConnectionHealth, size: Option<u64>, speed_estimator::format_speed::GB: f64, mirrors: &[MirrorInfo], success_prob: f64) -> Vec<DownloadRecommendation> {
+    |                                                                                                      ++++++++++++++++++++++++++++
+
+warning: unused variable: `size`
+   --> src\preflight_analysis.rs:467:61
+    |
+467 |     fn determine_strategy(&self, health: &ConnectionHealth, size: Option<u64>, speed: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> S...
+    |                                                             ^^^^ help: if this is intentional, prefix it with an underscore: `_size`
+
+warning: unused variable: `speed`
+   --> src\preflight_analysis.rs:467:80
+    |
+467 |     fn determine_strategy(&self, health: &ConnectionHealth, size: Option<u64>, speed: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> S...
+    |                                                                                ^^^^^
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+467 |     fn determine_strategy(&self, health: &ConnectionHealth, size: Option<u64>, _speed: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> String {
+    |                                                                                +
+help: you might have meant to pattern match on the similarly named constant `GB`
+    |
+467 |     fn determine_strategy(&self, health: &ConnectionHealth, size: Option<u64>, speed_estimator::format_speed::GB: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> String {
+    |                                                                                     ++++++++++++++++++++++++++++
+
+warning: unused variable: `mirrors`
+   --> src\preflight_analysis.rs:467:110
+    |
+467 | ...eed: f64, risk: &RiskLevel, mirrors: &[MirrorInfo]) -> String {
+    |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mirrors`
+
+Some errors have detailed explanations: E0277, E0308, E0599, E0609.
+For more information about an error, try `rustc --explain E0277`.
+warning: `hyperstream` (lib) generated 36 warnings
+error: could not compile `hyperstream` (lib) due to 8 previous errors; 36 warnings emitted

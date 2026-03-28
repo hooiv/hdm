@@ -1,271 +1,187 @@
-//! Parallel Mirror Retry Engine
+//! Parallel Mirror Retry: Proactive segment shadowing and bandwidth arbitrage
 //!
-//! Implements simultaneous retry attempts across multiple mirrors for maximum download speed
-//! and resilience. Races multiple mirrors concurrently and uses the first successful response.
+//! Monitors download progress to identify stalled or "straggler" segments,
+//! forcing mid-segment splits and reassigning work to superior mirrors in real-time.
 //!
-//! Features:
-//! - Concurrent requests to multiple mirrors
-//! - Smart mirror ranking for optimal bandwidth allocation
-//! - Automatic fallback on timeout or failure
-//! - Connection pooling and reuse
-//! - Bandwidth aggregation for combined parallel throughput
+//! ## How It Works
+//!
+//! 1. **Straggler Detection**: Compares each segment's speed against the download average.
+//! 2. **AI-Driven Prediction**: Uses `FailurePredictionEngine` to trigger splits *before* a
+//!    segment officially fails.
+//! 3. **Shadow Worker**: The new split segment is assigned to the fastest *alternative* mirror,
+//!    not the one already struggling.
 
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use std::time::Duration;
+use crate::core_state::AppState;
+use crate::downloader::structures::{Segment, SegmentState};
 
-/// Configuration for parallel mirror retry strategy
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ParallelRetryConfig {
-    /// Maximum number of concurrent mirror attempts (2-10)
-    pub max_concurrent_mirrors: u32,
-    /// Timeout for each mirror attempt in seconds
-    pub attempt_timeout_secs: u64,
-    /// Only use mirrors with score >= this threshold
-    pub min_mirror_score_threshold: u8,
-    /// Enable bandwidth aggregation across mirrors
-    pub enable_bandwidth_aggregation: bool,
-    /// Backoff multiplier when all mirrors fail
-    pub failure_backoff_multiplier: f64,
+    /// Speed threshold relative to average (e.g., 0.3 means <30% of average)
+    pub straggler_speed_ratio: f64,
+    /// Minimum time a segment must be in `Downloading` state before being judged
+    pub min_evaluation_time_ms: u64,
+    /// Stall timeout: no progress for this many seconds triggers intervention
+    pub stall_timeout_s: u64,
+    /// Max segments per download (prevents unbounded splitting)
+    pub max_segments_per_download: u32,
 }
 
 impl Default for ParallelRetryConfig {
     fn default() -> Self {
         Self {
-            max_concurrent_mirrors: 3,
-            attempt_timeout_secs: 10,
-            min_mirror_score_threshold: 50,
-            enable_bandwidth_aggregation: true,
-            failure_backoff_multiplier: 1.5,
+            straggler_speed_ratio: 0.4,     // <40% of average = straggling
+            min_evaluation_time_ms: 10_000, // 10s before judging a new segment
+            stall_timeout_s: 15,
+            max_segments_per_download: 32,
         }
     }
 }
 
-/// Result of a single parallel mirror attempt
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MirrorAttemptResult {
-    /// The mirror URL that was tried
-    pub mirror_url: String,
-    /// Whether this attempt succeeded
-    pub succeeded: bool,
-    /// Response status code (if applicable)
-    pub status_code: Option<u16>,
-    /// Bytes downloaded in this attempt
-    pub bytes_downloaded: u64,
-    /// Duration of attempt in milliseconds
-    pub duration_ms: u64,
-    /// Calculated speed (bytes per second)
-    pub speed_bps: u64,
-    /// Error message if failed
-    pub error: Option<String>,
-}
-
-/// Overall result of parallel mirror retry operation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParallelRetryResult {
-    /// Which mirror succeeded (if any)
-    pub winner_mirror: Option<String>,
-    /// Bytes downloaded across all mirrors
-    pub total_bytes_downloaded: u64,
-    /// Total duration of the parallel retry operation
-    pub total_duration_ms: u64,
-    /// Combined throughput from all successful mirrors
-    pub aggregated_speed_bps: u64,
-    /// All individual mirror results
-    pub mirror_results: Vec<MirrorAttemptResult>,
-    /// Overall success (at least one mirror succeeded)
-    pub overall_success: bool,
-    /// Number of mirrors that succeeded
-    pub successful_count: u32,
-}
-
-impl ParallelRetryResult {
-    /// Get success rate as percentage
-    pub fn success_rate_percent(&self) -> f64 {
-        if self.mirror_results.is_empty() {
-            return 0.0;
-        }
-        let successful = self.mirror_results.iter().filter(|r| r.succeeded).count();
-        (successful as f64 / self.mirror_results.len() as f64) * 100.0
-    }
-
-    /// Get fastest mirror that succeeded
-    pub fn fastest_mirror(&self) -> Option<&MirrorAttemptResult> {
-        self.mirror_results
-            .iter()
-            .filter(|r| r.succeeded)
-            .max_by_key(|r| r.speed_bps)
-    }
-
-    /// Get slowest mirror that succeeded
-    pub fn slowest_mirror(&self) -> Option<&MirrorAttemptResult> {
-        self.mirror_results
-            .iter()
-            .filter(|r| r.succeeded)
-            .min_by_key(|r| r.speed_bps)
-    }
-
-    /// Get mirrors sorted by speed (descending)
-    pub fn mirrors_by_speed(&self) -> Vec<&MirrorAttemptResult> {
-        let mut sorted = self.mirror_results.iter().collect::<Vec<_>>();
-        sorted.sort_by_key(|r| std::cmp::Reverse(r.speed_bps));
-        sorted
-    }
-}
-
-/// Manages parallel mirror retry strategy
 pub struct ParallelMirrorRetryManager {
-    config: Arc<RwLock<ParallelRetryConfig>>,
+    config: ParallelRetryConfig,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum SplitReason {
+    Straggler,
+    Predictive,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SplitAction {
+    pub segment: Segment,
+    pub mirror_url: String,
+    pub reason: SplitReason,
 }
 
 impl ParallelMirrorRetryManager {
-    /// Create a new parallel mirror retry manager
-    pub fn new() -> Self {
-        Self {
-            config: Arc::new(RwLock::new(ParallelRetryConfig::default())),
-        }
+    pub fn new(config: ParallelRetryConfig) -> Self {
+        Self { config }
     }
 
-    /// Create with custom configuration
-    pub fn with_config(config: ParallelRetryConfig) -> Self {
-        Self {
-            config: Arc::new(RwLock::new(config)),
-        }
-    }
-
-    /// Get current configuration
-    pub async fn get_config(&self) -> ParallelRetryConfig {
-        self.config.read().await.clone()
-    }
-
-    /// Update configuration
-    pub async fn update_config(&self, config: ParallelRetryConfig) {
-        let mut current = self.config.write().await;
-        *current = config;
-    }
-
-    /// Calculate optimal number of mirrors to use based on their scores
-    /// 
-    /// Example: If max_concurrent=3 and we have mirrors with scores [95, 85, 75, 65],
-    /// this might recommend using 3 mirrors (the top ones) to maximize speed
-    pub fn select_mirrors(
-        &self,
-        available_mirrors: &[(String, u8)], // (url, score) pairs
-        max_to_use: u32,
-        min_score: u8,
-    ) -> Vec<String> {
-        let mut filtered: Vec<_> = available_mirrors
-            .iter()
-            .filter(|(_, score)| *score >= min_score)
-            .collect();
-
-        // Sort by score descending
-        filtered.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
-
-        // Take top N mirrors
-        filtered
-            .into_iter()
-            .take(max_to_use as usize)
-            .map(|(url, _)| url.clone())
-            .collect()
-    }
-
-    /// Calculate expected aggregated speed from multiple mirrors
+    /// Evaluates a single download for stragglers and AI-predicted failures,
+    /// triggering proactive segment splits as needed.
     ///
-    /// Formula: aggressive_aggregate = sum(individual_speeds)
-    /// Formula: conservative_aggregate = max(speed) + (0.5 * second_max)
-    pub fn estimate_aggregated_speed(
-        individual_speeds: &[u64],
-        conservative: bool,
-    ) -> u64 {
-        if individual_speeds.is_empty() {
-            return 0;
-        }
-
-        if conservative {
-            let mut sorted = individual_speeds.to_vec();
-            sorted.sort_by(|a, b| b.cmp(a));
-            sorted[0] + (sorted.get(1).copied().unwrap_or(0) / 2)
-        } else {
-            individual_speeds.iter().sum()
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mirror_selection() {
-        let manager = ParallelMirrorRetryManager::new();
-        let mirrors = vec![
-            ("https://mirror1.com".to_string(), 95),
-            ("https://mirror2.com".to_string(), 85),
-            ("https://mirror3.com".to_string(), 75),
-            ("https://mirror4.com".to_string(), 45),
-        ];
-
-        let selected = manager.select_mirrors(&mirrors, 3, 50);
-        assert_eq!(selected.len(), 3);
-        assert!(!selected.contains(&"https://mirror4.com".to_string())); // Score 45 < threshold 50
-    }
-
-    #[test]
-    fn test_speed_estimation_aggressive() {
-        let speeds = vec![1000000, 800000, 600000]; // 1MB, 800KB, 600KB per second
-        let estimated = ParallelMirrorRetryManager::estimate_aggregated_speed(&speeds, false);
-        assert_eq!(estimated, 2400000); // Sum = 2.4MB/s
-    }
-
-    #[test]
-    fn test_speed_estimation_conservative() {
-        let speeds = vec![1000000, 800000, 600000];
-        let estimated = ParallelMirrorRetryManager::estimate_aggregated_speed(&speeds, true);
-        assert_eq!(estimated, 1400000); // max + (second_max / 2) = 1MB + 400KB = 1.4MB/s
-    }
-
-    #[test]
-    fn test_parallel_retry_result_success_rate() {
-        let result = ParallelRetryResult {
-            winner_mirror: Some("https://mirror1.com".to_string()),
-            total_bytes_downloaded: 5242880,
-            total_duration_ms: 5000,
-            aggregated_speed_bps: 1048576,
-            mirror_results: vec![
-                MirrorAttemptResult {
-                    mirror_url: "https://mirror1.com".to_string(),
-                    succeeded: true,
-                    status_code: Some(200),
-                    bytes_downloaded: 5242880,
-                    duration_ms: 5000,
-                    speed_bps: 1048576,
-                    error: None,
-                },
-                MirrorAttemptResult {
-                    mirror_url: "https://mirror2.com".to_string(),
-                    succeeded: false,
-                    status_code: Some(408),
-                    bytes_downloaded: 0,
-                    duration_ms: 10000,
-                    speed_bps: 0,
-                    error: Some("Timeout".to_string()),
-                },
-            ],
-            overall_success: true,
-            successful_count: 1,
+    /// Returns a list of `SplitAction`s, each describing the new shadow segment
+    /// and the mirror it should use.
+    pub async fn evaluate_and_split(&self, download_id: &str, state: &AppState) -> Vec<SplitAction> {
+        let session = {
+            let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+            match downloads.get(download_id) {
+                Some(s) => s.clone(),
+                None => return Vec::new(),
+            }
         };
 
-        assert_eq!(result.success_rate_percent(), 50.0);
-        assert_eq!(result.fastest_mirror().map(|m| m.speed_bps), Some(1048576));
-    }
+        let manager = session.manager.clone();
+        let stats = manager.lock().unwrap().get_stats();
 
-    #[test]
-    fn test_config_defaults() {
-        let config = ParallelRetryConfig::default();
-        assert_eq!(config.max_concurrent_mirrors, 3);
-        assert_eq!(config.attempt_timeout_secs, 10);
-        assert_eq!(config.min_mirror_score_threshold, 50);
+        if stats.active_segments <= 1 || stats.total_speed_bps == 0 {
+            return Vec::new();
+        }
+
+        let avg_speed = stats.total_speed_bps / stats.active_segments as u64;
+        let slow_threshold = (avg_speed as f64 * self.config.straggler_speed_ratio) as u64;
+
+        let segments = manager.lock().unwrap().get_segments_snapshot();
+
+        // ── Resolve mirrors once — before taking any per-segment locks ──────
+        // Fetching mirrors is async and must not occur while holding a Mutex.
+        let all_mirrors = state.mirror_aggregator.get_active_mirrors(download_id).await;
+
+        // FIX: Select best alternative mirror — skip the session's primary URL
+        // so that the shadow worker actually uses a different server.
+        let best_mirror = all_mirrors
+            .iter()
+            .find(|m| m.url != session.url)
+            .map(|m| m.url.clone())
+            .unwrap_or_else(|| session.url.clone());
+
+        let mut results: Vec<SplitAction> = Vec::new();
+
+        // ── AI-Driven Predictive Failover ─────────────────────────────────────
+        let prediction = state
+            .failure_prediction_engine
+            .lock()
+            .ok()
+            .and_then(|engine| engine.predict_failure(download_id));
+
+        if let Some(ref prediction) = prediction {
+            use crate::failure_prediction::FailureRisk;
+            if matches!(
+                prediction.risk_level,
+                FailureRisk::Critical | FailureRisk::Imminent
+            ) {
+                println!(
+                    "[PredictiveRetry] AI risk {}% ({:?}) for '{}' — triggering shadow split.",
+                    prediction.probability_percent, prediction.risk_level, download_id
+                );
+
+                // Shadow the slowest active segment
+                if let Some(slowest) = segments
+                    .iter()
+                    .filter(|s| s.state == SegmentState::Downloading)
+                    .min_by_key(|s| s.speed_bps)
+                {
+                    let new_seg_opt = {
+                        let m = manager.lock().unwrap_or_else(|e| e.into_inner());
+                        let min_split = m.config.min_split_size;
+                        if slowest.remaining() > min_split * 2 {
+                            m.trigger_proactive_split(slowest.id)
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(new_seg) = new_seg_opt {
+                        results.push(SplitAction {
+                            segment: new_seg,
+                            mirror_url: best_mirror.clone(),
+                            reason: SplitReason::Predictive,
+                        });
+                    }
+                }
+            }
+        }
+
+        // ── Reactive Straggler Detection ──────────────────────────────────────
+        for seg in &segments {
+            if seg.state != SegmentState::Downloading {
+                continue;
+            }
+
+            // Skip segments already handled in the predictive pass
+            if results.iter().any(|r| r.segment.id == seg.id) {
+                continue;
+            }
+
+            let is_straggler = seg.speed_bps < slow_threshold;
+            let has_enough_remaining = {
+                let m = manager.lock().unwrap_or_else(|e| e.into_inner());
+                seg.remaining() > m.config.min_split_size * 2
+            };
+
+            if is_straggler && has_enough_remaining {
+                println!(
+                    "[ParallelRetry] Seg {} straggling ({} bps < threshold {} bps) — splitting.",
+                    seg.id, seg.speed_bps, slow_threshold
+                );
+
+                let new_seg_opt = {
+                    let m = manager.lock().unwrap_or_else(|e| e.into_inner());
+                    m.trigger_proactive_split(seg.id)
+                };
+
+                if let Some(new_seg) = new_seg_opt {
+                    results.push(SplitAction {
+                        segment: new_seg,
+                        mirror_url: best_mirror.clone(),
+                        reason: SplitReason::Straggler,
+                    });
+                }
+            }
+        }
+
+        results
     }
 }

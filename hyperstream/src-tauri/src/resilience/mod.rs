@@ -1,17 +1,33 @@
-// resilience.rs — Comprehensive error recovery and resilience system
-//
-// This module provides production-grade resilience for downloads:
-// - Error classification and categorization
-// - Intelligent retry strategies with exponential backoff
-// - Download integrity validation
-// - Network diagnosis and failure detection
-// - Automatic healing procedures
-// - Health monitoring and metrics
+//! Comprehensive Resilience System for Downloads
+//!
+//! This module combines:
+//! - Original resilience engine: Health tracking, error classification, integrity validation
+//! - New circuit breaker system: Per-mirror state machine, intelligent failover
+//!
+//! Key components:
+//! - error_types: Structured error classification for recovery strategy
+//! - circuit_breaker: State machine for per-mirror health tracking
+//! - circuit_breaker_manager: Centralized control for all circuit breakers
+//! - failover_metrics: Observability & metrics collection
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub mod error_types;
+pub mod circuit_breaker;
+pub mod circuit_breaker_manager;
+pub mod failover_metrics;
+
+pub use error_types::{DownloadError};
+pub use circuit_breaker::{CircuitBreaker, CircuitState, CircuitBreakerConfig};
+pub use circuit_breaker_manager::CircuitBreakerManager;
+pub use failover_metrics::FailoverMetrics;
+
+// ============================================================================
+// ORIGINAL RESILIENCE ENGINE CODE (preserved for backwards compatibility)
+// ============================================================================
 
 /// Error categories for intelligent handling
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -436,6 +436,60 @@ impl DownloadManager {
         results
     }
 
+    /// FORCED PROACTIVE SPLIT: Specifically for straggler/stalled handling.
+    /// Splits the target segment immediately and returns the new segment.
+    /// The new segment is initialized to `Idle` state so a new mirror can pick it up.
+    pub fn trigger_proactive_split(&self, target_segment_id: u32) -> Option<Segment> {
+        let mut segments = match self.segments.write() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+
+        // Find target segment by ID
+        let target_idx = segments.iter().position(|s| s.id == target_segment_id)?;
+
+        // Validate state and size
+        if segments[target_idx].state != SegmentState::Downloading || 
+           segments[target_idx].remaining() < self.config.min_split_size * 2 {
+            return None;
+        }
+
+        // Calculate split point (steal the 2nd half)
+        let remaining = segments[target_idx].remaining();
+        let mid = segments[target_idx].downloaded_cursor + (remaining / 2);
+
+        // Generate new ID
+        let new_id = {
+            let mut id_lock = match self.next_segment_id.write() {
+                Ok(l) => l,
+                Err(e) => e.into_inner(),
+            };
+            let id = *id_lock;
+            *id_lock += 1;
+            id
+        };
+
+        let original_end = segments[target_idx].end_byte;
+        let original_id = segments[target_idx].id;
+
+        // Create the new segment for the upper half (Starts as Idle)
+        let mut new_segment = Segment::new(new_id, mid, original_end);
+        new_segment.state = SegmentState::Idle; 
+
+        // Shrink the original segment
+        segments[target_idx].end_byte = mid;
+
+        println!(
+            "[ProactiveSplit] Forced split of straggler {} at byte {} → new idle segment {} ({}-{})",
+            original_id, mid, new_id, mid, original_end
+        );
+
+        let result = new_segment.clone();
+        segments.push(new_segment);
+        
+        Some(result)
+    }
+
     /// Get a snapshot of all segments for UI display
     pub fn get_segments_snapshot(&self) -> Vec<Segment> {
         self.segments.read().map(|s| s.clone()).unwrap_or_default()

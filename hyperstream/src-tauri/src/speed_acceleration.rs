@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// Real-time bandwidth measurement
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -250,7 +250,7 @@ impl SpeedAccelerationEngine {
         let variance: f64 = recent
             .iter()
             .map(|m| {
-                let diff = (m.speed_bps as f64 - mean as f64);
+                let diff = m.speed_bps as f64 - mean as f64;
                 diff * diff
             })
             .sum::<f64>()

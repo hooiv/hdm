@@ -744,6 +744,7 @@ pub async fn start_multi_source_download(
                 path: path.clone(),
                 file_writer: file_mutex.clone(),
                 group_context: None,
+                dynamic_mirrors: Arc::new(std::sync::RwLock::new(vec![primary_url.clone()])),
             },
         );
     }

@@ -2,7 +2,7 @@
 //!
 //! Exposes bandwidth monitoring, condition detection, and optimization strategies.
 
-use crate::speed_acceleration::{BandwidthMeasurement, NetworkCondition, SpeedAccelerationEngine};
+use crate::speed_acceleration::{BandwidthMeasurement, SpeedAccelerationEngine};
 use serde::{Deserialize, Serialize};
 
 /// Speed acceleration statistics
@@ -78,7 +78,7 @@ pub async fn record_bandwidth_measurement(
         0
     };
 
-    let measurement = BandwidthMeasurement {
+    let _measurement = BandwidthMeasurement {
         bytes_transferred,
         duration_ms,
         speed_bps,
@@ -107,7 +107,7 @@ pub async fn estimate_download_time(file_size_bytes: u64) -> Result<DownloadTime
 
     let engine = SpeedAccelerationEngine::new();
     let duration = engine.estimate_download_time(file_size_bytes);
-    let avg_speed = engine.get_average_speed(50);
+    let _avg_speed = engine.get_average_speed(50);
 
     // Confidence based on number of measurements
     let measurements = engine.get_measurements();

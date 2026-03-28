@@ -263,6 +263,13 @@ impl BandwidthAllocator {
         }
     }
 
+    /// Get the current allocated speed for a download.
+    /// Used by the smart route optimizer to make routing decisions.
+    pub fn get_current_speed(&self, id: &str) -> Option<u64> {
+        let map = self.downloads.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(id).map(|e| e.allocated_bps)
+    }
+
     /// Get a snapshot of all allocations (for UI display).
     pub fn snapshot(&self) -> Vec<AllocationSnapshot> {
         let map = self.downloads.lock().unwrap_or_else(|e| e.into_inner());

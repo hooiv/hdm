@@ -8,12 +8,13 @@ use std::collections::HashSet;
 use std::path::Path;
 use tokio::io::AsyncReadExt;
 use std::sync::Arc;
-use tokio::time::{Duration, Instant};
+use tokio::time::{Duration};
+use futures::future::BoxFuture;
 
 const MAX_ARCHIVE_DOCS: usize = 5;
 const MAX_MIRRORS_TOTAL: usize = 12;
-const USER_AGENT: &str = "Mozilla/5.0 HyperStream/1.0";
-const SIZE_MATCH_TOLERANCE_BYTES: u64 = 4 * 1024;
+const USER_AGENT: &str = "Mozilla/5.0 HyperStream/1.0 (MirrorScout)";
+const SIZE_MATCH_TOLERANCE_BYTES: u64 = 4096;
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 pub struct MirrorCandidate {
@@ -131,55 +132,49 @@ impl DiscoveryEngine {
     }
 
     async fn probe_candidates(&self, candidates: &mut [RankedCandidate]) {
-        let mut probe_futures: Vec<futures::future::BoxFuture<(Option<u64>, Option<bool>, Option<u64>)>> = Vec::new();
+        let scout = crate::network::mirror_scout::MirrorScout::new();
+        let mut probe_futures: Vec<BoxFuture<'static, crate::network::mirror_scout::ScoutResult>> = Vec::new();
+
         for rc in candidates.iter_mut() {
             if rc.candidate.probe_ready {
-                let client = self.client.clone();
+                let scout_ref = scout.clone();
                 let url = rc.candidate.url.clone();
+                let expected_size = rc.candidate.content_length.unwrap_or(0);
+
                 probe_futures.push(Box::pin(async move {
-                    let start = Instant::now();
-                    // Use GET with a tiny range fallback if HEAD is unsupported/weird, 
-                    // but for probing, a standard HEAD request is best.
-                    let res = client.head(&url).send().await;
-                    match res {
-                        Ok(resp) if resp.status().is_success() => {
-                            let latency = start.elapsed().as_millis() as u64;
-                            let supports_range = resp.headers()
-                                .get(reqwest::header::ACCEPT_RANGES)
-                                .and_then(|h| h.to_str().ok())
-                                .map(|s| s == "bytes");
-                            let content_length = resp.content_length();
-                            (Some(latency), supports_range, content_length)
-                        }
-                        _ => (None, None, None),
-                    }
+                    scout_ref.verify_mirror(&url, expected_size, None).await
                 }));
             } else {
-                probe_futures.push(Box::pin(async { (None, None, None) }));
+                // Return a dummy successful check to avoid breaking zip
+                probe_futures.push(Box::pin(async { 
+                    crate::network::mirror_scout::ScoutResult {
+                        url: String::new(),
+                        status: crate::network::mirror_scout::ScoutStatus::Valid,
+                        latency_ms: 0,
+                        content_length: Some(0),
+                        supports_range: true,
+                        first_kb_hash: None,
+                    }
+                }));
             }
         }
 
         let probe_results = futures::future::join_all(probe_futures).await;
-        for (rc, (latency, range, length)) in candidates.iter_mut().zip(probe_results) {
-            if let Some(l) = latency {
-                rc.candidate.latency_ms = Some(l);
-                rc.candidate.supports_range = range;
-                if let Some(len) = length {
+        for (rc, result) in candidates.iter_mut().zip(probe_results) {
+            if result.status == crate::network::mirror_scout::ScoutStatus::Valid {
+                rc.candidate.latency_ms = Some(result.latency_ms);
+                rc.candidate.supports_range = Some(result.supports_range);
+                if let Some(len) = result.content_length {
                     rc.candidate.content_length = Some(len);
-                    // Match check: if length is known and differs significantly, penalize
-                    if !roughly_same_size(len, rc.candidate.content_length.unwrap_or(0)) {
-                        // Wait, rc.candidate.content_length was just set. 
-                        // We should compare against the target file_size.
-                    }
                 }
                 
                 // Boost score if mirror is fast and responsive
-                if l < 250 { rc.score += 5; }
-                else if l > 1500 { rc.score = rc.score.saturating_sub(10); }
+                if result.latency_ms < 250 { rc.score += 10; }
+                else if result.latency_ms > 1500 { rc.score = rc.score.saturating_sub(10); }
             } else if rc.candidate.probe_ready {
                 // If expected to be probe_ready but failed, penalize heavily
-                rc.score = rc.score.saturating_sub(40);
-                rc.candidate.note = Some(format!("Mirror probe failed: Unresponsive. {}", rc.candidate.note.as_deref().unwrap_or("")));
+                rc.score = rc.score.saturating_sub(50);
+                rc.candidate.note = Some(format!("Mirror probe failed: {:?}. {}", result.status, rc.candidate.note.as_deref().unwrap_or("")));
             }
         }
     }
@@ -438,6 +433,16 @@ impl MirrorProvider for BitbucketProvider {
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 
+/// Discovers mirrors for an active download session using minimal metadata.
+pub async fn find_mirrors_for_session(
+    filename: String,
+    file_size: u64,
+    sha256: Option<String>
+) -> Vec<MirrorCandidate> {
+    let engine = DiscoveryEngine::new();
+    engine.find_mirrors(&filename, file_size, sha256, None, None).await
+}
+
 pub async fn find_mirrors(file_path: String) -> Result<MirrorDiscoveryResult, String> {
     let path = Path::new(&file_path);
     if !path.exists() {
@@ -467,8 +472,8 @@ pub async fn find_mirrors(file_path: String) -> Result<MirrorDiscoveryResult, St
         Some(sha1_hash.clone()),
     ).await;
 
-    let direct_mirrors_found = mirrors.iter().filter(|m| m.direct).count();
     let probe_ready_mirrors_found = mirrors.iter().filter(|m| m.probe_ready).count();
+    let direct_mirrors_found = mirrors.iter().filter(|m| m.direct).count();
 
     Ok(MirrorDiscoveryResult {
         sha256: sha256_hash,

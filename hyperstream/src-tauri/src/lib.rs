@@ -58,6 +58,8 @@ pub mod recovery_commands;
 pub mod recovery_integration;
 pub mod parallel_mirror_retry;
 pub mod parallel_mirror_commands;
+pub mod smart_route_manager;
+pub mod smart_route_commands;
 pub mod mirror_analytics;
 pub mod mirror_analytics_commands;
 pub mod speed_acceleration;
@@ -75,6 +77,9 @@ pub mod group_metrics;
 pub mod group_smart_queue;
 pub mod group_error_handler;
 pub mod group_commands;
+pub mod queue_orchestrator;
+pub mod preflight_analysis;
+pub mod download_history_analytics;
 
 // mod virtual_drive;
 mod cloud_bridge;
@@ -122,6 +127,8 @@ mod bandwidth_history;
 pub mod session_state;
 pub mod session_recovery;
 pub mod segment_integrity;
+pub mod connection_pool;
+pub mod speed_estimator;
 
 use persistence::SavedDownload;
 
@@ -1838,11 +1845,6 @@ fn set_download_segments(download_id: String, segments: u32) -> Result<(), Strin
 // ─── Bandwidth History Commands ──────────────────────────────────────────
 
 #[tauri::command]
-fn get_bandwidth_history(since_secs: Option<u64>) -> bandwidth_history::BandwidthStats {
-    bandwidth_history::get_stats(since_secs.unwrap_or(3600))
-}
-
-#[tauri::command]
 fn get_bandwidth_samples(since_secs: u64) -> Vec<bandwidth_history::SpeedSample> {
     bandwidth_history::get_samples(since_secs)
 }
@@ -2638,7 +2640,61 @@ fn rebalance_bandwidth() {
     bandwidth_allocator::ALLOCATOR.rebalance();
 }
 
+// ============ Connection Pool Commands ============
+
+#[tauri::command]
+fn get_connection_pool_metrics(
+    state: State<'_, AppState>,
+) -> serde_json::Value {
+    let metrics = state.connection_manager.metrics();
+    serde_json::json!(metrics)
+}
+
+#[tauri::command]
+fn report_connection_throttle(
+    state: State<'_, AppState>,
+    url: String,
+) {
+    state.connection_manager.report_throttle(&url);
+}
+
+#[tauri::command]
+fn get_connection_pool_host_info(
+    state: State<'_, AppState>,
+    url: String,
+) -> serde_json::Value {
+    let active = state.connection_manager.active_connections(&url);
+    let limit = state.connection_manager.effective_limit(&url);
+    let throttled = state.connection_manager.is_throttled(&url);
+    serde_json::json!({
+        "active_connections": active,
+        "effective_limit": limit,
+        "is_throttled": throttled,
+    })
+}
+
+// ============ Speed Estimator Commands ============
+
+#[tauri::command]
+fn get_download_speed_info(id: String) -> Option<speed_estimator::DownloadSpeedInfo> {
+    // We need current bytes — get from downloads state
+    // For now, just return the cached speed info
+    speed_estimator::GLOBAL_ESTIMATOR.get_download_info(&id, 0)
+}
+
+#[tauri::command]
+fn get_download_speed_history(id: String) -> Vec<speed_estimator::SpeedSample> {
+    speed_estimator::GLOBAL_ESTIMATOR.get_speed_history(&id)
+}
+
+#[tauri::command]
+fn get_global_speed_info() -> speed_estimator::GlobalSpeedInfo {
+    let byte_counts = std::collections::HashMap::new();
+    speed_estimator::GLOBAL_ESTIMATOR.global_info(&byte_counts)
+}
+
 // ============ Crash Recovery Commands ============
+
 
 #[tauri::command]
 fn scan_crashed_downloads() -> Result<crash_recovery::RecoveryReport, String> {
@@ -3028,6 +3084,52 @@ fn get_preset_regions() -> Vec<serde_json::Value> {
 #[tauri::command]
 async fn get_fastest_mirror(urls: Vec<String>) -> Result<String, String> {
     crate::bandwidth_arb::get_fastest_mirror(urls).await
+}
+
+// Circuit Breaker Commands
+#[tauri::command]
+fn get_circuit_breaker_health(state: tauri::State<'_, AppState>, mirror: String) -> Result<serde_json::Value, String> {
+    let cb_manager = &state.circuit_breaker_manager;
+    let health_reports = cb_manager.get_all_mirrors_health();
+    
+    for report in health_reports {
+        if report.mirror_host == mirror {
+            return Ok(serde_json::to_value(&report)
+                .map_err(|e| format!("Failed to serialize report: {}", e))?);
+        }
+    }
+    
+    Err(format!("Mirror '{}' not found in circuit breaker", mirror))
+}
+
+#[tauri::command]
+fn get_all_circuit_breaker_status(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let cb_manager = &state.circuit_breaker_manager;
+    let health_reports = cb_manager.get_all_mirrors_health();
+    serde_json::to_value(&health_reports)
+        .map_err(|e| format!("Failed to serialize circuit breaker status: {}", e))
+}
+
+#[tauri::command]
+fn reset_mirror_circuit_breaker(state: tauri::State<'_, AppState>, mirror: String) -> Result<(), String> {
+    let cb_manager = &state.circuit_breaker_manager;
+    cb_manager.reset_mirror(&mirror);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_failover_metrics(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let health_reports = state.circuit_breaker_manager.get_all_mirrors_health();
+    let total_mirrors = health_reports.len();
+    let healthy_mirrors = health_reports.iter().filter(|r| r.is_healthy).count();
+    let avg_success_rate = health_reports.iter().map(|r| r.success_rate_percent).sum::<f64>() / total_mirrors.max(1) as f64;
+    
+    Ok(serde_json::json!({
+        "total_mirrors": total_mirrors,
+        "healthy_mirrors": healthy_mirrors,
+        "average_success_rate": avg_success_rate,
+        "mirror_details": health_reports
+    }))
 }
 
 #[tauri::command]
@@ -4045,6 +4147,11 @@ fn classify_network_requests(
             set_torrent_pinned,
             set_chaos_config,
             get_chaos_config,
+            smart_route_commands::get_active_mirrors,
+            smart_route_commands::get_mirror_vitals,
+            parallel_mirror_commands::get_parallel_retry_stats,
+            parallel_mirror_commands::force_parallel_retry,
+            parallel_mirror_commands::update_parallel_retry_config,
             // Advanced Subsystems
             set_qos_global_limit,
             remove_geofence_rule,
@@ -4104,6 +4211,14 @@ fn classify_network_requests(
             deregister_download_bandwidth,
             get_bandwidth_allocations,
             rebalance_bandwidth,
+            // Connection Pool Commands
+            get_connection_pool_metrics,
+            report_connection_throttle,
+            get_connection_pool_host_info,
+            // Speed Estimator Commands
+            get_download_speed_info,
+            get_download_speed_history,
+            get_global_speed_info,
             // Crash Recovery Commands
             scan_crashed_downloads,
             get_interrupted_downloads,
@@ -4247,9 +4362,6 @@ fn classify_network_requests(
             remove_download_dependency,
             enqueue_download_chain,
             set_download_segments,
-            // Bandwidth History
-            get_bandwidth_history,
-            get_bandwidth_samples,
             // Integrity Verification
             verify_download_checksum,
             compute_file_checksums,
@@ -4365,12 +4477,6 @@ fn classify_network_requests(
             recovery_commands::update_mirror_reliability,
             recovery_commands::auto_execute_recovery,
             recovery_commands::cleanup_recovery_data,
-            // Parallel Mirror Retry Commands
-            parallel_mirror_commands::get_parallel_retry_config,
-            parallel_mirror_commands::update_parallel_retry_config,
-            parallel_mirror_commands::select_optimal_mirrors,
-            parallel_mirror_commands::estimate_aggregated_throughput,
-            parallel_mirror_commands::simulate_parallel_retry,
             // Mirror Analytics Commands
             mirror_analytics_commands::analyze_mirror_statistics,
             mirror_analytics_commands::compare_two_mirrors,
@@ -4393,6 +4499,46 @@ fn classify_network_requests(
             failure_prediction_commands::get_prediction_accuracy_stats,
             failure_prediction_commands::get_current_failure_prediction,
             failure_prediction_commands::reset_failure_prediction,
+            failure_prediction_commands::reset_prediction_history,
+            failure_prediction_commands::simulate_prediction_chaos,
+            // Smart Route Manager Commands
+            smart_route_commands::get_route_status,
+            smart_route_commands::optimize_download_route,
+            smart_route_commands::get_mirror_health_rankings,
+            smart_route_commands::get_route_decision_history,
+            smart_route_commands::get_smart_route_config,
+            smart_route_commands::update_smart_route_config,
+            smart_route_commands::get_route_dashboard_snapshot,
+            smart_route_commands::record_route_decision_outcome,
+            // Circuit Breaker Commands
+            get_circuit_breaker_health,
+            get_all_circuit_breaker_status,
+            reset_mirror_circuit_breaker,
+            get_failover_metrics,
+            // Queue Orchestration Commands (Advanced Smart Scheduling)
+            commands::queue_orchestrator_commands::get_queue_orchestration_state,
+            commands::queue_orchestrator_commands::analyze_queue_health,
+            commands::queue_orchestrator_commands::get_download_speed_trend,
+            commands::queue_orchestrator_commands::get_download_metrics,
+            commands::queue_orchestrator_commands::register_orchestrated_download,
+            commands::queue_orchestrator_commands::record_download_progress,
+            commands::queue_orchestrator_commands::unregister_orchestrated_download,
+            commands::queue_orchestrator_commands::set_download_blocked,
+            commands::queue_orchestrator_commands::request_bandwidth_allocation,
+            commands::queue_orchestrator_commands::set_global_bandwidth_limit,
+            commands::queue_orchestrator_commands::format_bytes_human_readable,
+            // Pre-Flight Analysis Commands (URL Intelligence Before Downloading)
+            commands::preflight_commands::analyze_url_preflight,
+            commands::preflight_commands::analyze_multiple_urls,
+            commands::preflight_commands::get_preflight_recommendations,
+            commands::preflight_commands::get_preflight_analysis_summary,
+            // Download History Analytics Commands (Historical Data Intelligence)
+            commands::download_history_commands::record_download_stat,
+            commands::download_history_commands::get_download_analytics,
+            commands::download_history_commands::get_analytics_summary,
+            commands::download_history_commands::get_file_type_insights,
+            commands::download_history_commands::get_mirror_performance,
+            commands::download_history_commands::get_recommendations,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -4420,6 +4566,9 @@ fn classify_network_requests(
             
             // Initialize Download Groups engine (restores groups from disk)
             group_engine::init_group_engine(&handle);
+            
+            // Initialize Queue Orchestrator (production-grade queue intelligence)
+            commands::queue_orchestrator_commands::init_orchestrator();
             
             tauri::async_runtime::spawn(async move {
                 let lan_server = lan_api::LanApiServer::new(8765);
@@ -4576,7 +4725,20 @@ fn classify_network_requests(
                          crate::failure_prediction::PredictionConfig::default(),
                      ),
                  )),
+                 circuit_breaker_manager: Arc::new(crate::resilience::CircuitBreakerManager::new()),
+                  mirror_aggregator: Arc::new(crate::network::mirror_aggregator::MirrorAggregator::new()),
+                  parallel_mirror_retry: Arc::new(crate::parallel_mirror_retry::ParallelMirrorRetryManager::new(Default::default())),
             });
+
+            // Start Mirror Aggregator discovery loop
+            {
+                let app_handle = app.handle().clone();
+                let aggregator = app.handle().state::<AppState>().mirror_aggregator.clone();
+                tauri::async_runtime::spawn(async move {
+                    aggregator.start_loop(app_handle).await;
+                });
+            }
+
 
             // Spawn HTTP server (after AppState is managed)
             {
@@ -5186,6 +5348,9 @@ mod active_download_status_tests {
                 crate::failure_prediction::FailurePredictionEngine::new(
                     crate::failure_prediction::PredictionConfig::default(),
                 ),
+            )),
+            circuit_breaker_manager: Arc::new(crate::resilience::CircuitBreakerManager::new(
+                crate::resilience::CircuitBreakerConfig::default(),
             )),
         }
     }

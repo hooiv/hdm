@@ -24,8 +24,11 @@ const loadSpiderModal = () => import("./components/SpiderModal");
 const loadCrashRecoveryModal = () => import("./components/CrashRecoveryModal");
 const loadStreamDetectorModal = () => import("./components/StreamDetectorModal");
 const loadNetworkDiagnosticsModal = () => import("./components/NetworkDiagnosticsModal");
+const loadSpeedAccelerationModal = () => import("./components/SpeedAccelerationModal");
 const loadMediaProcessingModal = () => import("./components/MediaProcessingModal");
 const loadIpfsDownloadModal = () => import("./components/IpfsDownloadModal");
+const loadCircuitBreakerDashboard = () => import("./components/CircuitBreakerDashboard");
+const loadQueueOrchestratorDashboard = () => import("./components/QueueOrchestratorDashboard");
 const loadAddTorrentModal = () => import("./components/AddTorrentModal");
 const loadTorrentList = () => import("./components/TorrentList");
 const loadFeedsTab = () => import("./components/FeedsTab");
@@ -35,6 +38,8 @@ const loadQueueManager = () => import("./components/QueueManager");
 const loadSearchTab = () => import("./components/SearchTab");
 const loadPluginEditor = () => import("./components/PluginEditor");
 const loadDownloadGroupTree = () => import("./components/DownloadGroupTree");
+const loadPreFlightAnalysisDashboard = () => import("./components/PreFlightAnalysisDashboard");
+const loadDownloadHistoryAnalytics = () => import("./components/DownloadHistoryAnalytics");
 
 const resolveAddDownloadModal = (module: Awaited<ReturnType<typeof loadAddDownloadModal>>) => module.AddDownloadModal;
 const resolveSettingsPage = (module: Awaited<ReturnType<typeof loadSettingsPage>>) => module.SettingsPage;
@@ -44,8 +49,11 @@ const resolveSpiderModal = (module: Awaited<ReturnType<typeof loadSpiderModal>>)
 const resolveCrashRecoveryModal = (module: Awaited<ReturnType<typeof loadCrashRecoveryModal>>) => module.CrashRecoveryModal;
 const resolveStreamDetectorModal = (module: Awaited<ReturnType<typeof loadStreamDetectorModal>>) => module.StreamDetectorModal;
 const resolveNetworkDiagnosticsModal = (module: Awaited<ReturnType<typeof loadNetworkDiagnosticsModal>>) => module.NetworkDiagnosticsModal;
+const resolveSpeedAccelerationModal = (module: Awaited<ReturnType<typeof loadSpeedAccelerationModal>>) => module.SpeedAccelerationModal;
 const resolveMediaProcessingModal = (module: Awaited<ReturnType<typeof loadMediaProcessingModal>>) => module.MediaProcessingModal;
 const resolveIpfsDownloadModal = (module: Awaited<ReturnType<typeof loadIpfsDownloadModal>>) => module.IpfsDownloadModal;
+const resolveCircuitBreakerDashboard = (module: Awaited<ReturnType<typeof loadCircuitBreakerDashboard>>) => module.CircuitBreakerDashboard;
+const resolveQueueOrchestratorDashboard = (module: Awaited<ReturnType<typeof loadQueueOrchestratorDashboard>>) => module.default;
 const resolveAddTorrentModal = (module: Awaited<ReturnType<typeof loadAddTorrentModal>>) => module.AddTorrentModal;
 const resolveTorrentList = (module: Awaited<ReturnType<typeof loadTorrentList>>) => module.TorrentList;
 const resolveFeedsTab = (module: Awaited<ReturnType<typeof loadFeedsTab>>) => module.FeedsTab;
@@ -54,6 +62,9 @@ const resolveActivityTab = (module: Awaited<ReturnType<typeof loadActivityTab>>)
 const resolveQueueManager = (module: Awaited<ReturnType<typeof loadQueueManager>>) => module.QueueManager;
 const resolveSearchTab = (module: Awaited<ReturnType<typeof loadSearchTab>>) => module.SearchTab;
 const resolvePluginEditor = (module: Awaited<ReturnType<typeof loadPluginEditor>>) => module.default;
+const resolveDownloadGroupTree = (module: Awaited<ReturnType<typeof loadDownloadGroupTree>>) => module.DownloadGroupTree;
+const resolvePreFlightAnalysisDashboard = (module: Awaited<ReturnType<typeof loadPreFlightAnalysisDashboard>>) => module.default;
+const resolveDownloadHistoryAnalytics = (module: Awaited<ReturnType<typeof loadDownloadHistoryAnalytics>>) => module.default;
 
 import { GlobalTelemetry } from './components/GlobalTelemetry';
 
@@ -82,6 +93,9 @@ const tabChunkLoaders = {
   activity: loadActivityTab,
   queue: loadQueueManager,
   groups: loadDownloadGroupTree,
+  orchestrator: loadQueueOrchestratorDashboard,
+  preflight: loadPreFlightAnalysisDashboard,
+  analytics: loadDownloadHistoryAnalytics,
 } as const;
 
 type ActiveTab = 'downloads' | keyof typeof tabChunkLoaders;
@@ -140,8 +154,10 @@ function App() {
   const [isCrashRecoveryOpen, setIsCrashRecoveryOpen] = useState(false);
   const [isStreamDetectorOpen, setIsStreamDetectorOpen] = useState(false);
   const [isNetworkDiagOpen, setIsNetworkDiagOpen] = useState(false);
+  const [isSpeedAccelerationOpen, setIsSpeedAccelerationOpen] = useState(false);
   const [isMediaProcessingOpen, setIsMediaProcessingOpen] = useState(false);
   const [isIpfsOpen, setIsIpfsOpen] = useState(false);
+  const [isCircuitBreakerOpen, setIsCircuitBreakerOpen] = useState(false);
   const [isTorrentModalOpen, setIsTorrentModalOpen] = useState(false);
   const [clipboardData, setClipboardData] = useState<ClipboardData | null>(null);
   const [batchLinks, setBatchLinks] = useState<BatchLink[]>([]);
@@ -997,8 +1013,10 @@ function App() {
         onCrashRecoveryClick={() => setIsCrashRecoveryOpen(true)}
         onStreamDetectorClick={() => setIsStreamDetectorOpen(true)}
         onNetworkDiagClick={() => setIsNetworkDiagOpen(true)}
+        onSpeedAccelerationClick={() => setIsSpeedAccelerationOpen(true)}
         onMediaProcessingClick={() => setIsMediaProcessingOpen(true)}
         onIpfsClick={() => setIsIpfsOpen(true)}
+        onCircuitBreakerClick={() => setIsCircuitBreakerOpen(true)}
         onSettingsClick={() => setIsSettingsOpen(true)}
         onOverlayClick={toggleOverlay}
         stats={stats}
@@ -1256,6 +1274,16 @@ function App() {
           })}
         />
       )}
+      {isSpeedAccelerationOpen && (
+        <RecoverableLazy
+          loader={loadSpeedAccelerationModal}
+          resolve={resolveSpeedAccelerationModal}
+          componentProps={{ isOpen: isSpeedAccelerationOpen, onClose: () => setIsSpeedAccelerationOpen(false) }}
+          loadingFallback={null}
+          failureTitle="Speed Acceleration Engine unavailable"
+          failureMessage="HyperStream couldn’t load the Speed Acceleration Engine. Please try again."
+        />
+      )}
       {isNetworkDiagOpen && (
         <RecoverableLazy
           loader={loadNetworkDiagnosticsModal}
@@ -1298,6 +1326,22 @@ function App() {
             title: "IPFS download unavailable",
             message: "HyperStream couldn’t load the IPFS modal. Retry to recover decentralized download setup.",
             onClose: () => setIsIpfsOpen(false),
+          })}
+        />
+      )}
+
+      {isCircuitBreakerOpen && (
+        <RecoverableLazy
+          loader={loadCircuitBreakerDashboard}
+          resolve={resolveCircuitBreakerDashboard}
+          componentProps={{ isOpen: isCircuitBreakerOpen, onClose: () => setIsCircuitBreakerOpen(false) }}
+          loadingFallback={null}
+          failureTitle="Circuit breaker dashboard unavailable"
+          failureMessage="HyperStream couldn't load the circuit breaker dashboard. Retry to view mirror health status."
+          renderFailure={renderModalLoadFailure({
+            title: "Circuit breaker dashboard unavailable",
+            message: "HyperStream couldn't load the circuit breaker dashboard. Retry to view mirror health status.",
+            onClose: () => setIsCircuitBreakerOpen(false),
           })}
         />
       )}
